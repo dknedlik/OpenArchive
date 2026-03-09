@@ -1,7 +1,7 @@
 id: "04"
 title: Build text-only ChatGPT export parser
 assignee: david
-status: todo
+status: done
 type: feature
 priority: high
 planned_order: 3

@@ -6,6 +6,7 @@ pub type ConfigResult<T> = std::result::Result<T, ConfigError>;
 pub type DbResult<T> = std::result::Result<T, DbError>;
 pub type MigrationsResult<T> = std::result::Result<T, MigrationsError>;
 pub type StorageResult<T> = std::result::Result<T, StorageError>;
+pub type ParserResult<T> = std::result::Result<T, ParserError>;
 
 #[derive(Debug, Error)]
 pub enum OpenArchiveError {
@@ -21,6 +22,9 @@ pub enum OpenArchiveError {
     #[error(transparent)]
     Storage(#[from] StorageError),
 
+    #[error(transparent)]
+    Parser(#[from] ParserError),
+
     #[error("internal invariant violated: {0}")]
     Invariant(String),
 }
@@ -33,9 +37,7 @@ pub enum ConfigError {
     #[error("{key} is required when WALLET_DIR is not provided")]
     MissingEnvWithDependency { key: &'static str },
 
-    #[error(
-        "set DB_PASSWORD or one of DB_DEV_PASSWORD / DB_PROD_PASSWORD / DB_ADMIN_PASSWORD"
-    )]
+    #[error("set DB_PASSWORD or one of DB_DEV_PASSWORD / DB_PROD_PASSWORD / DB_ADMIN_PASSWORD")]
     MissingPassword,
 }
 
@@ -48,7 +50,10 @@ pub enum DbError {
     InvalidDurationEnv { key: &'static str, value: String },
 
     #[error("failed to configure Oracle pool ping interval")]
-    ConfigurePoolPingInterval { #[source] source: oracle::Error },
+    ConfigurePoolPingInterval {
+        #[source]
+        source: oracle::Error,
+    },
 
     #[error("failed to create Oracle pool for alias {tns_alias}")]
     CreatePool {
@@ -65,7 +70,10 @@ pub enum DbError {
     },
 
     #[error("failed to set Oracle call timeout")]
-    SetCallTimeout { #[source] source: oracle::Error },
+    SetCallTimeout {
+        #[source]
+        source: oracle::Error,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -80,25 +88,46 @@ pub enum MigrationsError {
     ChecksumMismatch { version: String, filename: String },
 
     #[error("failed to ensure oa_schema_migration exists")]
-    EnsureSchemaMigrationTable { #[source] source: oracle::Error },
+    EnsureSchemaMigrationTable {
+        #[source]
+        source: oracle::Error,
+    },
 
     #[error("failed to commit oa_schema_migration bootstrap")]
-    CommitSchemaMigrationBootstrap { #[source] source: oracle::Error },
+    CommitSchemaMigrationBootstrap {
+        #[source]
+        source: oracle::Error,
+    },
 
     #[error("failed to reset open_archive schema objects")]
-    ResetSchemaObjects { #[source] source: oracle::Error },
+    ResetSchemaObjects {
+        #[source]
+        source: oracle::Error,
+    },
 
     #[error("failed to load applied migrations")]
-    LoadAppliedMigrations { #[source] source: oracle::Error },
+    LoadAppliedMigrations {
+        #[source]
+        source: oracle::Error,
+    },
 
     #[error("failed to read migration history row")]
-    ReadMigrationHistoryRow { #[source] source: oracle::Error },
+    ReadMigrationHistoryRow {
+        #[source]
+        source: oracle::Error,
+    },
 
     #[error("failed to read migration version")]
-    ReadMigrationVersion { #[source] source: oracle::Error },
+    ReadMigrationVersion {
+        #[source]
+        source: oracle::Error,
+    },
 
     #[error("failed to read migration checksum")]
-    ReadMigrationChecksum { #[source] source: oracle::Error },
+    ReadMigrationChecksum {
+        #[source]
+        source: oracle::Error,
+    },
 
     #[error("failed to read migration directory {path}")]
     ReadMigrationsDir {
@@ -108,7 +137,10 @@ pub enum MigrationsError {
     },
 
     #[error("failed to read migration entry")]
-    ReadMigrationEntry { #[source] source: std::io::Error },
+    ReadMigrationEntry {
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("failed to read migration {path}")]
     ReadMigrationFile {
@@ -246,6 +278,45 @@ pub enum StorageError {
         #[source]
         source: Box<StorageError>,
     },
+}
+
+#[derive(Debug, Error)]
+pub enum ParserError {
+    #[error("invalid JSON: {detail}")]
+    InvalidJson { detail: String },
+
+    #[error("export contains no conversations")]
+    EmptyExport,
+
+    #[error("conversation {conversation_id} has an empty mapping")]
+    EmptyConversation { conversation_id: String },
+
+    #[error("conversation {conversation_id} has no root node")]
+    NoRoot { conversation_id: String },
+
+    #[error("conversation {conversation_id} references missing current_node {node_id}")]
+    MissingCurrentNode {
+        conversation_id: String,
+        node_id: String,
+    },
+
+    #[error("conversation {conversation_id}: node {node_id} references a missing parent")]
+    BrokenParentLink {
+        conversation_id: String,
+        node_id: String,
+    },
+
+    #[error(
+        "conversation {conversation_id}: node {parent_id} references missing child {child_id}"
+    )]
+    MissingChild {
+        conversation_id: String,
+        parent_id: String,
+        child_id: String,
+    },
+
+    #[error("conversation {conversation_id} has a cyclic node graph")]
+    CyclicTree { conversation_id: String },
 }
 
 pub fn preview_sql_statement(statement: &str) -> String {

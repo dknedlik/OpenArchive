@@ -1,4 +1,5 @@
-/// Domain vocabulary enums and "New" structs for the slice-one write path.
+/// Domain-shaped storage write structs and storage-owned enums for the slice-one
+/// write path.
 ///
 /// These types are domain-shaped. They do not expose Oracle types or SQL concerns.
 ///
@@ -8,28 +9,7 @@
 /// format and timezone are validated at parse time rather than at DB binding.
 /// Server-assigned timestamps (created_at, captured_at, etc.) are omitted —
 /// the DB sets them via DEFAULT SYSTIMESTAMP.
-
-use chrono::{DateTime, SecondsFormat, Utc};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceTimestamp(String);
-
-impl SourceTimestamp {
-    pub fn parse_rfc3339(input: &str) -> Result<Self, chrono::ParseError> {
-        let parsed = DateTime::parse_from_rfc3339(input)?;
-        Ok(Self::from(parsed.with_timezone(&Utc)))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<DateTime<Utc>> for SourceTimestamp {
-    fn from(value: DateTime<Utc>) -> Self {
-        Self(value.to_rfc3339_opts(SecondsFormat::Nanos, false))
-    }
-}
+use crate::domain::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -138,27 +118,6 @@ impl EnrichmentStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParticipantRole {
-    User,
-    Assistant,
-    System,
-    Tool,
-    Unknown,
-}
-
-impl ParticipantRole {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ParticipantRole::User => "user",
-            ParticipantRole::Assistant => "assistant",
-            ParticipantRole::System => "system",
-            ParticipantRole::Tool => "tool",
-            ParticipantRole::Unknown => "unknown",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegmentType {
     Message,
     MessageWindow,
@@ -169,23 +128,6 @@ impl SegmentType {
         match self {
             SegmentType::Message => "message",
             SegmentType::MessageWindow => "message_window",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VisibilityStatus {
-    Visible,
-    Hidden,
-    SkippedUnsupported,
-}
-
-impl VisibilityStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            VisibilityStatus::Visible => "visible",
-            VisibilityStatus::Hidden => "hidden",
-            VisibilityStatus::SkippedUnsupported => "skipped_unsupported",
         }
     }
 }
@@ -346,15 +288,4 @@ pub struct NewEnrichmentJob {
     pub priority_no: i32,
     /// Self-contained JSON payload for future out-of-process execution. NOT NULL in DDL.
     pub payload_json: String,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::SourceTimestamp;
-
-    #[test]
-    fn source_timestamp_normalizes_to_utc_rfc3339() {
-        let ts = SourceTimestamp::parse_rfc3339("2026-03-08T22:27:12.3055-05:00").unwrap();
-        assert_eq!(ts.as_str(), "2026-03-09T03:27:12.305500000+00:00");
-    }
 }
