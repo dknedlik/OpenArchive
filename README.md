@@ -55,6 +55,20 @@ question from the earlier spike.
 The minimal Rust scaffold in this repo is just a placeholder so the project is
 not empty. It is not a commitment to the final service structure.
 
+The repository is also mirrored to OCI DevOps source control for backup:
+
+- DevOps project: `oa-devops`
+- hosted repository: `open-archive`
+- HTTPS remote URL:
+  `https://devops.scmservice.us-phoenix-1.oci.oraclecloud.com/namespaces/axrp48zlutag/projects/oa-devops/repositories/open-archive`
+
+If you clone or reattach this workspace later, the expected backup remote is:
+
+```bash
+git remote add oci https://devops.scmservice.us-phoenix-1.oci.oraclecloud.com/namespaces/axrp48zlutag/projects/oa-devops/repositories/open-archive
+git push -u oci main
+```
+
 Set the Oracle-related environment explicitly only if and when you revisit ADB
 connectivity:
 
