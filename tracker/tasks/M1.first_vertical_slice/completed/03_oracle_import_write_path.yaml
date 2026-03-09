@@ -1,7 +1,7 @@
 id: "03"
 title: Implement Oracle import write path
 assignee: david
-status: todo
+status: done
 type: feature
 priority: high
 planned_order: 2

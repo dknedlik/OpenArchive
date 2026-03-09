@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::env;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DbConfig {
     pub wallet_dir: PathBuf,
     pub tns_alias: String,

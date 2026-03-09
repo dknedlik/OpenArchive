@@ -23,12 +23,14 @@
 pub mod artifact_store;
 pub mod import_store;
 pub mod job_store;
+pub mod oracle;
 pub mod segment_store;
 pub mod types;
 
 pub use artifact_store::ArtifactStore;
 pub use import_store::{ImportPayloadStore, ImportStore};
 pub use job_store::EnrichmentJobStore;
+pub use oracle::OracleImportWriteStore;
 pub use segment_store::SegmentStore;
 pub use types::{
     ArtifactClass, ArtifactStatus, EnrichmentStatus, ImportStatus, JobStatus, JobType,
@@ -80,7 +82,9 @@ pub struct WriteImportSet {
 /// re-querying the database.
 pub struct ImportWriteResult {
     pub import_id: String,
+    pub import_status: ImportStatus,
     pub artifact_ids: Vec<String>,
+    pub failed_artifact_ids: Vec<String>,
     pub segments_written: usize,
 }
 

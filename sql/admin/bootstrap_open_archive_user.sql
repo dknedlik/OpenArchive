@@ -3,7 +3,8 @@ set verify off
 set serveroutput on
 
 declare
-  v_open_archive_password varchar2(512) := :open_archive_password;
+  v_schema_username varchar2(128) := :schema_username;
+  v_schema_password varchar2(512) := :schema_password;
 
   function esc(p varchar2) return varchar2 is
   begin
@@ -26,18 +27,21 @@ declare
     end if;
   end;
 begin
-  ensure_user('OPEN_ARCHIVE_USER', v_open_archive_password);
+  ensure_user(v_schema_username, v_schema_password);
 end;
 /
 
-grant create session to open_archive_user;
-grant create table to open_archive_user;
-grant create view to open_archive_user;
-grant create sequence to open_archive_user;
-grant create procedure to open_archive_user;
-grant create trigger to open_archive_user;
-alter user open_archive_user quota unlimited on data;
+begin
+  execute immediate 'grant create session to ' || lower(:schema_username);
+  execute immediate 'grant create table to ' || lower(:schema_username);
+  execute immediate 'grant create view to ' || lower(:schema_username);
+  execute immediate 'grant create sequence to ' || lower(:schema_username);
+  execute immediate 'grant create procedure to ' || lower(:schema_username);
+  execute immediate 'grant create trigger to ' || lower(:schema_username);
+  execute immediate 'alter user ' || lower(:schema_username) || ' quota unlimited on data';
+end;
+/
 
 prompt
 prompt Done. Verify:
-prompt   select username, account_status from all_users where username in ('OPEN_ARCHIVE_USER');
+prompt   select username, account_status from all_users where username = upper('your_schema_name');

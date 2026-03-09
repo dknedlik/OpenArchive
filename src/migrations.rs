@@ -52,6 +52,11 @@ pub fn migrate(config: &DbConfig) -> Result<()> {
     Ok(())
 }
 
+pub fn reset(config: &DbConfig) -> Result<()> {
+    let conn = db::connect(config)?;
+    reset_schema_objects(&conn)
+}
+
 fn pending_migrations(conn: &Connection) -> Result<Vec<Migration>> {
     let applied = load_applied_migrations(conn)?;
     let mut pending = Vec::new();
@@ -120,6 +125,26 @@ end;
         .context("failed to ensure oa_schema_migration exists")?;
     conn.commit()
         .context("failed to commit oa_schema_migration bootstrap")?;
+    Ok(())
+}
+
+fn reset_schema_objects(conn: &Connection) -> Result<()> {
+    let plsql = r#"
+declare
+begin
+    for rec in (
+        select table_name
+        from user_tables
+        where table_name like 'OA\_%' escape '\'
+        order by table_name desc
+    ) loop
+        execute immediate 'drop table "' || rec.table_name || '" cascade constraints purge';
+    end loop;
+end;
+"#;
+
+    conn.execute(plsql, &[])
+        .context("failed to reset open_archive schema objects")?;
     Ok(())
 }
 

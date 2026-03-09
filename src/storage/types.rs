@@ -4,12 +4,32 @@
 ///
 /// Nullability follows the live DDL in V001. Fields that are NOT NULL in the
 /// schema are required (`String`, `i64`, etc.); nullable columns become
-/// `Option<_>`. Source timestamps use `Option<chrono::DateTime<Utc>>` so
+/// `Option<_>`. Source timestamps use `Option<SourceTimestamp>` so RFC3339
 /// format and timezone are validated at parse time rather than at DB binding.
 /// Server-assigned timestamps (created_at, captured_at, etc.) are omitted —
 /// the DB sets them via DEFAULT SYSTIMESTAMP.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceTimestamp(String);
+
+impl SourceTimestamp {
+    pub fn parse_rfc3339(input: &str) -> Result<Self, chrono::ParseError> {
+        let parsed = DateTime::parse_from_rfc3339(input)?;
+        Ok(Self::from(parsed.with_timezone(&Utc)))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<DateTime<Utc>> for SourceTimestamp {
+    fn from(value: DateTime<Utc>) -> Self {
+        Self(value.to_rfc3339_opts(SecondsFormat::Nanos, false))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -255,11 +275,11 @@ pub struct NewArtifact {
     pub source_conversation_hash: String,
     pub title: Option<String>,
     /// Timestamp from the source export, nullable in DDL.
-    pub created_at_source: Option<DateTime<Utc>>,
+    pub created_at_source: Option<SourceTimestamp>,
     /// Nullable in DDL.
-    pub started_at: Option<DateTime<Utc>>,
+    pub started_at: Option<SourceTimestamp>,
     /// Nullable in DDL. Must be >= started_at when both are present (DDL CHECK).
-    pub ended_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<SourceTimestamp>,
     pub primary_language: Option<String>,
     /// Identifies the hash algorithm and normalization basis. NOT NULL.
     pub content_hash_version: String,
@@ -302,7 +322,7 @@ pub struct NewSegment {
     /// Zero-based ordering. Unique per (artifact_id, sequence_no, segment_type).
     pub sequence_no: i64,
     /// Timestamp from the source export, nullable in DDL.
-    pub created_at_source: Option<DateTime<Utc>>,
+    pub created_at_source: Option<SourceTimestamp>,
     pub text_content: String,
     pub text_content_hash: String,
     /// JSON locator, nullable in DDL; must be valid JSON when present (DDL CHECK).
@@ -326,4 +346,15 @@ pub struct NewEnrichmentJob {
     pub priority_no: i32,
     /// Self-contained JSON payload for future out-of-process execution. NOT NULL in DDL.
     pub payload_json: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SourceTimestamp;
+
+    #[test]
+    fn source_timestamp_normalizes_to_utc_rfc3339() {
+        let ts = SourceTimestamp::parse_rfc3339("2026-03-08T22:27:12.3055-05:00").unwrap();
+        assert_eq!(ts.as_str(), "2026-03-09T03:27:12.305500000+00:00");
+    }
 }

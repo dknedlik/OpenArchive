@@ -1,0 +1,200 @@
+pub mod artifact;
+pub mod import;
+pub mod job;
+pub mod segment;
+
+use anyhow::{anyhow, Context, Result};
+
+use crate::config::DbConfig;
+use crate::db;
+use crate::storage::types::ImportStatus;
+use crate::storage::{ImportWriteResult, ImportWriteStore, StorageTx, WriteImportSet};
+
+// ---------------------------------------------------------------------------
+// Transaction handle
+// ---------------------------------------------------------------------------
+
+pub struct OracleStorageTx {
+    conn: oracle::Connection,
+}
+
+impl StorageTx for OracleStorageTx {
+    fn commit(&mut self) -> Result<()> {
+        self.conn.commit().map_err(|e| anyhow!(e))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Store struct
+// ---------------------------------------------------------------------------
+
+pub struct OracleImportWriteStore {
+    config: DbConfig,
+}
+
+impl OracleImportWriteStore {
+    pub fn new(config: DbConfig) -> Self {
+        Self { config }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ImportWriteStore implementation
+// ---------------------------------------------------------------------------
+
+impl ImportWriteStore for OracleImportWriteStore {
+    fn write_import(&self, import_set: WriteImportSet) -> Result<ImportWriteResult> {
+        let conn = db::connect(&self.config)?;
+        let mut tx = OracleStorageTx { conn };
+
+        // ------------------------------------------------------------------
+        // Phase 1: payload + import header
+        // ------------------------------------------------------------------
+        if let Err(e) = import::insert_payload(&tx.conn, &import_set.payload) {
+            let _ = tx.conn.rollback();
+            return Err(e);
+        }
+        if let Err(e) = import::insert_import(&tx.conn, &import_set.import) {
+            let _ = tx.conn.rollback();
+            return Err(e);
+        }
+        tx.commit()?;
+
+        // ------------------------------------------------------------------
+        // Phase 2: artifact sets
+        // ------------------------------------------------------------------
+        let import_id = import_set.import.import_id.clone();
+        let mut artifact_ids: Vec<String> = Vec::with_capacity(import_set.artifact_sets.len());
+        let mut failed_artifact_ids: Vec<String> =
+            Vec::with_capacity(import_set.artifact_sets.len());
+        let mut segments_written: usize = 0;
+        let mut count_imported: i64 = 0;
+        let mut count_failed: i64 = 0;
+        let mut artifact_errors: Vec<String> = Vec::new();
+
+        for artifact_set in import_set.artifact_sets {
+            let artifact_id = artifact_set.artifact.artifact_id.clone();
+
+            let phase2_result: Result<usize> = (|| {
+                artifact::insert_artifact(&tx.conn, &artifact_set.artifact)?;
+
+                for participant in &artifact_set.participants {
+                    artifact::insert_participant(&tx.conn, participant)?;
+                }
+
+                let mut seg_count = 0usize;
+                for seg in &artifact_set.segments {
+                    segment::insert_segment(&tx.conn, seg)?;
+                    seg_count += 1;
+                }
+
+                job::insert_job(&tx.conn, &artifact_set.job)?;
+
+                Ok(seg_count)
+            })();
+
+            match phase2_result {
+                Ok(seg_count) => {
+                    tx.commit()?;
+                    artifact_ids.push(artifact_id);
+                    segments_written += seg_count;
+                    count_imported += 1;
+                }
+                Err(e) => {
+                    tx.conn
+                        .rollback()
+                        .map_err(|rollback_err| anyhow!(rollback_err))
+                        .with_context(|| {
+                            format!(
+                                "artifact set {} failed and rollback also failed",
+                                artifact_id
+                            )
+                        })?;
+                    failed_artifact_ids.push(artifact_id.clone());
+                    count_failed += 1;
+                    artifact_errors.push(format!("artifact {}: {e:#}", artifact_id));
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Phase 3: update counts + complete import
+        // ------------------------------------------------------------------
+        let import_status = if count_failed == 0 {
+            ImportStatus::Completed
+        } else if count_imported == 0 {
+            ImportStatus::Failed
+        } else {
+            ImportStatus::CompletedWithErrors
+        };
+        let error_message = if artifact_errors.is_empty() {
+            None
+        } else {
+            Some(artifact_errors.join(" | "))
+        };
+
+        if let Err(e) =
+            finalize_import(&mut tx, &import_id, count_imported, count_failed, import_status, error_message.as_deref())
+        {
+            let _ = tx.conn.rollback();
+            let recovery_message = format!("phase 3 failure after committed artifacts: {e:#}");
+            recover_import_finalization(
+                &self.config,
+                &import_id,
+                count_imported,
+                count_failed,
+                import_status,
+                Some(recovery_message.as_str()),
+            )
+            .with_context(|| format!("failed to recover import {}", import_id))?;
+            return Err(e);
+        }
+
+        Ok(ImportWriteResult {
+            import_id,
+            import_status,
+            artifact_ids,
+            failed_artifact_ids,
+            segments_written,
+        })
+    }
+}
+
+fn finalize_import(
+    tx: &mut OracleStorageTx,
+    import_id: &str,
+    count_imported: i64,
+    count_failed: i64,
+    status: ImportStatus,
+    error_message: Option<&str>,
+) -> Result<()> {
+    import::finalize_import(
+        &tx.conn,
+        import_id,
+        count_imported,
+        count_failed,
+        status,
+        error_message,
+    )?;
+    tx.commit()
+}
+
+fn recover_import_finalization(
+    config: &DbConfig,
+    import_id: &str,
+    count_imported: i64,
+    count_failed: i64,
+    status: ImportStatus,
+    error_message: Option<&str>,
+) -> Result<()> {
+    let conn = db::connect(config)?;
+    import::finalize_import(
+        &conn,
+        import_id,
+        count_imported,
+        count_failed,
+        status,
+        error_message,
+    )?;
+    conn.commit().map_err(|e| anyhow!(e))
+}

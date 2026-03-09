@@ -2,18 +2,19 @@ whenever sqlerror exit failure rollback
 set serveroutput on
 
 declare
+  v_schema_username varchar2(128) := :schema_username;
   n number;
 begin
-  select count(*) into n from all_users where username = 'OPEN_ARCHIVE_USER';
+  select count(*) into n from all_users where username = upper(v_schema_username);
   if n = 1 then
-    execute immediate 'drop user open_archive_user cascade';
-    dbms_output.put_line('Dropped user open_archive_user');
+    execute immediate 'drop user ' || lower(v_schema_username) || ' cascade';
+    dbms_output.put_line('Dropped user ' || lower(v_schema_username));
   else
-    dbms_output.put_line('User open_archive_user not present; skipping');
+    dbms_output.put_line('User ' || lower(v_schema_username) || ' not present; skipping');
   end if;
 end;
 /
 
 prompt
 prompt Done. Verify:
-prompt   select username from all_users where username in ('OPEN_ARCHIVE_USER');
+prompt   select username from all_users where username = upper('your_schema_name');

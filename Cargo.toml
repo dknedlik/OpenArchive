@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["alloc", "serde", "std"] }
 clap = { version = "4.5", features = ["derive"] }
-oracle = { version = "0.6", features = ["chrono"] }
+oracle = "0.6"
 sha2 = "0.10"

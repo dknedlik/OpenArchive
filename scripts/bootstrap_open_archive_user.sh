@@ -1,24 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -z "${OPEN_ARCHIVE_PASSWORD:-}" && -z "${OPEN_ARCHIVE_PASSWORD_SECRET_ID:-}" ]]; then
-  echo "Set OPEN_ARCHIVE_PASSWORD or OPEN_ARCHIVE_PASSWORD_SECRET_ID." >&2
+SCHEMA_USERNAME="${SCHEMA_USERNAME:-open_archive_user}"
+SCHEMA_PASSWORD_VAR_NAME="${SCHEMA_PASSWORD_VAR_NAME:-OPEN_ARCHIVE_PASSWORD}"
+SCHEMA_PASSWORD_SECRET_ID_VAR_NAME="${SCHEMA_PASSWORD_SECRET_ID_VAR_NAME:-OPEN_ARCHIVE_PASSWORD_SECRET_ID}"
+
+SCHEMA_PASSWORD="${!SCHEMA_PASSWORD_VAR_NAME:-}"
+SCHEMA_PASSWORD_SECRET_ID="${!SCHEMA_PASSWORD_SECRET_ID_VAR_NAME:-}"
+
+if [[ -z "${SCHEMA_PASSWORD}" && -z "${SCHEMA_PASSWORD_SECRET_ID}" ]]; then
+  echo "Set ${SCHEMA_PASSWORD_VAR_NAME} or ${SCHEMA_PASSWORD_SECRET_ID_VAR_NAME}." >&2
   exit 1
 fi
 
-if [[ -n "${OPEN_ARCHIVE_PASSWORD_SECRET_ID:-}" ]]; then
+if [[ -n "${SCHEMA_PASSWORD_SECRET_ID}" ]]; then
   command -v oci >/dev/null 2>&1 || { echo "Missing required command: oci" >&2; exit 1; }
   command -v base64 >/dev/null 2>&1 || { echo "Missing required command: base64" >&2; exit 1; }
-  OPEN_ARCHIVE_PASSWORD="$(
+  SCHEMA_PASSWORD="$(
     oci secrets secret-bundle get \
-      --secret-id "${OPEN_ARCHIVE_PASSWORD_SECRET_ID}" \
+      --secret-id "${SCHEMA_PASSWORD_SECRET_ID}" \
       --query 'data."secret-bundle-content".content' \
       --raw-output 2>/dev/null | base64 --decode
   )"
 fi
 
-if [[ -z "${OPEN_ARCHIVE_PASSWORD:-}" ]]; then
-  echo "Resolved OPEN_ARCHIVE_PASSWORD is empty." >&2
+if [[ -z "${SCHEMA_PASSWORD}" ]]; then
+  echo "Resolved ${SCHEMA_PASSWORD_VAR_NAME} is empty." >&2
   exit 1
 fi
 
@@ -48,7 +55,8 @@ if [[ -z "${ADMIN_PASSWORD}" ]]; then
   exit 1
 fi
 
-OPEN_ARCHIVE_PASSWORD_SQL="$(printf "%s" "${OPEN_ARCHIVE_PASSWORD}" | sed "s/'/''/g")"
+SCHEMA_USERNAME_SQL="$(printf "%s" "${SCHEMA_USERNAME}" | sed "s/'/''/g")"
+SCHEMA_PASSWORD_SQL="$(printf "%s" "${SCHEMA_PASSWORD}" | sed "s/'/''/g")"
 
 set +x
 
@@ -56,8 +64,10 @@ sql -s /nolog <<SQL
 whenever sqlerror exit failure rollback
 connect ADMIN/"${ADMIN_PASSWORD}"@${TNS_ALIAS}
 set define off
-var open_archive_password varchar2(512)
-exec :open_archive_password := '${OPEN_ARCHIVE_PASSWORD_SQL}';
+var schema_username varchar2(128)
+var schema_password varchar2(512)
+exec :schema_username := '${SCHEMA_USERNAME_SQL}';
+exec :schema_password := '${SCHEMA_PASSWORD_SQL}';
 set define on
 @${SQL_PATH}
 exit

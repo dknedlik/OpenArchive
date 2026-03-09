@@ -4,9 +4,10 @@ This project uses a CLI-first bootstrap path for Oracle ADB instead of Terraform
 
 The goal is to keep one-time database setup separate from application runtime:
 
-- OCI CLI creates or retrieves the Vault secret that holds the schema password
-- SQLcl, connected as `ADMIN`, creates the `open_archive_user` schema user
+- OCI CLI creates or retrieves Vault secrets that hold schema passwords
+- SQLcl, connected as `ADMIN`, creates schema users
 - the Rust CLI applies application migrations as `open_archive_user`
+- ADB integration tests run against `open_archive_test_user`
 
 ## Prerequisites
 
@@ -70,12 +71,13 @@ export OCI_VAULT_KEY_ID="$(
 )"
 ```
 
-## 1. Create a Vault secret for `open_archive_user`
+## 1. Create Vault secrets for schema users
 
-Generate a password locally and create a secret in the current vault:
+Generate passwords locally and create secrets in the current vault:
 
 ```bash
 export OPEN_ARCHIVE_PASSWORD="$(openssl rand -base64 36 | tr -d '\n')"
+export OPEN_ARCHIVE_TEST_PASSWORD="$(openssl rand -base64 36 | tr -d '\n')"
 
 export OPEN_ARCHIVE_PASSWORD_SECRET_ID="$(
   oci vault secret create-base64 \
@@ -85,6 +87,19 @@ export OPEN_ARCHIVE_PASSWORD_SECRET_ID="$(
     --secret-name "open-archive-db-password" \
     --description "OpenArchive schema password" \
     --secret-content-content "$(printf '%s' "$OPEN_ARCHIVE_PASSWORD" | base64)" \
+    --wait-for-state ACTIVE \
+    --query 'data.id' \
+    --raw-output
+)"
+
+export OPEN_ARCHIVE_TEST_PASSWORD_SECRET_ID="$(
+  oci vault secret create-base64 \
+    --compartment-id "$OCI_COMPARTMENT_ID" \
+    --vault-id "$OCI_VAULT_ID" \
+    --key-id "$OCI_VAULT_KEY_ID" \
+    --secret-name "open-archive-test-db-password" \
+    --description "OpenArchive test schema password" \
+    --secret-content-content "$(printf '%s' "$OPEN_ARCHIVE_TEST_PASSWORD" | base64)" \
     --wait-for-state ACTIVE \
     --query 'data.id' \
     --raw-output
@@ -103,27 +118,39 @@ export OPEN_ARCHIVE_PASSWORD_SECRET_ID="$(
     --query 'data[0].id' \
     --raw-output
 )"
+
+export OPEN_ARCHIVE_TEST_PASSWORD_SECRET_ID="$(
+  oci vault secret list \
+    --compartment-id "$OCI_COMPARTMENT_ID" \
+    --vault-id "$OCI_VAULT_ID" \
+    --name "open-archive-test-db-password" \
+    --all \
+    --query 'data[0].id' \
+    --raw-output
+)"
 ```
 
-## 2. Bootstrap the schema user
+## 2. Bootstrap the schema users
 
-Create the schema user as `ADMIN` with the one-time bootstrap script:
+Create both schema users as `ADMIN` with the one-time bootstrap scripts:
 
 ```bash
 export OPEN_ARCHIVE_PASSWORD_SECRET_ID=...
+export OPEN_ARCHIVE_TEST_PASSWORD_SECRET_ID=...
 export DB_ADMIN_PASSWORD_SECRET_ID=...
 export WALLET_DIR=/Users/david/.clean-engine/wallet
 export TNS_ALIAS=cleanengine_medium
 
 /Users/david/src/open_archive/scripts/bootstrap_open_archive_user.sh
+/Users/david/src/open_archive/scripts/bootstrap_open_archive_test_user.sh
 ```
 
-This script:
+These scripts:
 
 - fetches the `ADMIN` password from Vault
-- fetches the `open_archive_user` password from Vault or `OPEN_ARCHIVE_PASSWORD`
+- fetches the schema password from Vault or an env var
 - connects to ADB via wallet-backed SQLcl
-- creates `open_archive_user` if missing
+- creates the schema user if missing
 - grants the minimal schema-owner privileges needed for slice one
 
 ## 3. Run Rust migrations as `open_archive_user`
@@ -145,18 +172,61 @@ cargo run -- migrate-check
 cargo run -- migrate
 ```
 
-## Reset
+## 4. Run integration tests as `open_archive_test_user`
 
-To remove the schema user during early iteration:
+Use the dedicated test schema for live ADB-backed integration tests. The
+integration harness now resets the `oa_*` schema objects, runs Rust migrations
+once at startup, and resets the schema again on process exit. It refuses to do
+that unless you explicitly opt in and point it at the expected test-schema
+username.
 
 ```bash
-/Users/david/src/open_archive/scripts/run_sqlcl_admin.sh \
-  /Users/david/src/open_archive/sql/admin/reset_open_archive_bootstrap.sql
+export OA_INTEGRATION_TESTS=1
+export OA_ALLOW_SCHEMA_RESET=1
+export OA_TEST_DB_USERNAME=open_archive_test_user
+export OA_TEST_SCHEMA_USERNAME=open_archive_test_user
+export OA_TEST_DB_PASSWORD="$(
+  oci secrets secret-bundle get \
+    --secret-id "$OPEN_ARCHIVE_TEST_PASSWORD_SECRET_ID" \
+    --query 'data."secret-bundle-content".content' \
+    --raw-output | base64 --decode
+)"
+export OA_TEST_TNS_ALIAS=cleanengine_medium
+export OA_TEST_WALLET_DIR=/Users/david/.clean-engine/wallet
+export TNS_ADMIN=/Users/david/.clean-engine/wallet
+export DYLD_LIBRARY_PATH="/Users/david/Downloads/instantclient_23_3:${DYLD_LIBRARY_PATH:-}"
+
+cd /Users/david/src/open_archive
+cargo test --test oracle_import_write -- --ignored --nocapture --test-threads=1
+```
+
+If you need to verify the test schema is reachable before running the tests,
+this should return `no pending migrations` when the credentials are correct:
+
+```bash
+export DB_USERNAME=open_archive_test_user
+export DB_PASSWORD="$OA_TEST_DB_PASSWORD"
+export WALLET_DIR=/Users/david/.clean-engine/wallet
+export TNS_ALIAS=cleanengine_medium
+
+cd /Users/david/src/open_archive
+cargo run -- migrate
+```
+
+## Reset
+
+To remove a schema user during early iteration:
+
+```bash
+/Users/david/src/open_archive/scripts/reset_open_archive_user.sh
+/Users/david/src/open_archive/scripts/reset_open_archive_test_user.sh
 ```
 
 ## Notes
 
 - `open_archive_user` is intentionally separate from `ADMIN`
+- `open_archive_test_user` is intentionally separate from both `ADMIN` and `open_archive_user`
 - user bootstrap is one-time database setup, not part of app startup
 - application migrations run as the schema user, not as `ADMIN`
+- live integration tests should use the test schema, not the main dev schema
 - migration SQL lives in `/Users/david/src/open_archive/sql/migrations`
