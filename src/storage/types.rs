@@ -175,6 +175,15 @@ impl JobType {
     }
 }
 
+impl JobType {
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "conversation_enrichment" => Some(Self::ConversationEnrichment),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobStatus {
     Pending,
@@ -194,6 +203,20 @@ impl JobStatus {
             JobStatus::Partial => "partial",
             JobStatus::Failed => "failed",
             JobStatus::Retryable => "retryable",
+        }
+    }
+}
+
+impl JobStatus {
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "running" => Some(Self::Running),
+            "completed" => Some(Self::Completed),
+            "partial" => Some(Self::Partial),
+            "failed" => Some(Self::Failed),
+            "retryable" => Some(Self::Retryable),
+            _ => None,
         }
     }
 }
@@ -318,4 +341,78 @@ pub struct NewEnrichmentJob {
     pub priority_no: i32,
     /// Self-contained JSON payload for future out-of-process execution. NOT NULL in DDL.
     pub payload_json: String,
+}
+
+// ---------------------------------------------------------------------------
+// Job payload contract
+// ---------------------------------------------------------------------------
+
+/// Documented contract for the `conversation_enrichment` job payload.
+///
+/// This is the exact shape stored in `oa_enrichment_job.payload_json`. The
+/// payload is self-contained: a future out-of-process worker can execute the
+/// job using only this payload, without hidden importer state.
+///
+/// ## Fields
+///
+/// * `schema_version` — `"1"` for slice one. Bump when the shape changes.
+/// * `artifact_id` — the artifact to enrich (FK to `oa_artifact`).
+/// * `import_id` — the import that created this artifact (for lineage).
+/// * `source_type` — e.g. `"chatgpt_export"`. Tells the worker which
+///   enrichment pipeline to apply.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ConversationEnrichmentPayload {
+    pub schema_version: String,
+    pub artifact_id: String,
+    pub import_id: String,
+    pub source_type: String,
+}
+
+impl ConversationEnrichmentPayload {
+    /// Build a slice-one payload with `schema_version = "1"`.
+    pub fn new_v1(artifact_id: &str, import_id: &str, source_type: SourceType) -> Self {
+        Self {
+            schema_version: "1".to_string(),
+            artifact_id: artifact_id.to_string(),
+            import_id: import_id.to_string(),
+            source_type: source_type.as_str().to_string(),
+        }
+    }
+
+    /// Serialize to a JSON string suitable for `oa_enrichment_job.payload_json`.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("ConversationEnrichmentPayload is always serializable")
+    }
+
+    /// Deserialize from the `payload_json` column.
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Worker-facing read types
+// ---------------------------------------------------------------------------
+
+/// A job that has been successfully claimed by a worker.
+///
+/// Returned by `claim_next_job`. Contains everything the worker needs to
+/// execute the job without querying additional tables.
+#[derive(Debug)]
+pub struct ClaimedJob {
+    pub job_id: String,
+    pub artifact_id: String,
+    pub job_type: JobType,
+    pub attempt_count: i32,
+    pub max_attempts: i32,
+    pub payload_json: String,
+}
+
+/// Outcome of a `mark_job_retryable` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryOutcome {
+    /// Job was marked retryable and will be re-claimable after the backoff delay.
+    Retried,
+    /// `attempt_count >= max_attempts`: job was terminally failed instead.
+    RetriesExhausted,
 }

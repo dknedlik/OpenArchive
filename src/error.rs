@@ -261,6 +261,19 @@ pub enum StorageError {
         source: oracle::Error,
     },
 
+    #[error("failed to claim next enrichment job")]
+    ClaimJob {
+        #[source]
+        source: oracle::Error,
+    },
+
+    #[error("failed to update enrichment job {job_id} status")]
+    UpdateJobStatus {
+        job_id: String,
+        #[source]
+        source: oracle::Error,
+    },
+
     #[error("failed to commit {operation}")]
     Commit {
         operation: &'static str,

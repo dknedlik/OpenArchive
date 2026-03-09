@@ -1,7 +1,7 @@
 id: "06"
-title: Persist enrichment jobs during import
+title: Define worker-ready enrichment job contract
 assignee: david
-status: todo
+status: done
 type: feature
 priority: high
 planned_order: 5
@@ -9,22 +9,34 @@ milestone: M1.first_vertical_slice
 labels: [jobs, enrichment, storage]
 depends_on: ["03", "04"]
 description: |
-  Ensure each successfully normalized conversation artifact gets an initial
-  durable enrichment job in `oa_enrichment_job` so the async pipeline can begin
-  without redesigning the import contract later.
+  Lock down the slice-one enrichment job contract so in-process workers can run
+  now without coupling execution to the importer, while keeping the same job
+  shape usable later by MQ-backed or other out-of-process executors.
 acceptance_criteria:
-  - Successful conversation imports create at least one `conversation_enrichment` job.
-  - Job payloads contain enough information for later worker execution.
-  - Job status is initialized consistently with the import contract.
+  - The `conversation_enrichment` payload schema is documented and self-contained enough for worker execution outside the importer process.
+  - Storage code exposes worker-facing lifecycle operations for claim, mark-running, complete, fail, and retryable transitions.
+  - Claim semantics are safe under concurrent workers and rely on the database as the source of truth.
+  - Job lifecycle fields (`attempt_count`, `claimed_by`, `claimed_at`, `available_at`, `last_error_message`) have explicit slice-one semantics.
+  - Integration tests cover claim/update/complete/fail/retryable flows against `oa_enrichment_job`.
 files_touched:
-  - src/
+  - src/storage/types.rs
+  - src/storage/job_store.rs
+  - src/storage/oracle/job.rs
+  - src/storage/oracle/mod.rs
+  - src/storage/mod.rs
+  - src/error.rs
+  - tests/oracle_enrichment_job.rs
 implementation_plan: |
-  - Extend the import write transaction to create job records.
-  - Define a minimal job payload shape for slice one.
-  - Keep job creation separate enough that worker execution can evolve later.
+  - Document the minimal `conversation_enrichment` payload schema and keep it independent of in-process worker implementation details.
+  - Add worker-facing storage operations against `oa_enrichment_job` that model claim and lifecycle updates explicitly.
+  - Keep the contract narrow enough that the same payload and lifecycle can later be driven by MQ-delivered work instead of DB polling.
 test_plan: |
-  - Verify job rows exist after import and reflect expected status and payload structure.
+  - Verify imported jobs match the documented payload schema and initial status contract.
+  - Add integration tests for claim/update/complete/fail/retryable transitions, including basic concurrent-claim protection.
+  - Verify a non-claiming worker cannot mutate another worker's running job.
 risks: |
-  - If the job payload is too thin, the future worker path will force schema or API churn.
+  - If lifecycle semantics remain implicit, the first in-process worker will become the accidental contract and make later MQ migration harder.
 notes: |
-  - This task only covers durable job creation, not job execution.
+  - Durable job creation already exists in the import path; this task is about making those jobs execution-ready.
+  - This task defines the contract. The bounded worker skeleton remains separate work.
+  - Claiming and lifecycle transitions are claimant-aware: update operations require the current `worker_id` and fail if ownership does not match.

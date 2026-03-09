@@ -193,6 +193,51 @@ impl ImportWriteStore for OracleImportWriteStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Enrichment job lifecycle store
+// ---------------------------------------------------------------------------
+
+use crate::storage::job_store::EnrichmentJobLifecycleStore;
+use crate::storage::types::{ClaimedJob, RetryOutcome};
+
+pub struct OracleEnrichmentJobStore {
+    config: DbConfig,
+}
+
+impl OracleEnrichmentJobStore {
+    pub fn new(config: DbConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl EnrichmentJobLifecycleStore for OracleEnrichmentJobStore {
+    fn claim_next_job(&self, worker_id: &str) -> StorageResult<Option<ClaimedJob>> {
+        let conn = db::connect(&self.config)?;
+        job::claim_next_job(&conn, worker_id)
+    }
+
+    fn complete_job(&self, worker_id: &str, job_id: &str) -> StorageResult<()> {
+        let conn = db::connect(&self.config)?;
+        job::complete_job(&conn, worker_id, job_id)
+    }
+
+    fn fail_job(&self, worker_id: &str, job_id: &str, error_message: &str) -> StorageResult<()> {
+        let conn = db::connect(&self.config)?;
+        job::fail_job(&conn, worker_id, job_id, error_message)
+    }
+
+    fn mark_job_retryable(
+        &self,
+        worker_id: &str,
+        job_id: &str,
+        error_message: &str,
+        retry_after_seconds: i64,
+    ) -> StorageResult<RetryOutcome> {
+        let conn = db::connect(&self.config)?;
+        job::mark_job_retryable(&conn, worker_id, job_id, error_message, retry_after_seconds)
+    }
+}
+
 fn finalize_import(
     tx: &mut OracleStorageTx,
     import_id: &str,
