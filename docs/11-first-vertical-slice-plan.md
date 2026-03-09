@@ -46,9 +46,9 @@ one, but only one concrete backend in slice one:
 
 - Add a small HTTP API with two endpoints:
   - `POST /imports/chatgpt`
-    - accepts one ChatGPT export payload or file upload
+    - for slice one, accepts a raw `conversations.json` request body
     - persists raw/canonical data, creates enrichment jobs, and returns import
-      id, artifact ids created, import status, and enrichment status
+      id, import status, and per-artifact enrichment status
   - `GET /artifacts`
     - returns a minimal list of imported conversation artifacts with id, title,
       source type, created/captured timestamps, and enrichment status
@@ -85,6 +85,7 @@ one, but only one concrete backend in slice one:
   connection pools
 - Do not spawn ad hoc threads per request or per job; use fixed-size worker
   pools
+- Use a synchronous HTTP server with explicit request-worker pool sizing
 - Keep long-running enrichment and future hydration work out of request
   handlers
 - Use the database as the durable source of truth for stage transitions, job
@@ -102,6 +103,12 @@ Recommended slice-one worker classes:
 
 These classes may share one binary at first, but their concurrency limits
 should remain independently configurable.
+
+Initial runtime choice for slice one:
+
+- use `tiny_http` for the blocking HTTP surface
+- keep request handlers synchronous through canonical import persistence
+- do not add an async runtime solely to front blocking Oracle access
 
 ### Brain-layer scope for slice one
 
@@ -195,6 +202,14 @@ should remain independently configurable.
 - Do not perform remote model calls inline in the request path
 - Keep worker concurrency conservative by default on small OCI instances and
   expand only with measurement
+
+Initial `POST /imports/chatgpt` success response shape:
+
+- `import_id`
+- `import_status`
+- `artifacts`: array of
+  - `artifact_id`
+  - `enrichment_status`
 
 ### Enrichment failure handling
 

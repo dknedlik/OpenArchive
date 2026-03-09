@@ -7,7 +7,10 @@ use crate::config::DbConfig;
 use crate::db;
 use crate::error::{StorageError, StorageResult};
 use crate::storage::types::ImportStatus;
-use crate::storage::{ImportWriteResult, ImportWriteStore, StorageTx, WriteImportSet};
+use crate::storage::{
+    ArtifactIngestResult, ImportWriteResult, ImportWriteStore, ImportedArtifact, StorageTx,
+    WriteImportSet,
+};
 
 // ---------------------------------------------------------------------------
 // Transaction handle
@@ -45,14 +48,18 @@ impl OracleImportWriteStore {
 // ---------------------------------------------------------------------------
 
 impl ImportWriteStore for OracleImportWriteStore {
-    fn write_import(&self, import_set: WriteImportSet) -> StorageResult<ImportWriteResult> {
+    fn write_import(&self, mut import_set: WriteImportSet) -> StorageResult<ImportWriteResult> {
         let conn = db::connect(&self.config)?;
         let mut tx = OracleStorageTx { conn };
 
         // ------------------------------------------------------------------
         // Phase 1: payload + import header
         // ------------------------------------------------------------------
-        if let Err(e) = import::insert_payload(&tx.conn, &import_set.payload) {
+        if let Some(existing_payload_id) =
+            import::find_payload_id_by_sha256(&tx.conn, &import_set.payload.payload_sha256)?
+        {
+            import_set.import.payload_id = existing_payload_id;
+        } else if let Err(e) = import::insert_payload(&tx.conn, &import_set.payload) {
             let _ = tx.conn.rollback();
             return Err(e);
         }
@@ -66,7 +73,7 @@ impl ImportWriteStore for OracleImportWriteStore {
         // Phase 2: artifact sets
         // ------------------------------------------------------------------
         let import_id = import_set.import.import_id.clone();
-        let mut artifact_ids: Vec<String> = Vec::with_capacity(import_set.artifact_sets.len());
+        let mut artifacts: Vec<ImportedArtifact> = Vec::with_capacity(import_set.artifact_sets.len());
         let mut failed_artifact_ids: Vec<String> =
             Vec::with_capacity(import_set.artifact_sets.len());
         let mut segments_written: usize = 0;
@@ -76,6 +83,21 @@ impl ImportWriteStore for OracleImportWriteStore {
 
         for artifact_set in import_set.artifact_sets {
             let artifact_id = artifact_set.artifact.artifact_id.clone();
+            if let Some((existing_artifact_id, enrichment_status)) =
+                artifact::find_artifact_by_source_hash(
+                    &tx.conn,
+                    artifact_set.artifact.source_type,
+                    &artifact_set.artifact.content_hash_version,
+                    &artifact_set.artifact.source_conversation_hash,
+                )?
+            {
+                artifacts.push(ImportedArtifact {
+                    artifact_id: existing_artifact_id,
+                    enrichment_status,
+                    ingest_result: ArtifactIngestResult::AlreadyExists,
+                });
+                continue;
+            }
 
             let phase2_result: StorageResult<usize> = (|| {
                 artifact::insert_artifact(&tx.conn, &artifact_set.artifact)?;
@@ -98,7 +120,11 @@ impl ImportWriteStore for OracleImportWriteStore {
             match phase2_result {
                 Ok(seg_count) => {
                     tx.commit()?;
-                    artifact_ids.push(artifact_id);
+                    artifacts.push(ImportedArtifact {
+                        artifact_id,
+                        enrichment_status: artifact_set.artifact.enrichment_status,
+                        ingest_result: ArtifactIngestResult::Created,
+                    });
                     segments_written += seg_count;
                     count_imported += 1;
                 }
@@ -139,8 +165,7 @@ impl ImportWriteStore for OracleImportWriteStore {
             count_failed,
             import_status,
             error_message.as_deref(),
-        )
-        {
+        ) {
             let _ = tx.conn.rollback();
             let recovery_message = format!("phase 3 failure after committed artifacts: {e:#}");
             recover_import_finalization(
@@ -161,7 +186,7 @@ impl ImportWriteStore for OracleImportWriteStore {
         Ok(ImportWriteResult {
             import_id,
             import_status,
-            artifact_ids,
+            artifacts,
             failed_artifact_ids,
             segments_written,
         })

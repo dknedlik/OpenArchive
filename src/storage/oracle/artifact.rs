@@ -1,7 +1,28 @@
 use crate::error::{StorageError, StorageResult};
 use oracle::Connection;
 
-use crate::storage::types::{NewArtifact, NewParticipant};
+use crate::storage::types::{EnrichmentStatus, NewArtifact, NewParticipant, SourceType};
+
+pub fn find_artifact_by_source_hash(
+    conn: &Connection,
+    source_type: SourceType,
+    content_hash_version: &str,
+    source_conversation_hash: &str,
+) -> StorageResult<Option<(String, EnrichmentStatus)>> {
+    let source_type = source_type.as_str();
+    let row = conn
+        .query_row_as::<(String, String)>(
+            "SELECT artifact_id, enrichment_status \
+             FROM oa_artifact \
+             WHERE source_type = :1 AND content_hash_version = :2 AND source_conversation_hash = :3",
+            &[&source_type, &content_hash_version, &source_conversation_hash],
+        )
+        .ok();
+
+    Ok(row.and_then(|(artifact_id, enrichment_status)| {
+        EnrichmentStatus::from_str(&enrichment_status).map(|status| (artifact_id, status))
+    }))
+}
 
 pub fn insert_artifact(conn: &Connection, a: &NewArtifact) -> StorageResult<()> {
     let artifact_class = a.artifact_class.as_str();
