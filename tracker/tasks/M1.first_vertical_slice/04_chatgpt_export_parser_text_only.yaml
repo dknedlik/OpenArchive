@@ -12,20 +12,32 @@ description: |
   Build a slice-one parser for ChatGPT exports that extracts conversations,
   flattens message trees into ordered message sequences, preserves participants,
   and ignores unsupported non-text content while recording that it was skipped.
+  For slice one, the parser consumes the extracted `conversations.json` payload
+  from a ChatGPT export rather than taking responsibility for zip handling.
 acceptance_criteria:
-  - Valid ChatGPT export input yields one or more normalized conversation objects.
-  - Message ordering is deterministic and suitable for `oa_segment.sequence_no`.
-  - Unsupported non-text/tool/image content is skipped with explicit metadata.
+  - Valid `conversations.json` input yields one or more normalized conversation objects.
+  - Message ordering is deterministic and suitable for `oa_segment.sequence_no`, using one documented flattening rule.
+  - Unsupported non-text/tool/image content is skipped with explicit metadata and does not make the normalized content hash unstable.
+  - Participant roles are mapped consistently into the slice-one participant enum set.
 files_touched:
   - src/
 implementation_plan: |
-  - Parse the supported export form into intermediate structs.
-  - Flatten conversation trees into ordered text-bearing messages.
-  - Produce normalized output shaped for the Oracle write path.
+  - Parse the supported `conversations.json` export form into intermediate structs that preserve source ids, parent/child links, timestamps, authors, and content parts.
+  - Flatten each conversation tree into the single path that represents what the user saw in the chat window, preferring the export's active/current branch markers when present.
+  - When the export does not identify the active branch explicitly, choose the latest child by source timestamp; if timestamps are tied or absent, fall back to source child list order and then source node id for stability.
+  - Return normalized conversation structs that are Oracle-write-ready for one artifact set: artifact metadata, participant list, ordered message segments, and enough source metadata for later job payload assembly.
+  - Exclude unsupported-only nodes from emitted segments; instead attach their skipped-content metadata to the nearest emitted text-bearing segment from the same source node when possible.
+  - Map source authors into `user`, `assistant`, `system`, `tool`, or `unknown` using a single central mapping table and dedupe participants per conversation by source author key plus resolved role.
 test_plan: |
   - Add fixture-driven parser tests for single-conversation and multi-conversation exports.
-  - Add a test covering unsupported content skip behavior.
+  - Add a test covering branch selection and deterministic sibling ordering.
+  - Add a test covering unsupported content skip behavior and the resulting metadata shape.
+  - Add a test covering participant-role mapping and per-conversation participant deduplication.
 risks: |
   - Export shape mismatches or unstable ordering will break idempotency and downstream enrichment.
 notes: |
   - Keep slice one text-oriented; do not broaden to attachments or tool payload semantics yet.
+  - Input ownership split: this task normalizes already-extracted `conversations.json`; zip/file-upload extraction belongs with the HTTP intake path.
+  - Normalized parser output should stay source-agnostic enough to avoid Oracle SQL concerns, but concrete enough to populate `WriteArtifactSet` fields without additional interpretation.
+  - A source node that contains no text content should not create an `oa_segment` row by itself in slice one, because `message` segments require text content; its skipped content should be summarized into `unsupported_content_json` on a neighboring emitted segment or, if none exists, into conversation-level normalization metadata.
+  - Slice-one branch policy is to preserve the conversation path the user last saw in ChatGPT, not alternate regenerate/edit branches.

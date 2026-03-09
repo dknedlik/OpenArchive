@@ -75,6 +75,34 @@ one, but only one concrete backend in slice one:
 - Do not build provider selection, plugin registration, or multi-backend
   execution yet
 
+### Execution and concurrency guardrails
+
+- Slice one may run in a single application process, but internal execution
+  should still follow explicit pipeline-stage boundaries
+- Prefer synchronous Rust for request handling and storage unless a specific
+  stage proves a concrete need for async execution
+- Treat blocking Oracle calls as acceptable only within bounded worker and
+  connection pools
+- Do not spawn ad hoc threads per request or per job; use fixed-size worker
+  pools
+- Keep long-running enrichment and future hydration work out of request
+  handlers
+- Use the database as the durable source of truth for stage transitions, job
+  status, and retries
+- In-process channels or dispatch loops are allowed, but they must not become
+  the only place where outstanding work exists
+- Preserve job contracts and stage interfaces so moving from in-process workers
+  to MQ-backed or distributed execution does not require redesign
+
+Recommended slice-one worker classes:
+
+- request workers for short HTTP handling only
+- import/normalization workers for parse and canonical write work
+- enrichment workers for model-facing derivation jobs
+
+These classes may share one binary at first, but their concurrency limits
+should remain independently configurable.
+
 ### Brain-layer scope for slice one
 
 - Artifact layer:
@@ -164,6 +192,9 @@ one, but only one concrete backend in slice one:
   - job persistence/dispatch
   - job execution
 - Treat the database as the source of truth for job state
+- Do not perform remote model calls inline in the request path
+- Keep worker concurrency conservative by default on small OCI instances and
+  expand only with measurement
 
 ### Enrichment failure handling
 
@@ -261,3 +292,5 @@ one, but only one concrete backend in slice one:
   the canonical first context-pack type.
 - Slice one favors async enrichment and explicit status over synchronous
   end-to-end completion in a single request.
+- Slice one favors bounded thread and connection counts over maximizing
+  concurrency density within one process.

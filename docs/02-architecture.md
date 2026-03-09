@@ -78,6 +78,55 @@ layer work and should not be mistaken for detailed interface designs yet.
   assumption
 - OCI Vault and the existing wallet pattern as reusable ingredients
 
+## Execution Model Direction
+
+The current preferred execution model is pipeline-first rather than
+request-lifecycle-first.
+
+- Keep user-facing request handlers short and bounded
+- Move slow enrichment and hydration work behind durable job boundaries
+- Allow the system to start as one process while preserving seams that let
+  stages move into separate workers later
+- Prefer synchronous Rust and bounded worker pools by default where the
+  underlying client libraries are already blocking
+
+This implies a staged flow such as:
+
+1. intake and validation
+2. canonical normalization and persistence
+3. enrichment and derivation
+4. retrieval and context assembly
+
+These stages may reside in one application initially, but they should behave as
+decoupled pipeline stages rather than one long end-to-end request path.
+
+### Concurrency Principles
+
+- Use fixed-size worker pools rather than ad hoc thread spawning
+- Keep separate worker classes for different load profiles when useful
+- treat CPU-heavy normalization separately from latency-heavy enrichment
+- Bound Oracle connection usage explicitly with small pools sized to the target
+  machine
+- Treat the database as the durable source of truth for job lifecycle and stage
+  progress
+- Use in-process channels only as an optimization, not as the sole source of
+  work state
+
+### Async Versus Sync Guidance
+
+Async is not a requirement for every layer.
+
+- Synchronous HTTP and storage layers are acceptable if request concurrency is
+  modest and long-running work is pushed out of band
+- Blocking Oracle access is an acceptable implementation choice if worker and
+  connection counts are bounded
+- Async should be introduced only where it provides clear value, especially for
+  services that spend large amounts of time waiting on remote providers
+
+The architecture should optimize first for clear stage boundaries, backpressure,
+and operability. Concurrency model details can then evolve per stage without
+rewriting the full system shape.
+
 ## Constraints And Heuristics
 
 - preserve source fidelity while still normalizing aggressively
