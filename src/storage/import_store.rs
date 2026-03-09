@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::error::StorageResult;
 
 use crate::storage::types::{ImportStatus, NewImport, NewImportPayload};
 use crate::storage::StorageTx;
@@ -10,14 +10,14 @@ use crate::storage::StorageTx;
 pub trait ImportPayloadStore {
     type Tx: StorageTx;
 
-    fn insert_payload(&self, tx: &mut Self::Tx, payload: &NewImportPayload) -> Result<()>;
+    fn insert_payload(&self, tx: &mut Self::Tx, payload: &NewImportPayload) -> StorageResult<()>;
 }
 
 /// Manages the lifecycle of one import request.
 pub trait ImportStore {
     type Tx: StorageTx;
 
-    fn insert_import(&self, tx: &mut Self::Tx, import: &NewImport) -> Result<()>;
+    fn insert_import(&self, tx: &mut Self::Tx, import: &NewImport) -> StorageResult<()>;
 
     /// Update per-conversation counters at the end of the parse phase.
     fn update_import_counts(
@@ -26,7 +26,7 @@ pub trait ImportStore {
         import_id: &str,
         count_imported: i64,
         count_failed: i64,
-    ) -> Result<()>;
+    ) -> StorageResult<()>;
 
     /// Transition the import to its terminal status and record any top-level error.
     fn complete_import(
@@ -35,5 +35,5 @@ pub trait ImportStore {
         import_id: &str,
         status: ImportStatus,
         error_message: Option<&str>,
-    ) -> Result<()>;
+    ) -> StorageResult<()>;
 }

@@ -1,9 +1,9 @@
-use anyhow::{anyhow, Result};
+use crate::error::{StorageError, StorageResult};
 use oracle::Connection;
 
 use crate::storage::types::{NewArtifact, NewParticipant};
 
-pub fn insert_artifact(conn: &Connection, a: &NewArtifact) -> Result<()> {
+pub fn insert_artifact(conn: &Connection, a: &NewArtifact) -> StorageResult<()> {
     let artifact_class = a.artifact_class.as_str();
     let source_type = a.source_type.as_str();
     let artifact_status = a.artifact_status.as_str();
@@ -41,11 +41,14 @@ pub fn insert_artifact(conn: &Connection, a: &NewArtifact) -> Result<()> {
             &a.normalization_version,
         ],
     )
-    .map_err(|e| anyhow!(e))?;
+    .map_err(|source| StorageError::InsertArtifact {
+        artifact_id: a.artifact_id.clone(),
+        source,
+    })?;
     Ok(())
 }
 
-pub fn insert_participant(conn: &Connection, p: &NewParticipant) -> Result<()> {
+pub fn insert_participant(conn: &Connection, p: &NewParticipant) -> StorageResult<()> {
     let role = p.participant_role.as_str();
     conn.execute(
         "INSERT INTO oa_conversation_participant \
@@ -63,6 +66,10 @@ pub fn insert_participant(conn: &Connection, p: &NewParticipant) -> Result<()> {
             &p.sequence_no,
         ],
     )
-    .map_err(|e| anyhow!(e))?;
+    .map_err(|source| StorageError::InsertParticipant {
+        participant_id: p.participant_id.clone(),
+        artifact_id: p.artifact_id.clone(),
+        source,
+    })?;
     Ok(())
 }

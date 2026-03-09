@@ -38,7 +38,7 @@ pub use types::{
     ParticipantRole, PayloadFormat, SegmentType, SourceType, VisibilityStatus,
 };
 
-use anyhow::Result;
+use crate::error::StorageResult;
 
 // ---------------------------------------------------------------------------
 // Transaction abstraction
@@ -50,7 +50,7 @@ use anyhow::Result;
 /// (which carries the implicit transaction). Commit/rollback decisions stay
 /// in `ImportWriteStore::write_import`, not in the granular trait methods.
 pub trait StorageTx {
-    fn commit(&mut self) -> Result<()>;
+    fn commit(&mut self) -> StorageResult<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -98,5 +98,5 @@ pub struct ImportWriteResult {
 /// responsible for creating and committing the underlying transaction at the
 /// points described in the module-level doc comment.
 pub trait ImportWriteStore {
-    fn write_import(&self, import_set: WriteImportSet) -> Result<ImportWriteResult>;
+    fn write_import(&self, import_set: WriteImportSet) -> StorageResult<ImportWriteResult>;
 }

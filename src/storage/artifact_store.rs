@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::error::StorageResult;
 
 use crate::storage::types::{NewArtifact, NewParticipant};
 use crate::storage::StorageTx;
@@ -10,7 +10,11 @@ use crate::storage::StorageTx;
 pub trait ArtifactStore {
     type Tx: StorageTx;
 
-    fn insert_artifact(&self, tx: &mut Self::Tx, artifact: &NewArtifact) -> Result<()>;
+    fn insert_artifact(&self, tx: &mut Self::Tx, artifact: &NewArtifact) -> StorageResult<()>;
 
-    fn insert_participant(&self, tx: &mut Self::Tx, participant: &NewParticipant) -> Result<()>;
+    fn insert_participant(
+        &self,
+        tx: &mut Self::Tx,
+        participant: &NewParticipant,
+    ) -> StorageResult<()>;
 }

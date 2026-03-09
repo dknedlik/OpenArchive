@@ -3,10 +3,9 @@ pub mod import;
 pub mod job;
 pub mod segment;
 
-use anyhow::{anyhow, Context, Result};
-
 use crate::config::DbConfig;
 use crate::db;
+use crate::error::{StorageError, StorageResult};
 use crate::storage::types::ImportStatus;
 use crate::storage::{ImportWriteResult, ImportWriteStore, StorageTx, WriteImportSet};
 
@@ -19,8 +18,11 @@ pub struct OracleStorageTx {
 }
 
 impl StorageTx for OracleStorageTx {
-    fn commit(&mut self) -> Result<()> {
-        self.conn.commit().map_err(|e| anyhow!(e))
+    fn commit(&mut self) -> StorageResult<()> {
+        self.conn.commit().map_err(|source| StorageError::Commit {
+            operation: "storage transaction",
+            source,
+        })
     }
 }
 
@@ -43,7 +45,7 @@ impl OracleImportWriteStore {
 // ---------------------------------------------------------------------------
 
 impl ImportWriteStore for OracleImportWriteStore {
-    fn write_import(&self, import_set: WriteImportSet) -> Result<ImportWriteResult> {
+    fn write_import(&self, import_set: WriteImportSet) -> StorageResult<ImportWriteResult> {
         let conn = db::connect(&self.config)?;
         let mut tx = OracleStorageTx { conn };
 
@@ -75,7 +77,7 @@ impl ImportWriteStore for OracleImportWriteStore {
         for artifact_set in import_set.artifact_sets {
             let artifact_id = artifact_set.artifact.artifact_id.clone();
 
-            let phase2_result: Result<usize> = (|| {
+            let phase2_result: StorageResult<usize> = (|| {
                 artifact::insert_artifact(&tx.conn, &artifact_set.artifact)?;
 
                 for participant in &artifact_set.participants {
@@ -103,12 +105,9 @@ impl ImportWriteStore for OracleImportWriteStore {
                 Err(e) => {
                     tx.conn
                         .rollback()
-                        .map_err(|rollback_err| anyhow!(rollback_err))
-                        .with_context(|| {
-                            format!(
-                                "artifact set {} failed and rollback also failed",
-                                artifact_id
-                            )
+                        .map_err(|source| StorageError::Rollback {
+                            operation: format!("failed artifact set {artifact_id}"),
+                            source,
                         })?;
                     failed_artifact_ids.push(artifact_id.clone());
                     count_failed += 1;
@@ -133,8 +132,14 @@ impl ImportWriteStore for OracleImportWriteStore {
             Some(artifact_errors.join(" | "))
         };
 
-        if let Err(e) =
-            finalize_import(&mut tx, &import_id, count_imported, count_failed, import_status, error_message.as_deref())
+        if let Err(e) = finalize_import(
+            &mut tx,
+            &import_id,
+            count_imported,
+            count_failed,
+            import_status,
+            error_message.as_deref(),
+        )
         {
             let _ = tx.conn.rollback();
             let recovery_message = format!("phase 3 failure after committed artifacts: {e:#}");
@@ -146,7 +151,10 @@ impl ImportWriteStore for OracleImportWriteStore {
                 import_status,
                 Some(recovery_message.as_str()),
             )
-            .with_context(|| format!("failed to recover import {}", import_id))?;
+            .map_err(|source| StorageError::RecoverImportFinalization {
+                import_id: import_id.clone(),
+                source: Box::new(source),
+            })?;
             return Err(e);
         }
 
@@ -167,7 +175,7 @@ fn finalize_import(
     count_failed: i64,
     status: ImportStatus,
     error_message: Option<&str>,
-) -> Result<()> {
+) -> StorageResult<()> {
     import::finalize_import(
         &tx.conn,
         import_id,
@@ -186,7 +194,7 @@ fn recover_import_finalization(
     count_failed: i64,
     status: ImportStatus,
     error_message: Option<&str>,
-) -> Result<()> {
+) -> StorageResult<()> {
     let conn = db::connect(config)?;
     import::finalize_import(
         &conn,
@@ -196,5 +204,8 @@ fn recover_import_finalization(
         status,
         error_message,
     )?;
-    conn.commit().map_err(|e| anyhow!(e))
+    conn.commit().map_err(|source| StorageError::Commit {
+        operation: "import finalization recovery",
+        source,
+    })
 }

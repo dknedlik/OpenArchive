@@ -1,9 +1,9 @@
-use anyhow::{anyhow, Result};
+use crate::error::{StorageError, StorageResult};
 use oracle::Connection;
 
 use crate::storage::types::{ImportStatus, NewImport, NewImportPayload};
 
-pub fn insert_payload(conn: &Connection, p: &NewImportPayload) -> Result<()> {
+pub fn insert_payload(conn: &Connection, p: &NewImportPayload) -> StorageResult<()> {
     let format = p.payload_format.as_str();
     conn.execute(
         "INSERT INTO oa_import_payload \
@@ -18,11 +18,14 @@ pub fn insert_payload(conn: &Connection, p: &NewImportPayload) -> Result<()> {
             &p.payload_sha256,
         ],
     )
-    .map_err(|e| anyhow!(e))?;
+    .map_err(|source| StorageError::InsertPayload {
+        payload_id: p.payload_id.clone(),
+        source,
+    })?;
     Ok(())
 }
 
-pub fn insert_import(conn: &Connection, i: &NewImport) -> Result<()> {
+pub fn insert_import(conn: &Connection, i: &NewImport) -> StorageResult<()> {
     let source_type = i.source_type.as_str();
     let status = i.import_status.as_str();
     conn.execute(
@@ -39,7 +42,10 @@ pub fn insert_import(conn: &Connection, i: &NewImport) -> Result<()> {
             &i.conversation_count_detected,
         ],
     )
-    .map_err(|e| anyhow!(e))?;
+    .map_err(|source| StorageError::InsertImport {
+        import_id: i.import_id.clone(),
+        source,
+    })?;
     Ok(())
 }
 
@@ -48,13 +54,16 @@ pub fn update_import_counts(
     import_id: &str,
     imported: i64,
     failed: i64,
-) -> Result<()> {
+) -> StorageResult<()> {
     conn.execute(
         "UPDATE oa_import SET conversation_count_imported = :1, conversation_count_failed = :2 \
          WHERE import_id = :3",
         &[&imported, &failed, &import_id],
     )
-    .map_err(|e| anyhow!(e))?;
+    .map_err(|source| StorageError::UpdateImportCounts {
+        import_id: import_id.to_string(),
+        source,
+    })?;
     Ok(())
 }
 
@@ -65,7 +74,7 @@ pub fn finalize_import(
     failed: i64,
     status: ImportStatus,
     error_message: Option<&str>,
-) -> Result<()> {
+) -> StorageResult<()> {
     let status_str = status.as_str();
     conn.execute(
         "UPDATE oa_import \
@@ -77,7 +86,10 @@ pub fn finalize_import(
          WHERE import_id = :5",
         &[&imported, &failed, &status_str, &error_message, &import_id],
     )
-    .map_err(|e| anyhow!(e))?;
+    .map_err(|source| StorageError::FinalizeImport {
+        import_id: import_id.to_string(),
+        source,
+    })?;
     Ok(())
 }
 
@@ -86,13 +98,16 @@ pub fn complete_import(
     import_id: &str,
     status: ImportStatus,
     error_message: Option<&str>,
-) -> Result<()> {
+) -> StorageResult<()> {
     let status_str = status.as_str();
     conn.execute(
         "UPDATE oa_import SET import_status = :1, completed_at = SYSTIMESTAMP, error_message = :2 \
          WHERE import_id = :3",
         &[&status_str, &error_message, &import_id],
     )
-    .map_err(|e| anyhow!(e))?;
+    .map_err(|source| StorageError::CompleteImport {
+        import_id: import_id.to_string(),
+        source,
+    })?;
     Ok(())
 }

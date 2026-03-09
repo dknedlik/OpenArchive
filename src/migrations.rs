@@ -1,6 +1,6 @@
 use crate::config::DbConfig;
 use crate::db;
-use anyhow::{anyhow, bail, Context, Result};
+use crate::error::{preview_sql_statement, MigrationsError, MigrationsResult};
 use oracle::Connection;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -17,7 +17,7 @@ pub struct Migration {
     pub sql: String,
 }
 
-pub fn check(config: &DbConfig) -> Result<()> {
+pub fn check(config: &DbConfig) -> MigrationsResult<()> {
     let conn = db::connect(config)?;
     ensure_schema_migration_table(&conn)?;
     let pending = pending_migrations(&conn)?;
@@ -32,10 +32,10 @@ pub fn check(config: &DbConfig) -> Result<()> {
         println!("  {} {}", migration.version, migration.name);
     }
 
-    bail!("database is not up to date");
+    Err(MigrationsError::DatabaseNotUpToDate)
 }
 
-pub fn migrate(config: &DbConfig) -> Result<()> {
+pub fn migrate(config: &DbConfig) -> MigrationsResult<()> {
     let conn = db::connect(config)?;
     ensure_schema_migration_table(&conn)?;
     let pending = pending_migrations(&conn)?;
@@ -52,23 +52,22 @@ pub fn migrate(config: &DbConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn reset(config: &DbConfig) -> Result<()> {
+pub fn reset(config: &DbConfig) -> MigrationsResult<()> {
     let conn = db::connect(config)?;
     reset_schema_objects(&conn)
 }
 
-fn pending_migrations(conn: &Connection) -> Result<Vec<Migration>> {
+fn pending_migrations(conn: &Connection) -> MigrationsResult<Vec<Migration>> {
     let applied = load_applied_migrations(conn)?;
     let mut pending = Vec::new();
 
     for migration in load_migrations()? {
         if let Some(existing_checksum) = applied.get(&migration.version) {
             if existing_checksum != &migration.checksum {
-                bail!(
-                    "migration checksum mismatch for version {} (file {})",
-                    migration.version,
-                    migration.filename
-                );
+                return Err(MigrationsError::ChecksumMismatch {
+                    version: migration.version,
+                    filename: migration.filename,
+                });
             }
             continue;
         }
@@ -79,25 +78,30 @@ fn pending_migrations(conn: &Connection) -> Result<Vec<Migration>> {
     Ok(pending)
 }
 
-fn apply_migration(conn: &Connection, migration: &Migration) -> Result<()> {
+fn apply_migration(conn: &Connection, migration: &Migration) -> MigrationsResult<()> {
     println!("applying {} {}", migration.version, migration.name);
-    execute_sql_script(conn, &migration.sql)
-        .with_context(|| format!("failed while executing {}", migration.filename))?;
+    execute_sql_script(conn, migration)?;
 
     conn.execute(
         "insert into oa_schema_migration (version, name, filename, checksum, applied_at) values (:1, :2, :3, :4, systimestamp)",
         &[&migration.version, &migration.name, &migration.filename, &migration.checksum],
     )
-    .with_context(|| format!("failed to record migration {}", migration.filename))?;
+    .map_err(|source| MigrationsError::RecordMigration {
+        filename: migration.filename.clone(),
+        source,
+    })?;
 
     conn.commit()
-        .with_context(|| format!("failed to commit migration {}", migration.filename))?;
+        .map_err(|source| MigrationsError::CommitMigration {
+            filename: migration.filename.clone(),
+            source,
+        })?;
 
     println!("applied {} {}", migration.version, migration.name);
     Ok(())
 }
 
-fn ensure_schema_migration_table(conn: &Connection) -> Result<()> {
+fn ensure_schema_migration_table(conn: &Connection) -> MigrationsResult<()> {
     let plsql = r#"
 declare
     table_missing exception;
@@ -122,13 +126,13 @@ end;
 "#;
 
     conn.execute(plsql, &[])
-        .context("failed to ensure oa_schema_migration exists")?;
+        .map_err(|source| MigrationsError::EnsureSchemaMigrationTable { source })?;
     conn.commit()
-        .context("failed to commit oa_schema_migration bootstrap")?;
+        .map_err(|source| MigrationsError::CommitSchemaMigrationBootstrap { source })?;
     Ok(())
 }
 
-fn reset_schema_objects(conn: &Connection) -> Result<()> {
+fn reset_schema_objects(conn: &Connection) -> MigrationsResult<()> {
     let plsql = r#"
 declare
 begin
@@ -144,35 +148,44 @@ end;
 "#;
 
     conn.execute(plsql, &[])
-        .context("failed to reset open_archive schema objects")?;
+        .map_err(|source| MigrationsError::ResetSchemaObjects { source })?;
     Ok(())
 }
 
-fn load_applied_migrations(conn: &Connection) -> Result<std::collections::BTreeMap<String, String>> {
+fn load_applied_migrations(
+    conn: &Connection,
+) -> MigrationsResult<std::collections::BTreeMap<String, String>> {
     let mut map = std::collections::BTreeMap::new();
     let rows = conn
         .query(
             "select version, checksum from oa_schema_migration order by version",
             &[],
         )
-        .context("failed to load applied migrations")?;
+        .map_err(|source| MigrationsError::LoadAppliedMigrations { source })?;
 
     for row_result in rows {
-        let row = row_result.context("failed to read migration history row")?;
-        let version: String = row.get(0).context("failed to read migration version")?;
-        let checksum: String = row.get(1).context("failed to read migration checksum")?;
+        let row = row_result.map_err(|source| MigrationsError::ReadMigrationHistoryRow { source })?;
+        let version: String = row
+            .get(0)
+            .map_err(|source| MigrationsError::ReadMigrationVersion { source })?;
+        let checksum: String = row
+            .get(1)
+            .map_err(|source| MigrationsError::ReadMigrationChecksum { source })?;
         map.insert(version, checksum);
     }
 
     Ok(map)
 }
 
-fn load_migrations() -> Result<Vec<Migration>> {
+fn load_migrations() -> MigrationsResult<Vec<Migration>> {
     let dir = Path::new(MIGRATIONS_DIR);
     let mut entries = Vec::new();
 
-    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
-        let entry = entry.context("failed to read migration entry")?;
+    for entry in fs::read_dir(dir).map_err(|source| MigrationsError::ReadMigrationsDir {
+        path: dir.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| MigrationsError::ReadMigrationEntry { source })?;
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("sql") {
             continue;
@@ -184,16 +197,20 @@ fn load_migrations() -> Result<Vec<Migration>> {
     Ok(entries)
 }
 
-fn load_migration(path: &Path) -> Result<Migration> {
+fn load_migration(path: &Path) -> MigrationsResult<Migration> {
     let filename = path
         .file_name()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| anyhow!("invalid migration filename: {}", path.display()))?
+        .ok_or_else(|| MigrationsError::InvalidMigrationFilename {
+            path: path.to_path_buf(),
+        })?
         .to_string();
 
     let (version, name) = parse_filename(&filename)?;
-    let sql = fs::read_to_string(path)
-        .with_context(|| format!("failed to read migration {}", path.display()))?;
+    let sql = fs::read_to_string(path).map_err(|source| MigrationsError::ReadMigrationFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
     let checksum = format!("{:x}", Sha256::digest(sql.as_bytes()));
 
     Ok(Migration {
@@ -205,16 +222,22 @@ fn load_migration(path: &Path) -> Result<Migration> {
     })
 }
 
-fn parse_filename(filename: &str) -> Result<(String, String)> {
+fn parse_filename(filename: &str) -> MigrationsResult<(String, String)> {
     let base = filename
         .strip_suffix(".sql")
-        .ok_or_else(|| anyhow!("migration file must end in .sql: {}", filename))?;
+        .ok_or_else(|| MigrationsError::MigrationFileMissingSqlSuffix {
+            filename: filename.to_string(),
+        })?;
     let (version_part, name_part) = base
         .split_once("__")
-        .ok_or_else(|| anyhow!("migration file must match VNNN__name.sql: {}", filename))?;
+        .ok_or_else(|| MigrationsError::MigrationFileInvalidPattern {
+            filename: filename.to_string(),
+        })?;
 
     if !version_part.starts_with('V') || version_part.len() < 2 {
-        bail!("migration file must start with VNNN: {}", filename);
+        return Err(MigrationsError::MigrationFileInvalidVersionPrefix {
+            filename: filename.to_string(),
+        });
     }
 
     Ok((
@@ -223,20 +246,24 @@ fn parse_filename(filename: &str) -> Result<(String, String)> {
     ))
 }
 
-fn execute_sql_script(conn: &Connection, sql: &str) -> Result<()> {
-    for statement in split_sql_statements(sql)? {
+fn execute_sql_script(conn: &Connection, migration: &Migration) -> MigrationsResult<()> {
+    for statement in split_sql_statements(&migration.sql)? {
         if statement.trim().is_empty() {
             continue;
         }
 
         conn.execute(&statement, &[])
-            .with_context(|| format!("statement failed:\n{}", statement))?;
+            .map_err(|source| MigrationsError::ExecuteMigrationStatement {
+                filename: migration.filename.clone(),
+                statement_preview: preview_sql_statement(&statement),
+                source,
+            })?;
     }
 
     Ok(())
 }
 
-fn split_sql_statements(sql: &str) -> Result<Vec<String>> {
+fn split_sql_statements(sql: &str) -> MigrationsResult<Vec<String>> {
     let mut statements = Vec::new();
     let mut current = String::new();
     let mut in_single_quote = false;
@@ -269,7 +296,7 @@ fn split_sql_statements(sql: &str) -> Result<Vec<String>> {
     }
 
     if in_single_quote {
-        bail!("unterminated string literal in migration SQL");
+        return Err(MigrationsError::UnterminatedStringLiteral);
     }
 
     if !current.trim().is_empty() {

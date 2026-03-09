@@ -9,3 +9,4 @@ chrono = { version = "0.4", default-features = false, features = ["alloc", "serd
 clap = { version = "4.5", features = ["derive"] }
 oracle = "0.6"
 sha2 = "0.10"
+thiserror = "2.0"

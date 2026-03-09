@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::error::StorageResult;
 
 use crate::storage::types::NewSegment;
 use crate::storage::StorageTx;
@@ -7,5 +7,5 @@ use crate::storage::StorageTx;
 pub trait SegmentStore {
     type Tx: StorageTx;
 
-    fn insert_segment(&self, tx: &mut Self::Tx, segment: &NewSegment) -> Result<()>;
+    fn insert_segment(&self, tx: &mut Self::Tx, segment: &NewSegment) -> StorageResult<()>;
 }

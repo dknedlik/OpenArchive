@@ -1,9 +1,9 @@
-use anyhow::{anyhow, Result};
+use crate::error::{StorageError, StorageResult};
 use oracle::Connection;
 
 use crate::storage::types::NewEnrichmentJob;
 
-pub fn insert_job(conn: &Connection, j: &NewEnrichmentJob) -> Result<()> {
+pub fn insert_job(conn: &Connection, j: &NewEnrichmentJob) -> StorageResult<()> {
     let job_type = j.job_type.as_str();
     let job_status = j.job_status.as_str();
     conn.execute(
@@ -20,6 +20,10 @@ pub fn insert_job(conn: &Connection, j: &NewEnrichmentJob) -> Result<()> {
             &j.payload_json,
         ],
     )
-    .map_err(|e| anyhow!(e))?;
+    .map_err(|source| StorageError::InsertJob {
+        job_id: j.job_id.clone(),
+        artifact_id: j.artifact_id.clone(),
+        source,
+    })?;
     Ok(())
 }

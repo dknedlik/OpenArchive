@@ -1,9 +1,9 @@
-use anyhow::{anyhow, Result};
+use crate::error::{StorageError, StorageResult};
 use oracle::Connection;
 
 use crate::storage::types::NewSegment;
 
-pub fn insert_segment(conn: &Connection, s: &NewSegment) -> Result<()> {
+pub fn insert_segment(conn: &Connection, s: &NewSegment) -> StorageResult<()> {
     let segment_type = s.segment_type.as_str();
     let visibility = s.visibility_status.as_str();
     let created_at_source = s.created_at_source.as_ref().map(|ts| ts.as_str());
@@ -31,6 +31,10 @@ pub fn insert_segment(conn: &Connection, s: &NewSegment) -> Result<()> {
             &s.unsupported_content_json,
         ],
     )
-    .map_err(|e| anyhow!(e))?;
+    .map_err(|source| StorageError::InsertSegment {
+        segment_id: s.segment_id.clone(),
+        artifact_id: s.artifact_id.clone(),
+        source,
+    })?;
     Ok(())
 }

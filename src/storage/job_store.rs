@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::error::StorageResult;
 
 use crate::storage::types::NewEnrichmentJob;
 use crate::storage::StorageTx;
@@ -7,5 +7,5 @@ use crate::storage::StorageTx;
 pub trait EnrichmentJobStore {
     type Tx: StorageTx;
 
-    fn insert_job(&self, tx: &mut Self::Tx, job: &NewEnrichmentJob) -> Result<()>;
+    fn insert_job(&self, tx: &mut Self::Tx, job: &NewEnrichmentJob) -> StorageResult<()>;
 }
