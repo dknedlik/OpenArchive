@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${OPEN_ARCHIVE_PASSWORD:-}" && -z "${OPEN_ARCHIVE_PASSWORD_SECRET_ID:-}" ]]; then
+  echo "Set OPEN_ARCHIVE_PASSWORD or OPEN_ARCHIVE_PASSWORD_SECRET_ID." >&2
+  exit 1
+fi
+
+if [[ -n "${OPEN_ARCHIVE_PASSWORD_SECRET_ID:-}" ]]; then
+  command -v oci >/dev/null 2>&1 || { echo "Missing required command: oci" >&2; exit 1; }
+  command -v base64 >/dev/null 2>&1 || { echo "Missing required command: base64" >&2; exit 1; }
+  OPEN_ARCHIVE_PASSWORD="$(
+    oci secrets secret-bundle get \
+      --secret-id "${OPEN_ARCHIVE_PASSWORD_SECRET_ID}" \
+      --query 'data."secret-bundle-content".content' \
+      --raw-output 2>/dev/null | base64 --decode
+  )"
+fi
+
+if [[ -z "${OPEN_ARCHIVE_PASSWORD:-}" ]]; then
+  echo "Resolved OPEN_ARCHIVE_PASSWORD is empty." >&2
+  exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SQL_PATH="${SCRIPT_DIR}/../sql/admin/bootstrap_open_archive_user.sql"
+command -v sql >/dev/null 2>&1 || { echo "Missing required command: sql" >&2; exit 1; }
+
+: "${WALLET_DIR:?WALLET_DIR must be set}"
+export TNS_ADMIN="${WALLET_DIR}"
+TNS_ALIAS="${TNS_ALIAS:-cleanengine_medium}"
+
+DB_ADMIN_PASSWORD_SECRET_ID_EFFECTIVE="${DB_ADMIN_PASSWORD_SECRET_ID:-${DB_PASSWORD_SECRET_ID:-}}"
+if [[ -z "${DB_ADMIN_PASSWORD_SECRET_ID_EFFECTIVE}" ]]; then
+  echo "Missing ADMIN password secret id. Set DB_ADMIN_PASSWORD_SECRET_ID or DB_PASSWORD_SECRET_ID." >&2
+  exit 1
+fi
+
+ADMIN_PASSWORD="$(
+  oci secrets secret-bundle get \
+    --secret-id "${DB_ADMIN_PASSWORD_SECRET_ID_EFFECTIVE}" \
+    --query 'data."secret-bundle-content".content' \
+    --raw-output 2>/dev/null | base64 --decode
+)"
+
+if [[ -z "${ADMIN_PASSWORD}" ]]; then
+  echo "Fetched ADMIN password is empty" >&2
+  exit 1
+fi
+
+OPEN_ARCHIVE_PASSWORD_SQL="$(printf "%s" "${OPEN_ARCHIVE_PASSWORD}" | sed "s/'/''/g")"
+
+set +x
+
+sql -s /nolog <<SQL
+whenever sqlerror exit failure rollback
+connect ADMIN/"${ADMIN_PASSWORD}"@${TNS_ALIAS}
+set define off
+var open_archive_password varchar2(512)
+exec :open_archive_password := '${OPEN_ARCHIVE_PASSWORD_SQL}';
+set define on
+@${SQL_PATH}
+exit
+SQL

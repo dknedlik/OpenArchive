@@ -1,0 +1,21 @@
+version: 1
+globs:
+  - tasks/**/*
+enums:
+  status:
+    - todo
+    - in_progress
+    - blocked
+    - done
+  type:
+    - feature
+    - bug
+    - chore
+    - test
+  priority:
+    - low
+    - medium
+    - high
+milestones:
+  - name: M1.first_vertical_slice
+    description: Prove the first end-to-end OpenArchive slice from ChatGPT export ingestion through persisted canonical archive data and queued enrichment work

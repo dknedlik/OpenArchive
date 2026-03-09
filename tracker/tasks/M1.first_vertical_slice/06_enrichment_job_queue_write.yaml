@@ -1,0 +1,30 @@
+id: "06"
+title: Persist enrichment jobs during import
+assignee: david
+status: todo
+type: feature
+priority: high
+planned_order: 5
+milestone: M1.first_vertical_slice
+labels: [jobs, enrichment, storage]
+depends_on: ["03", "04"]
+description: |
+  Ensure each successfully normalized conversation artifact gets an initial
+  durable enrichment job in `oa_enrichment_job` so the async pipeline can begin
+  without redesigning the import contract later.
+acceptance_criteria:
+  - Successful conversation imports create at least one `conversation_enrichment` job.
+  - Job payloads contain enough information for later worker execution.
+  - Job status is initialized consistently with the import contract.
+files_touched:
+  - src/
+implementation_plan: |
+  - Extend the import write transaction to create job records.
+  - Define a minimal job payload shape for slice one.
+  - Keep job creation separate enough that worker execution can evolve later.
+test_plan: |
+  - Verify job rows exist after import and reflect expected status and payload structure.
+risks: |
+  - If the job payload is too thin, the future worker path will force schema or API churn.
+notes: |
+  - This task only covers durable job creation, not job execution.

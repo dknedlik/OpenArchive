@@ -1,0 +1,28 @@
+id: "07"
+title: Add GET /artifacts listing endpoint
+assignee: david
+status: todo
+type: feature
+priority: medium
+planned_order: 6
+milestone: M1.first_vertical_slice
+labels: [api, read-model, artifacts]
+depends_on: ["05", "06"]
+description: |
+  Add the minimal artifact listing endpoint from the slice plan so imported
+  conversation artifacts can be enumerated with their ingestion and enrichment state.
+acceptance_criteria:
+  - The service exposes `GET /artifacts`.
+  - The response includes artifact id, title, source type, created/captured timestamps, and enrichment status.
+  - Results are ordered predictably for machine consumers.
+files_touched:
+  - src/
+implementation_plan: |
+  - Add the first read-model query against `oa_artifact`.
+  - Keep the response intentionally narrow and machine-first.
+test_plan: |
+  - Add endpoint tests covering empty state and imported artifact state.
+risks: |
+  - Read models can drift from the slice-plan contract if the endpoint grows too early.
+notes: |
+  - This is the first retrieval surface, but it is not yet the context-pack endpoint.

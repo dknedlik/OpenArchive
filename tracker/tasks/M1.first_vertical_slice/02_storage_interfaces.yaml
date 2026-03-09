@@ -1,0 +1,29 @@
+id: "02"
+title: Define slice-one storage interfaces
+assignee: david
+status: done
+type: feature
+priority: high
+planned_order: 1
+milestone: M1.first_vertical_slice
+labels: [storage, architecture, oracle]
+description: |
+  Define the domain-facing storage interfaces for slice one so the application layer
+  depends on archive operations rather than Oracle-specific details. This should
+  cover the initial write path for imports, artifacts, participants, segments, and jobs.
+acceptance_criteria:
+  - Traits or equivalent interfaces exist for the first import write path.
+  - The interface vocabulary is domain-shaped rather than generic SQL-shaped.
+  - Oracle-specific connection and SQL concerns remain below the storage boundary.
+files_touched:
+  - src/
+implementation_plan: |
+  - Introduce storage modules for imports, artifacts, segments, and enrichment jobs.
+  - Define transaction boundaries needed for one import request.
+  - Keep read concerns separate from the initial write path where practical.
+test_plan: |
+  - Build-only validation is acceptable for this task if interfaces compile cleanly.
+risks: |
+  - If the interfaces are too generic, Oracle concerns will leak upward later.
+notes: |
+  - This task is the foundation for the first real application code on top of the migration/bootstrap work.

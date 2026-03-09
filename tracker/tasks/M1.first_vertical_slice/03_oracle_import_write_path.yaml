@@ -1,0 +1,31 @@
+id: "03"
+title: Implement Oracle import write path
+assignee: david
+status: todo
+type: feature
+priority: high
+planned_order: 2
+milestone: M1.first_vertical_slice
+labels: [storage, oracle, ingestion]
+depends_on: ["02"]
+description: |
+  Implement the first concrete Oracle-backed persistence path for one normalized
+  ChatGPT import. This should write the raw payload, import row, conversation
+  artifact, participants, ordered segments, and initial enrichment job records.
+acceptance_criteria:
+  - One transactional write path persists the canonical import objects for a valid conversation.
+  - The write path uses the schema created by `V001` without inventing new tables or columns.
+  - Import failures roll back partial writes within the transaction boundary.
+files_touched:
+  - src/
+  - sql/migrations/
+implementation_plan: |
+  - Implement Oracle adapter code for insert operations against the slice-one tables.
+  - Start with one conversation import path, then shape it so multi-conversation imports can call it repeatedly.
+  - Keep idempotency hooks visible even if dedupe logic is still basic in this task.
+test_plan: |
+  - Add integration-style checks against ADB for successful inserts and rollback on failure.
+risks: |
+  - Transaction scope and row ordering bugs will create hard-to-debug ingestion failures later.
+notes: |
+  - This is the first task that proves the schema is useful rather than just syntactically valid.

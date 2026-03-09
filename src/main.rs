@@ -1,29 +1,56 @@
-use std::env;
+mod config;
+mod db;
+mod migrations;
+mod storage;
 
-fn main() {
-    println!("OpenArchive brainstorming bootstrap");
-    println!("  status: early project incubation");
-    println!("  note: current files capture hypotheses, not final decisions");
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use config::DbConfig;
 
-    let config = [
-        ("WALLET_DIR", false),
-        ("TNS_ALIAS", true),
-        ("DB_USERNAME", true),
-        ("DB_PASSWORD", true),
-        ("TNS_ADMIN", false),
-    ];
+#[derive(Parser)]
+#[command(name = "open_archive")]
+#[command(about = "OpenArchive bootstrap CLI")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
 
-    println!("  adb_env_if_revisited:");
-    for (key, sensitive) in config {
-        match env::var(key) {
-            Ok(value) if !value.trim().is_empty() => {
-                if sensitive {
-                    println!("    {key}=set");
-                } else {
-                    println!("    {key}={value}");
-                }
-            }
-            _ => println!("    {key}=missing"),
+#[derive(Subcommand)]
+enum Command {
+    AdbCheck,
+    Migrate,
+    MigrateCheck,
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Command::AdbCheck => adb_check(),
+        Command::Migrate => {
+            let config = DbConfig::from_env()?;
+            migrations::migrate(&config)
+        }
+        Command::MigrateCheck => {
+            let config = DbConfig::from_env()?;
+            migrations::check(&config)
         }
     }
+}
+
+fn adb_check() -> Result<()> {
+    let config = DbConfig::from_env()?;
+    let conn = db::connect(&config)?;
+    let row = conn
+        .query_row_as::<(i32, String)>(
+            "select 1 as connected, sys_context('USERENV', 'SERVICE_NAME') as service_name from dual",
+            &[],
+        )
+        .context("connected, but test query failed")?;
+
+    println!("connected={}", row.0);
+    println!("service_name={}", row.1);
+    println!("username={}", config.username);
+    println!("tns_alias={}", config.tns_alias);
+    Ok(())
 }

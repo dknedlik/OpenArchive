@@ -1,0 +1,31 @@
+id: "04"
+title: Build text-only ChatGPT export parser
+assignee: david
+status: todo
+type: feature
+priority: high
+planned_order: 3
+milestone: M1.first_vertical_slice
+labels: [ingestion, parser, chatgpt]
+depends_on: ["02"]
+description: |
+  Build a slice-one parser for ChatGPT exports that extracts conversations,
+  flattens message trees into ordered message sequences, preserves participants,
+  and ignores unsupported non-text content while recording that it was skipped.
+acceptance_criteria:
+  - Valid ChatGPT export input yields one or more normalized conversation objects.
+  - Message ordering is deterministic and suitable for `oa_segment.sequence_no`.
+  - Unsupported non-text/tool/image content is skipped with explicit metadata.
+files_touched:
+  - src/
+implementation_plan: |
+  - Parse the supported export form into intermediate structs.
+  - Flatten conversation trees into ordered text-bearing messages.
+  - Produce normalized output shaped for the Oracle write path.
+test_plan: |
+  - Add fixture-driven parser tests for single-conversation and multi-conversation exports.
+  - Add a test covering unsupported content skip behavior.
+risks: |
+  - Export shape mismatches or unstable ordering will break idempotency and downstream enrichment.
+notes: |
+  - Keep slice one text-oriented; do not broaden to attachments or tool payload semantics yet.

@@ -1,0 +1,28 @@
+id: "08"
+title: Add import idempotency and failure-path tests
+assignee: david
+status: todo
+type: test
+priority: high
+planned_order: 7
+milestone: M1.first_vertical_slice
+labels: [testing, ingestion, idempotency]
+depends_on: ["03", "04", "05", "06"]
+description: |
+  Lock down the import behavior with tests that cover duplicate imports, malformed
+  payload handling, and partial failure behavior for multi-conversation exports.
+acceptance_criteria:
+  - Re-import behavior is tested against the conversation hash uniqueness contract.
+  - Malformed input fails explicitly without corrupting prior data.
+  - Multi-conversation imports can partially succeed without corrupting successful rows.
+files_touched:
+  - src/
+implementation_plan: |
+  - Add end-to-end tests that exercise the full import path through the API or service boundary.
+  - Verify both DB state and returned status values.
+test_plan: |
+  - Use real or fixture-backed exports to cover happy path, duplicate path, malformed path, and partial-failure path.
+risks: |
+  - Without these tests, the first import path will look stable until the first real re-import or malformed export arrives.
+notes: |
+  - This task should land before substantial enrichment work begins.
