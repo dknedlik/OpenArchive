@@ -122,6 +122,24 @@ Async is not a requirement for every layer.
   connection counts are bounded
 - Async should be introduced only where it provides clear value, especially for
   services that spend large amounts of time waiting on remote providers
+- The initial HTTP transport should prefer a synchronous, thread-pooled server
+  rather than an async runtime wrapped around blocking Oracle calls
+- A small framework dependency is acceptable when it replaces real protocol and
+  connection-handling complexity; avoid framework dependencies that only hide
+  straightforward application control flow
+
+### Initial HTTP Runtime Decision
+
+For slice one, the preferred HTTP runtime is:
+
+- `tiny_http` for blocking HTTP request handling with a narrow in-repo router
+- explicit bounded request worker counts rather than unbounded thread creation
+- synchronous handler execution through parse plus canonical persistence
+- asynchronous enrichment only through durable jobs, never inline in request
+  handlers
+
+This keeps the runtime aligned with the blocking Oracle client, while still
+preserving a clean seam if a later stage needs an async or split-process model.
 
 The architecture should optimize first for clear stage boundaries, backpressure,
 and operability. Concurrency model details can then evolve per stage without

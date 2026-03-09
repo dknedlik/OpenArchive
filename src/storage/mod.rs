@@ -34,9 +34,9 @@ pub use job_store::EnrichmentJobStore;
 pub use oracle::OracleImportWriteStore;
 pub use segment_store::SegmentStore;
 pub use types::{
-    ArtifactClass, ArtifactStatus, EnrichmentStatus, ImportStatus, JobStatus, JobType, NewArtifact,
-    NewEnrichmentJob, NewImport, NewImportPayload, NewParticipant, NewSegment, PayloadFormat,
-    SegmentType, SourceType,
+    ArtifactClass, ArtifactIngestResult, ArtifactStatus, EnrichmentStatus, ImportStatus,
+    JobStatus, JobType, NewArtifact, NewEnrichmentJob, NewImport, NewImportPayload, NewParticipant,
+    NewSegment, PayloadFormat, SegmentType, SourceType,
 };
 
 use crate::error::StorageResult;
@@ -84,9 +84,15 @@ pub struct WriteImportSet {
 pub struct ImportWriteResult {
     pub import_id: String,
     pub import_status: ImportStatus,
-    pub artifact_ids: Vec<String>,
+    pub artifacts: Vec<ImportedArtifact>,
     pub failed_artifact_ids: Vec<String>,
     pub segments_written: usize,
+}
+
+pub struct ImportedArtifact {
+    pub artifact_id: String,
+    pub enrichment_status: EnrichmentStatus,
+    pub ingest_result: ArtifactIngestResult,
 }
 
 // ---------------------------------------------------------------------------

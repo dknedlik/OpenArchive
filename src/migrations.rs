@@ -164,7 +164,8 @@ fn load_applied_migrations(
         .map_err(|source| MigrationsError::LoadAppliedMigrations { source })?;
 
     for row_result in rows {
-        let row = row_result.map_err(|source| MigrationsError::ReadMigrationHistoryRow { source })?;
+        let row =
+            row_result.map_err(|source| MigrationsError::ReadMigrationHistoryRow { source })?;
         let version: String = row
             .get(0)
             .map_err(|source| MigrationsError::ReadMigrationVersion { source })?;
@@ -223,16 +224,16 @@ fn load_migration(path: &Path) -> MigrationsResult<Migration> {
 }
 
 fn parse_filename(filename: &str) -> MigrationsResult<(String, String)> {
-    let base = filename
-        .strip_suffix(".sql")
-        .ok_or_else(|| MigrationsError::MigrationFileMissingSqlSuffix {
+    let base = filename.strip_suffix(".sql").ok_or_else(|| {
+        MigrationsError::MigrationFileMissingSqlSuffix {
             filename: filename.to_string(),
-        })?;
-    let (version_part, name_part) = base
-        .split_once("__")
-        .ok_or_else(|| MigrationsError::MigrationFileInvalidPattern {
-            filename: filename.to_string(),
-        })?;
+        }
+    })?;
+    let (version_part, name_part) =
+        base.split_once("__")
+            .ok_or_else(|| MigrationsError::MigrationFileInvalidPattern {
+                filename: filename.to_string(),
+            })?;
 
     if !version_part.starts_with('V') || version_part.len() < 2 {
         return Err(MigrationsError::MigrationFileInvalidVersionPrefix {
@@ -252,12 +253,13 @@ fn execute_sql_script(conn: &Connection, migration: &Migration) -> MigrationsRes
             continue;
         }
 
-        conn.execute(&statement, &[])
-            .map_err(|source| MigrationsError::ExecuteMigrationStatement {
+        conn.execute(&statement, &[]).map_err(|source| {
+            MigrationsError::ExecuteMigrationStatement {
                 filename: migration.filename.clone(),
                 statement_preview: preview_sql_statement(&statement),
                 source,
-            })?;
+            }
+        })?;
     }
 
     Ok(())

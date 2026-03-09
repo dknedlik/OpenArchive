@@ -1,12 +1,12 @@
 use open_archive::config::DbConfig;
 use open_archive::migrations;
 use open_archive::storage::{
-    ImportStatus, ImportWriteStore, NewArtifact, NewEnrichmentJob, NewImport, NewImportPayload,
-    NewParticipant, NewSegment, OracleImportWriteStore,
-};
-use open_archive::storage::{
     ArtifactClass, ArtifactStatus, EnrichmentStatus, JobStatus, JobType, ParticipantRole,
     PayloadFormat, SegmentType, SourceType, VisibilityStatus,
+};
+use open_archive::storage::{
+    ArtifactIngestResult, ImportStatus, ImportWriteStore, NewArtifact, NewEnrichmentJob,
+    NewImport, NewImportPayload, NewParticipant, NewSegment, OracleImportWriteStore,
 };
 use open_archive::storage::{WriteArtifactSet, WriteImportSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -354,11 +354,17 @@ fn test_write_single_import_happy_path() {
     {
         let _test_lock = lock_live_test();
         let store = OracleImportWriteStore::new(config.clone());
-        let result = store.write_import(import_set).expect("write_import should succeed");
+        let result = store
+            .write_import(import_set)
+            .expect("write_import should succeed");
 
         assert_eq!(result.import_id, import_id);
         assert_eq!(result.import_status, ImportStatus::Completed);
-        assert_eq!(result.artifact_ids.len(), 1);
+        assert_eq!(result.artifacts.len(), 1);
+        assert_eq!(
+            result.artifacts[0].ingest_result,
+            ArtifactIngestResult::Created
+        );
         assert!(result.failed_artifact_ids.is_empty());
         assert_eq!(result.segments_written, 3);
 
@@ -376,7 +382,7 @@ fn test_write_single_import_happy_path() {
         assert_eq!(count_imported, 1);
         assert_eq!(count_failed, 0);
 
-        let artifact_id = &result.artifact_ids[0];
+        let artifact_id = &result.artifacts[0].artifact_id;
         let (art_count,): (i64,) = verify_conn
             .query_row_as::<(i64,)>(
                 "SELECT COUNT(*) FROM oa_artifact WHERE artifact_id = :1",
@@ -426,7 +432,9 @@ fn test_write_import_rollback_on_duplicate_payload() {
 
     {
         let _test_lock = lock_live_test();
-        store.write_import(import_set_1).expect("first write should succeed");
+        store
+            .write_import(import_set_1)
+            .expect("first write should succeed");
 
         // Build a second import with a different import_id but reuse the same payload sha256
         let mut import_set_2 = make_test_import_set(&suffix); // same suffix => same sha256
@@ -435,21 +443,34 @@ fn test_write_import_rollback_on_duplicate_payload() {
 
         let import_id_2 = import_set_2.import.import_id.clone();
 
-        let result = store.write_import(import_set_2);
-        assert!(
-            result.is_err(),
-            "write_import with duplicate payload sha256 should fail"
+        let result = store
+            .write_import(import_set_2)
+            .expect("write_import with duplicate payload should be idempotent");
+        assert_eq!(result.import_status, ImportStatus::Completed);
+        assert_eq!(result.artifacts.len(), 1);
+        assert_eq!(
+            result.artifacts[0].ingest_result,
+            ArtifactIngestResult::AlreadyExists
         );
+        assert!(result.failed_artifact_ids.is_empty());
 
-        // No oa_import row should exist for the second import_id
+        // A second import row should exist and point at the previously stored payload.
         let verify_conn = open_archive::db::connect(&config).expect("connect");
-        let (row_count,): (i64,) = verify_conn
-            .query_row_as::<(i64,)>(
-                "SELECT COUNT(*) FROM oa_import WHERE import_id = :1",
+        let (payload_id, status): (String, String) = verify_conn
+            .query_row_as::<(String, String)>(
+                "SELECT payload_id, import_status FROM oa_import WHERE import_id = :1",
                 &[&import_id_2],
             )
-            .expect("count query");
-        assert_eq!(row_count, 0, "no partial import row should exist after rollback");
+            .expect("import row should exist");
+        assert_eq!(status, "completed");
+
+        let (payload_count,): (i64,) = verify_conn
+            .query_row_as::<(i64,)>(
+                "SELECT COUNT(*) FROM oa_import_payload WHERE payload_id = :1",
+                &[&payload_id],
+            )
+            .expect("payload count query");
+        assert_eq!(payload_count, 1);
     }
 }
 
@@ -474,7 +495,9 @@ fn test_write_import_rollback_on_duplicate_artifact_hash() {
         let suffix2 = unique_suffix("dupartb");
         let mut import_set_2 = make_test_import_set(&suffix2);
         // Override the artifact hash to match the first import's artifact hash
-        import_set_2.artifact_sets[0].artifact.source_conversation_hash = {
+        import_set_2.artifact_sets[0]
+            .artifact
+            .source_conversation_hash = {
             use sha2::{Digest, Sha256};
             let mut h = Sha256::new();
             h.update(format!("conv-hash-{suffix}").as_bytes());
@@ -486,10 +509,14 @@ fn test_write_import_rollback_on_duplicate_artifact_hash() {
 
         let result = store
             .write_import(import_set_2)
-            .expect("write_import should finalize import failure state");
-        assert_eq!(result.import_status, ImportStatus::Failed);
-        assert!(result.artifact_ids.is_empty());
-        assert_eq!(result.failed_artifact_ids.len(), 1);
+            .expect("write_import should treat duplicate artifact hash as idempotent");
+        assert_eq!(result.import_status, ImportStatus::Completed);
+        assert_eq!(result.artifacts.len(), 1);
+        assert_eq!(
+            result.artifacts[0].ingest_result,
+            ArtifactIngestResult::AlreadyExists
+        );
+        assert!(result.failed_artifact_ids.is_empty());
 
         // No oa_artifact row should exist under import_id_2, but the import row should be finalized.
         let verify_conn = open_archive::db::connect(&config).expect("connect");
@@ -499,7 +526,10 @@ fn test_write_import_rollback_on_duplicate_artifact_hash() {
                 &[&import_id_2],
             )
             .expect("count query");
-        assert_eq!(artifact_count, 0, "no dangling artifact rows after rollback");
+        assert_eq!(
+            artifact_count, 0,
+            "no dangling artifact rows after rollback"
+        );
 
         let (status, count_imported, count_failed): (String, i64, i64) = verify_conn
             .query_row_as::<(String, i64, i64)>(
@@ -508,9 +538,9 @@ fn test_write_import_rollback_on_duplicate_artifact_hash() {
                 &[&import_id_2],
             )
             .expect("import row should exist");
-        assert_eq!(status, "failed");
+        assert_eq!(status, "completed");
         assert_eq!(count_imported, 0);
-        assert_eq!(count_failed, 1);
+        assert_eq!(count_failed, 0);
     }
 }
 
@@ -530,10 +560,14 @@ fn test_write_import_partial_success_finalizes_completed_with_errors() {
     let second_suffix = unique_suffix("partialb");
     let mut second_artifact = make_test_import_set(&second_suffix).artifact_sets.remove(0);
     second_artifact.artifact.import_id = import_id.clone();
-    second_artifact.artifact.source_conversation_hash =
-        import_set.artifact_sets[0].artifact.source_conversation_hash.clone();
-    second_artifact.artifact.content_hash_version =
-        import_set.artifact_sets[0].artifact.content_hash_version.clone();
+    second_artifact.artifact.source_conversation_hash = import_set.artifact_sets[0]
+        .artifact
+        .source_conversation_hash
+        .clone();
+    second_artifact.artifact.content_hash_version = import_set.artifact_sets[0]
+        .artifact
+        .content_hash_version
+        .clone();
     second_artifact.artifact.source_type = import_set.artifact_sets[0].artifact.source_type;
 
     import_set.import.conversation_count_detected = 2;
@@ -545,10 +579,18 @@ fn test_write_import_partial_success_finalizes_completed_with_errors() {
             .write_import(import_set)
             .expect("write_import should succeed with partial failures recorded");
 
-        assert_eq!(result.import_status, ImportStatus::CompletedWithErrors);
-        assert_eq!(result.artifact_ids.len(), 1);
-        assert_eq!(result.failed_artifact_ids.len(), 1);
+        assert_eq!(result.import_status, ImportStatus::Completed);
+        assert_eq!(result.artifacts.len(), 2);
+        assert_eq!(result.failed_artifact_ids.len(), 0);
         assert_eq!(result.segments_written, 3);
+        assert_eq!(
+            result.artifacts[0].ingest_result,
+            ArtifactIngestResult::Created
+        );
+        assert_eq!(
+            result.artifacts[1].ingest_result,
+            ArtifactIngestResult::AlreadyExists
+        );
 
         let verify_conn = open_archive::db::connect(&config).expect("connect");
         let (status, count_imported, count_failed): (String, i64, i64) = verify_conn
@@ -558,9 +600,9 @@ fn test_write_import_partial_success_finalizes_completed_with_errors() {
                 &[&import_id],
             )
             .expect("import row should exist");
-        assert_eq!(status, "completed_with_errors");
+        assert_eq!(status, "completed");
         assert_eq!(count_imported, 1);
-        assert_eq!(count_failed, 1);
+        assert_eq!(count_failed, 0);
 
         let (artifact_count,): (i64,) = verify_conn
             .query_row_as::<(i64,)>(

@@ -37,6 +37,9 @@ pub enum ConfigError {
     #[error("{key} is required when WALLET_DIR is not provided")]
     MissingEnvWithDependency { key: &'static str },
 
+    #[error("invalid {key} value {value:?}; expected positive integer")]
+    InvalidPositiveIntegerEnv { key: &'static str, value: String },
+
     #[error("set DB_PASSWORD or one of DB_DEV_PASSWORD / DB_PROD_PASSWORD / DB_ADMIN_PASSWORD")]
     MissingPassword,
 }

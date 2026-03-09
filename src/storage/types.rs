@@ -117,6 +117,36 @@ impl EnrichmentStatus {
     }
 }
 
+impl EnrichmentStatus {
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "running" => Some(Self::Running),
+            "completed" => Some(Self::Completed),
+            "partial" => Some(Self::Partial),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactIngestResult {
+    Created,
+    AlreadyExists,
+    Failed,
+}
+
+impl ArtifactIngestResult {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ArtifactIngestResult::Created => "created",
+            ArtifactIngestResult::AlreadyExists => "already_exists",
+            ArtifactIngestResult::Failed => "failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegmentType {
     Message,

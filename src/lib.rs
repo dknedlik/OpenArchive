@@ -2,6 +2,8 @@ pub mod config;
 pub mod db;
 pub mod domain;
 pub mod error;
+pub mod http;
+pub mod import_service;
 pub mod migrations;
 pub mod parser;
 pub mod storage;

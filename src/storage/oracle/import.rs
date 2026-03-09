@@ -3,6 +3,19 @@ use oracle::Connection;
 
 use crate::storage::types::{ImportStatus, NewImport, NewImportPayload};
 
+pub fn find_payload_id_by_sha256(
+    conn: &Connection,
+    payload_sha256: &str,
+) -> StorageResult<Option<String>> {
+    let row = conn
+        .query_row_as::<(String,)>(
+            "SELECT payload_id FROM oa_import_payload WHERE payload_sha256 = :1",
+            &[&payload_sha256],
+        )
+        .ok();
+    Ok(row.map(|(payload_id,)| payload_id))
+}
+
 pub fn insert_payload(conn: &Connection, p: &NewImportPayload) -> StorageResult<()> {
     let format = p.payload_format.as_str();
     conn.execute(

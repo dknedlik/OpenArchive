@@ -12,12 +12,10 @@ pub fn connect(config: &DbConfig) -> DbResult<Connection> {
     ensure_tns_admin(config);
 
     let pool = pool_for(config)?;
-    let conn = pool
-        .get()
-        .map_err(|source| DbError::AcquireConnection {
-            tns_alias: config.tns_alias.clone(),
-            source,
-        })?;
+    let conn = pool.get().map_err(|source| DbError::AcquireConnection {
+        tns_alias: config.tns_alias.clone(),
+        source,
+    })?;
 
     if let Some(timeout) = oracle_call_timeout()? {
         conn.set_call_timeout(Some(timeout))
@@ -48,12 +46,10 @@ fn pool_for(config: &DbConfig) -> DbResult<Pool> {
         .ping_interval(Some(pool_ping_interval()?))
         .map_err(|source| DbError::ConfigurePoolPingInterval { source })?;
 
-    let pool = builder
-        .build()
-        .map_err(|source| DbError::CreatePool {
-            tns_alias: config.tns_alias.clone(),
-            source,
-        })?;
+    let pool = builder.build().map_err(|source| DbError::CreatePool {
+        tns_alias: config.tns_alias.clone(),
+        source,
+    })?;
     guard.insert(config.clone(), pool.clone());
     Ok(pool)
 }
@@ -85,15 +81,13 @@ fn pool_stmt_cache_size() -> DbResult<u32> {
 }
 
 fn pool_get_timeout() -> DbResult<Duration> {
-    duration_env_ms("OA_DB_POOL_GET_TIMEOUT_MS").map(|value| {
-        value.unwrap_or_else(|| Duration::from_secs(30))
-    })
+    duration_env_ms("OA_DB_POOL_GET_TIMEOUT_MS")
+        .map(|value| value.unwrap_or_else(|| Duration::from_secs(30)))
 }
 
 fn pool_ping_interval() -> DbResult<Duration> {
-    duration_env_ms("OA_DB_POOL_PING_INTERVAL_MS").map(|value| {
-        value.unwrap_or_else(|| Duration::from_secs(60))
-    })
+    duration_env_ms("OA_DB_POOL_PING_INTERVAL_MS")
+        .map(|value| value.unwrap_or_else(|| Duration::from_secs(60)))
 }
 
 fn u32_env(key: &'static str) -> DbResult<Option<u32>> {

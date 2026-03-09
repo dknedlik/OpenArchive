@@ -1,7 +1,7 @@
 id: "05"
 title: Add POST /imports/chatgpt endpoint
 assignee: david
-status: todo
+status: done
 type: feature
 priority: high
 planned_order: 4
@@ -13,17 +13,20 @@ description: |
   submitted through the service and persisted through the canonical import path.
 acceptance_criteria:
   - The service exposes `POST /imports/chatgpt`.
-  - A valid request persists import data and returns import id, artifact ids, import status, and enrichment status.
+  - Slice one accepts a raw `conversations.json` request body for this endpoint.
+  - A valid request persists import data and returns `import_id`, `import_status`, and `artifacts[{artifact_id,enrichment_status}]`.
   - The endpoint does not wait for enrichment completion.
+  - Malformed request bodies return `400`; successful canonical imports return `200` even when enrichment is still pending.
 files_touched:
   - src/
 implementation_plan: |
-  - Introduce a minimal HTTP server and request routing.
+  - Introduce a minimal `tiny_http`-based HTTP server and request routing.
   - Wire the parser and write path into one application service entrypoint.
-  - Keep the response compact and machine-oriented.
+  - Keep the response compact and machine-oriented with one artifact status record per imported conversation.
 test_plan: |
   - Add request/response tests for success and malformed input.
+  - Verify multiple imported conversations produce multiple `artifacts` entries.
 risks: |
   - It is easy to let transport concerns bleed into domain code at this point.
 notes: |
-  - Keep this endpoint narrow; broader API design is out of scope for now.
+  - Keep this endpoint narrow; multipart and zip/file-upload support remain out of scope for now.
