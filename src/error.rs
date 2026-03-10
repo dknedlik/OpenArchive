@@ -237,6 +237,12 @@ pub enum StorageError {
         source: oracle::Error,
     },
 
+    #[error("failed to list artifacts")]
+    ListArtifacts {
+        #[source]
+        source: oracle::Error,
+    },
+
     #[error("failed to insert participant {participant_id} for artifact {artifact_id}")]
     InsertParticipant {
         participant_id: String,

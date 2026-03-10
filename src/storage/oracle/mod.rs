@@ -8,8 +8,8 @@ use crate::db;
 use crate::error::{StorageError, StorageResult};
 use crate::storage::types::ImportStatus;
 use crate::storage::{
-    ArtifactIngestResult, ImportWriteResult, ImportWriteStore, ImportedArtifact, StorageTx,
-    WriteImportSet,
+    ArtifactIngestResult, ArtifactReadStore, ImportWriteResult, ImportWriteStore, ImportedArtifact,
+    StorageTx, WriteImportSet,
 };
 
 // ---------------------------------------------------------------------------
@@ -43,6 +43,13 @@ impl OracleImportWriteStore {
     }
 }
 
+impl ArtifactReadStore for OracleImportWriteStore {
+    fn list_artifacts(&self) -> StorageResult<Vec<crate::storage::types::ArtifactListItem>> {
+        let conn = db::connect(&self.config)?;
+        artifact::list_artifacts(&conn)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ImportWriteStore implementation
 // ---------------------------------------------------------------------------
@@ -73,7 +80,8 @@ impl ImportWriteStore for OracleImportWriteStore {
         // Phase 2: artifact sets
         // ------------------------------------------------------------------
         let import_id = import_set.import.import_id.clone();
-        let mut artifacts: Vec<ImportedArtifact> = Vec::with_capacity(import_set.artifact_sets.len());
+        let mut artifacts: Vec<ImportedArtifact> =
+            Vec::with_capacity(import_set.artifact_sets.len());
         let mut failed_artifact_ids: Vec<String> =
             Vec::with_capacity(import_set.artifact_sets.len());
         let mut segments_written: usize = 0;

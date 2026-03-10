@@ -1,6 +1,6 @@
 use crate::error::{StorageError, StorageResult};
-use oracle::ErrorKind;
 use oracle::Connection;
+use oracle::ErrorKind;
 
 use crate::storage::types::{ClaimedJob, JobStatus, JobType, NewEnrichmentJob, RetryOutcome};
 
@@ -220,7 +220,13 @@ pub fn mark_job_retryable(
              claimed_by = NULL, \
              claimed_at = NULL \
          WHERE job_id = :4 AND claimed_by = :5",
-        &[&retryable, &error_message, &retry_after_seconds, &job_id, &worker_id],
+        &[
+            &retryable,
+            &error_message,
+            &retry_after_seconds,
+            &job_id,
+            &worker_id,
+        ],
     )
     .map_err(|source| StorageError::UpdateJobStatus {
         job_id: job_id.to_string(),

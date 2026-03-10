@@ -5,8 +5,8 @@ use open_archive::storage::{
     PayloadFormat, SegmentType, SourceType, VisibilityStatus,
 };
 use open_archive::storage::{
-    ArtifactIngestResult, ImportStatus, ImportWriteStore, NewArtifact, NewEnrichmentJob,
-    NewImport, NewImportPayload, NewParticipant, NewSegment, OracleImportWriteStore,
+    ArtifactIngestResult, ImportStatus, ImportWriteStore, NewArtifact, NewEnrichmentJob, NewImport,
+    NewImportPayload, NewParticipant, NewSegment, OracleImportWriteStore,
 };
 use open_archive::storage::{WriteArtifactSet, WriteImportSet};
 use std::sync::atomic::{AtomicU64, Ordering};

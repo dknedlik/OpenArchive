@@ -28,16 +28,16 @@ pub mod segment_store;
 pub mod types;
 
 pub use crate::domain::{ParticipantRole, SourceTimestamp, VisibilityStatus};
-pub use artifact_store::ArtifactStore;
+pub use artifact_store::{ArtifactReadStore, ArtifactStore};
 pub use import_store::{ImportPayloadStore, ImportStore};
 pub use job_store::{EnrichmentJobLifecycleStore, EnrichmentJobStore};
 pub use oracle::{OracleEnrichmentJobStore, OracleImportWriteStore};
 pub use segment_store::SegmentStore;
 pub use types::{
-    ArtifactClass, ArtifactIngestResult, ArtifactStatus, ClaimedJob,
-    ConversationEnrichmentPayload, EnrichmentStatus, ImportStatus,
-    JobStatus, JobType, NewArtifact, NewEnrichmentJob, NewImport, NewImportPayload, NewParticipant,
-    NewSegment, PayloadFormat, RetryOutcome, SegmentType, SourceType,
+    ArtifactClass, ArtifactIngestResult, ArtifactListItem, ArtifactStatus, ClaimedJob,
+    ConversationEnrichmentPayload, EnrichmentStatus, ImportStatus, JobStatus, JobType, NewArtifact,
+    NewEnrichmentJob, NewImport, NewImportPayload, NewParticipant, NewSegment, PayloadFormat,
+    RetryOutcome, SegmentType, SourceType,
 };
 
 use crate::error::StorageResult;

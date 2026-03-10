@@ -18,3 +18,8 @@ pub trait ArtifactStore {
         participant: &NewParticipant,
     ) -> StorageResult<()>;
 }
+
+/// Read model for listing imported artifacts.
+pub trait ArtifactReadStore {
+    fn list_artifacts(&self) -> StorageResult<Vec<crate::storage::types::ArtifactListItem>>;
+}

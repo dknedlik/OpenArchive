@@ -117,6 +117,15 @@ impl EnrichmentStatus {
     }
 }
 
+impl serde::Serialize for EnrichmentStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 impl EnrichmentStatus {
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
@@ -415,4 +424,15 @@ pub enum RetryOutcome {
     Retried,
     /// `attempt_count >= max_attempts`: job was terminally failed instead.
     RetriesExhausted,
+}
+
+/// Narrow read-model row for `GET /artifacts`.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct ArtifactListItem {
+    pub artifact_id: String,
+    pub title: Option<String>,
+    pub source_type: String,
+    pub created_at_source: Option<String>,
+    pub captured_at: String,
+    pub enrichment_status: EnrichmentStatus,
 }

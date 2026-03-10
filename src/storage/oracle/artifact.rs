@@ -1,7 +1,9 @@
 use crate::error::{StorageError, StorageResult};
 use oracle::Connection;
 
-use crate::storage::types::{EnrichmentStatus, NewArtifact, NewParticipant, SourceType};
+use crate::storage::types::{
+    ArtifactListItem, EnrichmentStatus, NewArtifact, NewParticipant, SourceType,
+};
 
 pub fn find_artifact_by_source_hash(
     conn: &Connection,
@@ -93,4 +95,50 @@ pub fn insert_participant(conn: &Connection, p: &NewParticipant) -> StorageResul
         source,
     })?;
     Ok(())
+}
+
+pub fn list_artifacts(conn: &Connection) -> StorageResult<Vec<ArtifactListItem>> {
+    let rows = conn
+        .query(
+            "SELECT artifact_id, \
+                    title, \
+                    source_type, \
+                    TO_CHAR(created_at_source, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9TZH:TZM'), \
+                    TO_CHAR(captured_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9TZH:TZM'), \
+                    enrichment_status \
+             FROM oa_artifact \
+             ORDER BY captured_at DESC, artifact_id ASC",
+            &[],
+        )
+        .map_err(|source| StorageError::ListArtifacts { source })?;
+
+    let mut artifacts = Vec::new();
+    for row_result in rows {
+        let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
+        let enrichment_status: String = row
+            .get(5)
+            .map_err(|source| StorageError::ListArtifacts { source })?;
+
+        artifacts.push(ArtifactListItem {
+            artifact_id: row
+                .get(0)
+                .map_err(|source| StorageError::ListArtifacts { source })?,
+            title: row
+                .get(1)
+                .map_err(|source| StorageError::ListArtifacts { source })?,
+            source_type: row
+                .get(2)
+                .map_err(|source| StorageError::ListArtifacts { source })?,
+            created_at_source: row
+                .get(3)
+                .map_err(|source| StorageError::ListArtifacts { source })?,
+            captured_at: row
+                .get(4)
+                .map_err(|source| StorageError::ListArtifacts { source })?,
+            enrichment_status: EnrichmentStatus::from_str(&enrichment_status)
+                .expect("oa_artifact.enrichment_status constrained by DDL"),
+        });
+    }
+
+    Ok(artifacts)
 }

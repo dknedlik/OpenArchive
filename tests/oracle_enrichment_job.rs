@@ -4,8 +4,8 @@ use open_archive::storage::{
     ArtifactClass, ArtifactStatus, ConversationEnrichmentPayload, EnrichmentJobLifecycleStore,
     EnrichmentStatus, ImportWriteStore, JobStatus, JobType, NewArtifact, NewEnrichmentJob,
     NewImport, NewImportPayload, NewParticipant, NewSegment, OracleEnrichmentJobStore,
-    OracleImportWriteStore, PayloadFormat, RetryOutcome, SegmentType, SourceType,
-    VisibilityStatus, WriteArtifactSet, WriteImportSet,
+    OracleImportWriteStore, PayloadFormat, RetryOutcome, SegmentType, SourceType, VisibilityStatus,
+    WriteArtifactSet, WriteImportSet,
 };
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -151,11 +151,8 @@ fn make_test_import_set_with_max_attempts(suffix: &str, max_attempts: i32) -> Wr
         format!("{:x}", h.finalize())
     };
 
-    let enrichment_payload = ConversationEnrichmentPayload::new_v1(
-        &artifact_id,
-        &import_id,
-        SourceType::ChatGptExport,
-    );
+    let enrichment_payload =
+        ConversationEnrichmentPayload::new_v1(&artifact_id, &import_id, SourceType::ChatGptExport);
 
     WriteImportSet {
         payload: NewImportPayload {
@@ -447,7 +444,10 @@ fn test_claim_retryable_reclaim_complete() {
             .expect("should re-claim the retryable job");
 
         assert_eq!(claimed_2.job_id, expected_job_id);
-        assert_eq!(claimed_2.attempt_count, 2, "second claim should be attempt 2");
+        assert_eq!(
+            claimed_2.attempt_count, 2,
+            "second claim should be attempt 2"
+        );
 
         // Complete on the second attempt.
         lifecycle_store
@@ -502,7 +502,12 @@ fn test_retryable_exhausted_becomes_terminal() {
 
         // Mark retryable (attempt 1 < max_attempts 2 => Retried).
         let outcome_1 = lifecycle_store
-            .mark_job_retryable("worker-exhaust-1", &claimed_1.job_id, "transient error 1", 0)
+            .mark_job_retryable(
+                "worker-exhaust-1",
+                &claimed_1.job_id,
+                "transient error 1",
+                0,
+            )
             .expect("mark_job_retryable should succeed");
 
         assert_eq!(outcome_1, RetryOutcome::Retried);
@@ -517,7 +522,12 @@ fn test_retryable_exhausted_becomes_terminal() {
 
         // Mark retryable again (attempt 2 >= max_attempts 2 => RetriesExhausted).
         let outcome_2 = lifecycle_store
-            .mark_job_retryable("worker-exhaust-2", &claimed_2.job_id, "transient error 2", 0)
+            .mark_job_retryable(
+                "worker-exhaust-2",
+                &claimed_2.job_id,
+                "transient error 2",
+                0,
+            )
             .expect("mark_job_retryable should succeed");
 
         assert_eq!(outcome_2, RetryOutcome::RetriesExhausted);
@@ -567,7 +577,10 @@ fn test_claim_returns_none_when_empty() {
             .claim_next_job("worker-empty")
             .expect("claim_next_job should succeed");
 
-        assert!(result.is_none(), "claim should return None when no jobs are pending");
+        assert!(
+            result.is_none(),
+            "claim should return None when no jobs are pending"
+        );
     }
 }
 
@@ -626,9 +639,7 @@ fn test_concurrent_claim_protection() {
                 .into_iter()
                 .collect();
         let expected_ids: std::collections::HashSet<&str> =
-            [job_id_a.as_str(), job_id_b.as_str()]
-                .into_iter()
-                .collect();
+            [job_id_a.as_str(), job_id_b.as_str()].into_iter().collect();
         assert_eq!(
             claimed_ids, expected_ids,
             "claimed jobs should be exactly the two seeded jobs"
@@ -683,7 +694,10 @@ fn test_payload_matches_documented_schema() {
             SourceType::ChatGptExport,
         );
 
-        assert_eq!(payload, expected, "round-tripped payload must match original");
+        assert_eq!(
+            payload, expected,
+            "round-tripped payload must match original"
+        );
         assert_eq!(payload.schema_version, "1");
         assert_eq!(payload.artifact_id, artifact_id);
         assert_eq!(payload.import_id, import_id);

@@ -4,26 +4,42 @@ use tiny_http::{Header, Method, Request, Response, StatusCode};
 
 use crate::error::OpenArchiveError;
 use crate::import_service::import_chatgpt_payload;
-use crate::storage::ImportWriteStore;
+use crate::storage::{ArtifactReadStore, ImportWriteStore};
 
 pub fn build_response<S>(request: &mut Request, store: &S) -> Response<Cursor<Vec<u8>>>
 where
-    S: ImportWriteStore,
+    S: ImportWriteStore + ArtifactReadStore,
 {
     match (request.method(), request.url()) {
         (&Method::Post, "/imports/chatgpt") => handle_post_imports_chatgpt(request, store),
+        (&Method::Get, "/artifacts") => handle_get_artifacts(store),
         _ => text_response(StatusCode(404), "not found"),
     }
 }
 
 fn handle_post_imports_chatgpt<S>(request: &mut Request, store: &S) -> Response<Cursor<Vec<u8>>>
 where
-    S: ImportWriteStore,
+    S: ImportWriteStore + ArtifactReadStore,
 {
     match read_request_body(request)
         .and_then(|body| import_chatgpt_payload(store, &body).map_err(HttpError::from))
     {
         Ok(result) => json_response(StatusCode(200), &result),
+        Err(err) => err.into_response(),
+    }
+}
+
+fn handle_get_artifacts<S>(store: &S) -> Response<Cursor<Vec<u8>>>
+where
+    S: ArtifactReadStore,
+{
+    #[derive(serde::Serialize)]
+    struct ArtifactListResponse {
+        artifacts: Vec<crate::storage::ArtifactListItem>,
+    }
+
+    match store.list_artifacts().map_err(HttpError::from) {
+        Ok(artifacts) => json_response(StatusCode(200), &ArtifactListResponse { artifacts }),
         Err(err) => err.into_response(),
     }
 }
@@ -82,6 +98,12 @@ impl From<OpenArchiveError> for HttpError {
     }
 }
 
+impl From<crate::error::StorageError> for HttpError {
+    fn from(value: crate::error::StorageError) -> Self {
+        Self::Internal(value.to_string())
+    }
+}
+
 impl HttpError {
     fn into_response(self) -> Response<Cursor<Vec<u8>>> {
         match self {
@@ -100,12 +122,15 @@ impl HttpError {
 mod tests {
     use super::*;
     use crate::storage::{
-        ArtifactIngestResult, EnrichmentStatus, ImportStatus, ImportWriteResult, ImportedArtifact,
-        WriteImportSet,
+        ArtifactIngestResult, ArtifactListItem, ArtifactReadStore, EnrichmentStatus, ImportStatus,
+        ImportWriteResult, ImportedArtifact, WriteImportSet,
     };
+    use std::io::Read;
     use tiny_http::TestRequest;
 
-    struct MockStore;
+    struct MockStore {
+        artifacts: Vec<ArtifactListItem>,
+    }
 
     impl ImportWriteStore for MockStore {
         fn write_import(
@@ -130,35 +155,117 @@ mod tests {
         }
     }
 
+    impl ArtifactReadStore for MockStore {
+        fn list_artifacts(&self) -> crate::error::StorageResult<Vec<ArtifactListItem>> {
+            Ok(self.artifacts.clone())
+        }
+    }
+
     #[test]
     fn post_imports_chatgpt_returns_json_payload() {
+        let store = MockStore {
+            artifacts: Vec::new(),
+        };
         let mut request = TestRequest::new()
             .with_method(Method::Post)
             .with_path("/imports/chatgpt")
             .with_body(valid_export())
             .into();
 
-        let response = build_response(&mut request, &MockStore);
+        let response = build_response(&mut request, &store);
         assert_eq!(response.status_code(), StatusCode(200));
     }
 
     #[test]
     fn post_imports_chatgpt_rejects_malformed_json() {
+        let store = MockStore {
+            artifacts: Vec::new(),
+        };
         let mut request = TestRequest::new()
             .with_method(Method::Post)
             .with_path("/imports/chatgpt")
             .with_body(r#"{"bad":true}"#)
             .into();
 
-        let response = build_response(&mut request, &MockStore);
+        let response = build_response(&mut request, &store);
         assert_eq!(response.status_code(), StatusCode(400));
     }
 
     #[test]
     fn unknown_route_returns_404() {
+        let store = MockStore {
+            artifacts: Vec::new(),
+        };
         let mut request = TestRequest::new().with_path("/missing").into();
-        let response = build_response(&mut request, &MockStore);
+        let response = build_response(&mut request, &store);
         assert_eq!(response.status_code(), StatusCode(404));
+    }
+
+    #[test]
+    fn get_artifacts_returns_empty_envelope() {
+        let store = MockStore {
+            artifacts: Vec::new(),
+        };
+        let mut request = TestRequest::new()
+            .with_method(Method::Get)
+            .with_path("/artifacts")
+            .into();
+
+        let response = build_response(&mut request, &store);
+        assert_eq!(response.status_code(), StatusCode(200));
+        assert_eq!(response_body_string(response), r#"{"artifacts":[]}"#);
+    }
+
+    #[test]
+    fn get_artifacts_returns_machine_first_fields_in_order() {
+        let store = MockStore {
+            artifacts: vec![
+                ArtifactListItem {
+                    artifact_id: "artifact-b".to_string(),
+                    title: Some("Newest".to_string()),
+                    source_type: "chatgpt_export".to_string(),
+                    created_at_source: None,
+                    captured_at: "2026-03-10T14:00:00.000000000+00:00".to_string(),
+                    enrichment_status: EnrichmentStatus::Running,
+                },
+                ArtifactListItem {
+                    artifact_id: "artifact-a".to_string(),
+                    title: Some("Older".to_string()),
+                    source_type: "chatgpt_export".to_string(),
+                    created_at_source: Some("2026-03-09T12:30:00.000000000+00:00".to_string()),
+                    captured_at: "2026-03-09T13:00:00.000000000+00:00".to_string(),
+                    enrichment_status: EnrichmentStatus::Pending,
+                },
+            ],
+        };
+        let mut request = TestRequest::new()
+            .with_method(Method::Get)
+            .with_path("/artifacts")
+            .into();
+
+        let response = build_response(&mut request, &store);
+        assert_eq!(response.status_code(), StatusCode(200));
+        assert_eq!(
+            response_body_string(response),
+            concat!(
+                "{\"artifacts\":[",
+                "{\"artifact_id\":\"artifact-b\",\"title\":\"Newest\",\"source_type\":\"chatgpt_export\",",
+                "\"created_at_source\":null,\"captured_at\":\"2026-03-10T14:00:00.000000000+00:00\",",
+                "\"enrichment_status\":\"running\"},",
+                "{\"artifact_id\":\"artifact-a\",\"title\":\"Older\",\"source_type\":\"chatgpt_export\",",
+                "\"created_at_source\":\"2026-03-09T12:30:00.000000000+00:00\",",
+                "\"captured_at\":\"2026-03-09T13:00:00.000000000+00:00\",",
+                "\"enrichment_status\":\"pending\"}",
+                "]}"
+            )
+        );
+    }
+
+    fn response_body_string(response: Response<Cursor<Vec<u8>>>) -> String {
+        let mut body = String::new();
+        let mut reader = response.into_reader();
+        reader.read_to_string(&mut body).unwrap();
+        body
     }
 
     fn valid_export() -> &'static str {
