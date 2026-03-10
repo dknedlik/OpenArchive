@@ -1,0 +1,32 @@
+id: "11"
+title: Add enrichment execution boundary and stub processor
+assignee: david
+status: todo
+type: feature
+priority: medium
+planned_order: 10
+milestone: M1.first_vertical_slice
+labels: [enrichment, workers, architecture]
+depends_on: ["09", "10"]
+description: |
+  Introduce the first execution boundary between job claiming and metadata
+  persistence so workers can run a stub or fixture-backed enrichment processor
+  without coupling execution flow directly to HTTP or storage internals.
+acceptance_criteria:
+  - Worker code can claim a pending conversation-enrichment job and invoke a processor boundary with a self-contained input shape.
+  - The processor boundary can return summary/classification/memory outputs without hard-coding Oracle details.
+  - A stub processor exists that emits deterministic fixture-style outputs suitable for tests.
+  - Worker execution persists derivation runs and derived objects through the new storage boundary rather than ad hoc SQL in the worker.
+files_touched:
+  - src/
+implementation_plan: |
+  - Define the processor-facing input/output contract for one conversation enrichment attempt.
+  - Keep the first implementation deterministic so worker behavior can be exercised before a real model-backed pipeline lands.
+  - Route worker execution through explicit stages: claim, load inputs, process, persist outputs, finalize statuses.
+test_plan: |
+  - Add tests covering a successful stub execution path from claimed job to persisted derived outputs.
+  - Add a test proving processor failures surface through explicit job/artifact status transitions.
+risks: |
+  - If the first worker mixes orchestration, prompting, and SQL writes together, the later real enrichment path will be hard to replace.
+notes: |
+  - This task is still not the real inference pipeline; it creates the seam that real enrichment will plug into.

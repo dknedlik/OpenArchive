@@ -1,0 +1,34 @@
+id: "16"
+title: Add large-conversation chunk-and-reduce enrichment path
+assignee: david
+status: todo
+type: feature
+priority: medium
+planned_order: 15
+milestone: M1.first_vertical_slice
+labels: [enrichment, chunking, large-context]
+depends_on: ["12"]
+description: |
+  Implement the slice-one large-conversation path so enrichment can fall back
+  from direct conversation-level processing to ordered message-window
+  chunk-and-reduce execution when the conversation exceeds the configured token
+  budget.
+acceptance_criteria:
+  - The enrichment pipeline can choose between direct conversation-level execution and chunk-and-reduce execution using an explicit token or size policy.
+  - Large conversations can produce window-level outputs that reduce into conversation-level summary and memory outputs.
+  - Window-level or reduction outputs still preserve derivation runs and evidence linkage.
+  - The final conversation-level outputs remain compatible with `conversation_resume` assembly.
+files_touched:
+  - src/
+  - docs/
+implementation_plan: |
+  - Introduce a first deterministic chunking policy over ordered message segments.
+  - Persist any needed `message_window` scope and reduction lineage through the existing provenance tables.
+  - Keep the direct path as the default for small conversations.
+test_plan: |
+  - Add tests for one conversation that stays in the direct path and one that triggers chunk-and-reduce.
+  - Verify reduced outputs still have grounded provenance and usable conversation-level results.
+risks: |
+  - If large-conversation handling is deferred implicitly, slice one will only be valid for toy transcripts even though the plan calls out this requirement.
+notes: |
+  - If milestone scope changes and this is deferred, the slice plan should be narrowed explicitly rather than leaving the requirement implied.

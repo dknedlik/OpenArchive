@@ -1,0 +1,33 @@
+id: "13"
+title: Finalize enrichment status and partial-failure semantics
+assignee: david
+status: todo
+type: feature
+priority: high
+planned_order: 12
+milestone: M1.first_vertical_slice
+labels: [enrichment, status, failure-handling]
+depends_on: ["11", "12"]
+description: |
+  Define and implement the slice-one rules that map enrichment execution
+  outcomes into durable job and artifact statuses, including partial success
+  when some derived outputs persist and later steps fail.
+acceptance_criteria:
+  - Artifact enrichment status transitions to `completed`, `partial`, or `failed` using explicit slice-one rules.
+  - Job status transitions remain consistent with persisted derived outputs and error messages.
+  - Successful summary/classification/memory outputs remain persisted even when a later enrichment step fails.
+  - `GET /artifacts` reflects final artifact enrichment state accurately after worker execution.
+files_touched:
+  - src/
+  - tests/
+implementation_plan: |
+  - Write down the minimum output set required for `completed` versus `partial`.
+  - Update worker finalization so artifact and job statuses are driven by persisted outcomes rather than only processor return codes.
+  - Preserve explicit error details for retryable or partial cases.
+test_plan: |
+  - Add tests for fully successful enrichment, partial output persistence with later failure, and terminal failure with no usable outputs.
+  - Verify `GET /artifacts` surfaces the final status after worker execution.
+risks: |
+  - If partial success semantics stay implicit, operators and later retrieval code will not know whether metadata is trustworthy enough to use.
+notes: |
+  - This task turns enrichment status from a placeholder into a real contract.

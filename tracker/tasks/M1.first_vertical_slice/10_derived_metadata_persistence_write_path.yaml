@@ -1,0 +1,35 @@
+id: "10"
+title: Implement derived metadata persistence write path
+assignee: david
+status: todo
+type: feature
+priority: high
+planned_order: 9
+milestone: M1.first_vertical_slice
+labels: [storage, provenance, metadata, oracle]
+depends_on: ["03", "06"]
+description: |
+  Implement the first Oracle-backed write path for `oa_derivation_run`,
+  `oa_derived_object`, and `oa_evidence_link` so slice-one enrichment can
+  persist provenance-bearing summary, classification, and memory outputs.
+acceptance_criteria:
+  - Storage interfaces exist for writing one derivation run with one or more derived objects and their evidence links.
+  - The write path uses the live `V001` schema without introducing new tables or columns.
+  - Persisted derived objects support at least `summary`, `classification`, and `memory`.
+  - Every persisted derived object references a derivation run.
+  - Every persisted derived object can be linked to one or more supporting segments through `oa_evidence_link`.
+  - Integration tests cover successful writes and rollback on invalid evidence/object relationships.
+files_touched:
+  - src/
+  - tests/
+implementation_plan: |
+  - Extend the storage boundary with domain-shaped types for derivation runs, derived objects, and evidence links.
+  - Add Oracle insert operations against the provenance and metadata tables.
+  - Keep the write contract narrow enough that a worker can persist one enrichment attempt atomically.
+test_plan: |
+  - Add integration tests proving one summary, one classification, and one memory can be written with evidence.
+  - Verify invalid segment references or partial writes do not leave orphaned provenance rows behind.
+risks: |
+  - If provenance persistence is bolted on after enrichment logic exists, the worker will become the accidental schema contract.
+notes: |
+  - This task is the persistence floor for the actual "brain" part of slice one.

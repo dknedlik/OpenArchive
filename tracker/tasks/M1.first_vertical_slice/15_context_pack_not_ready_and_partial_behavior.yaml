@@ -1,0 +1,32 @@
+id: "15"
+title: Add not-ready and partial-enrichment context-pack behavior
+assignee: david
+status: todo
+type: feature
+priority: medium
+planned_order: 14
+milestone: M1.first_vertical_slice
+labels: [api, context-pack, status]
+depends_on: ["13", "14"]
+description: |
+  Make `GET /context-packs/conversation-resume` handle not-ready and partial
+  enrichment states explicitly so clients can distinguish "nothing available
+  yet" from "best available pack with gaps."
+acceptance_criteria:
+  - The endpoint returns a documented not-ready response when minimum required enrichment has not completed yet.
+  - Partial enrichment can return the best available pack only when the minimum required output set exists.
+  - Response behavior is driven by persisted artifact/derived-object status rather than in-memory worker state.
+  - Error and not-ready cases remain machine-readable and compact.
+files_touched:
+  - src/
+implementation_plan: |
+  - Define the minimum derived-output set required to assemble a usable `conversation_resume`.
+  - Return explicit not-ready output when the minimum set is absent.
+  - Allow partial packs only when they remain grounded and coherent.
+test_plan: |
+  - Add endpoint tests for not-ready, partial, and ready states.
+  - Verify incomplete enrichment does not accidentally return misleading empty fields as if the pack were complete.
+risks: |
+  - Without explicit semantics here, clients will treat absent metadata as complete metadata and produce misleading downstream behavior.
+notes: |
+  - This task is about response semantics, not new enrichment logic.

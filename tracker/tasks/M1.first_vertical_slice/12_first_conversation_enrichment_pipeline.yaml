@@ -1,0 +1,35 @@
+id: "12"
+title: Implement first conversation enrichment pipeline
+assignee: david
+status: todo
+type: feature
+priority: high
+planned_order: 11
+milestone: M1.first_vertical_slice
+labels: [enrichment, metadata, inference]
+depends_on: ["10", "11"]
+description: |
+  Implement the first concrete slice-one enrichment path that produces one
+  conversation summary, at least one classification, and a small durable memory
+  set grounded in message-segment evidence.
+acceptance_criteria:
+  - One enrichment execution path exists for `chatgpt_export` conversation artifacts.
+  - Successful enrichment persists one conversation-level summary.
+  - Successful enrichment persists at least one classification derived object.
+  - Successful enrichment persists one or more memory derived objects with segment-level evidence.
+  - Persisted outputs include enough structured payload to support later context-pack assembly.
+  - The worker does not need to wait on HTTP request handling to execute this pipeline.
+files_touched:
+  - src/
+  - docs/
+implementation_plan: |
+  - Start with one concrete extraction/summarization path only.
+  - Keep response/object shapes machine-readable and stable enough for context-pack assembly.
+  - Persist evidence links as part of the same execution flow so metadata remains grounded.
+test_plan: |
+  - Add tests verifying summary, classification, and memory outputs are persisted for one imported conversation.
+  - Verify every emitted object is backed by at least one evidence link to a source segment.
+risks: |
+  - Ungrounded summary or memory output would undermine the core trust model of the archive.
+notes: |
+  - Slice one needs only one concrete path here; provider selection and multi-backend inference remain out of scope.

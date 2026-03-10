@@ -1,0 +1,33 @@
+id: "14"
+title: Add GET /context-packs/conversation-resume endpoint
+assignee: david
+status: todo
+type: feature
+priority: high
+planned_order: 13
+milestone: M1.first_vertical_slice
+labels: [api, context-pack, retrieval]
+depends_on: ["07", "12", "13"]
+description: |
+  Add the first context-pack retrieval endpoint so one enriched conversation
+  artifact can be returned as a compact, machine-readable
+  `conversation_resume` pack with supporting evidence and provenance.
+acceptance_criteria:
+  - The service exposes `GET /context-packs/conversation-resume`.
+  - The endpoint accepts a conversation/artifact identifier as input.
+  - Successful responses include compact machine-readable summary, memories, classifications, supporting evidence, provenance, and policy fields.
+  - Supporting evidence references message segments and short excerpts rather than full transcript dumps.
+  - The response is assembled from persisted artifact, segment, derived-object, and evidence-link rows.
+files_touched:
+  - src/
+implementation_plan: |
+  - Add read-model queries for active summaries, classifications, memories, and their evidence.
+  - Assemble the first `conversation_resume` response shape directly from persisted rows.
+  - Keep the response optimized for machine consumption, not browsing.
+test_plan: |
+  - Add endpoint tests covering a successful response for one enriched artifact.
+  - Verify the response includes provenance-bearing identifiers and evidence-backed excerpts.
+risks: |
+  - If this endpoint grows into a transcript browser, it will lose the compact working-memory shape the slice is meant to prove.
+notes: |
+  - This is the main retrieval deliverable for slice one.

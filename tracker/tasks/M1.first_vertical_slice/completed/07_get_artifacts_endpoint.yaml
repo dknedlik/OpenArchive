@@ -1,0 +1,38 @@
+id: "07"
+title: Add GET /artifacts listing endpoint
+assignee: david
+status: done
+type: feature
+priority: medium
+planned_order: 6
+milestone: M1.first_vertical_slice
+labels: [api, read-model, artifacts]
+depends_on: ["05", "06"]
+description: |
+  Add the minimal artifact listing endpoint from the slice plan so imported
+  conversation artifacts can be enumerated with their ingestion and enrichment state.
+acceptance_criteria:
+  - The service exposes `GET /artifacts`.
+  - The endpoint returns `200 OK` with a JSON response body shaped as `{"artifacts":[...]}`.
+  - Each artifact object includes exactly `artifact_id`, `title`, `source_type`, `created_at_source`, `captured_at`, and `enrichment_status`.
+  - `created_at_source` is nullable and serializes as either an RFC3339 timestamp string or `null`.
+  - `captured_at` is always present and serializes as an RFC3339 timestamp string sourced from database ingest time.
+  - Results are ordered by `captured_at DESC, artifact_id ASC`.
+  - An empty artifact set returns `{"artifacts":[]}` rather than a `404`.
+  - Slice-one scope excludes pagination, filtering, search, import status, participant/segment counts, and raw payload references.
+files_touched:
+  - src/
+implementation_plan: |
+  - Add the first read-model query against `oa_artifact`.
+  - Return a stable envelope so future pagination or metadata can be added without breaking clients.
+  - Keep the response intentionally narrow and machine-first.
+  - For slice one, list rows from `oa_artifact`, which currently means imported conversation artifacts only.
+test_plan: |
+  - Add endpoint tests covering empty state and imported artifact state.
+  - Verify multiple artifacts are returned in `captured_at DESC, artifact_id ASC` order.
+  - Verify `created_at_source: null` is preserved in the JSON response.
+risks: |
+  - Read models can drift from the slice-plan contract if the endpoint grows too early.
+notes: |
+  - This is the first retrieval surface, but it is not yet the context-pack endpoint.
+  - Storage or query failures should surface as `500` responses; empty collections are not an error case.
