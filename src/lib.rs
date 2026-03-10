@@ -1,6 +1,7 @@
 pub mod config;
 pub mod db;
 pub mod domain;
+pub mod enrichment_worker;
 pub mod error;
 pub mod http;
 pub mod import_service;

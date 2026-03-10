@@ -38,16 +38,30 @@ impl DbConfig {
 pub struct HttpConfig {
     pub bind_addr: String,
     pub request_worker_count: usize,
+    pub enrichment_worker_count: usize,
+    pub enrichment_poll_interval_ms: u64,
 }
 
 impl HttpConfig {
     pub fn from_env() -> ConfigResult<Self> {
         let bind_addr = env::var("OA_HTTP_BIND").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
         let request_worker_count = positive_usize_env("OA_HTTP_REQUEST_WORKERS")?.unwrap_or(4);
+        let enrichment_worker_count = optional_usize_env("OA_ENRICHMENT_WORKERS")?.unwrap_or(1);
+        let enrichment_poll_interval_ms = env::var("OA_ENRICHMENT_POLL_INTERVAL_MS")
+            .map(|s| {
+                s.parse::<u64>()
+                    .map_err(|_| ConfigError::InvalidPositiveIntegerEnv {
+                        key: "OA_ENRICHMENT_POLL_INTERVAL_MS",
+                        value: s,
+                    })
+            })
+            .unwrap_or(Ok(500))?;
 
         Ok(Self {
             bind_addr,
             request_worker_count,
+            enrichment_worker_count,
+            enrichment_poll_interval_ms,
         })
     }
 }
@@ -81,6 +95,21 @@ fn positive_usize_env(key: &'static str) -> ConfigResult<Option<usize>> {
             if value == 0 {
                 return Err(ConfigError::InvalidPositiveIntegerEnv { key, value: raw });
             }
+            Ok(Some(value))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+fn optional_usize_env(key: &'static str) -> ConfigResult<Option<usize>> {
+    match env::var(key) {
+        Ok(raw) => {
+            let value =
+                raw.parse::<usize>()
+                    .map_err(|_| ConfigError::InvalidPositiveIntegerEnv {
+                        key,
+                        value: raw.clone(),
+                    })?;
             Ok(Some(value))
         }
         Err(_) => Ok(None),

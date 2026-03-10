@@ -39,7 +39,7 @@ pub trait EnrichmentJobStore {
 /// * A failure is terminal when the caller invokes `fail_job`. A failure
 ///   becomes terminal automatically when `mark_job_retryable` is called but
 ///   `attempt_count >= max_attempts`.
-pub trait EnrichmentJobLifecycleStore {
+pub trait EnrichmentJobLifecycleStore: Sync + Send {
     /// Atomically claim the next eligible job.
     ///
     /// Eligible: `job_status IN ('pending', 'retryable') AND available_at <= SYSTIMESTAMP`.

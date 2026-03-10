@@ -1,9 +1,11 @@
-use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use anyhow::Context;
+use clap::{command, Parser, Subcommand};
 use open_archive::config::{DbConfig, HttpConfig};
-use open_archive::storage::OracleImportWriteStore;
+use open_archive::enrichment_worker::start_enrichment_workers;
+use open_archive::storage::{OracleEnrichmentJobStore, OracleImportWriteStore};
 use open_archive::{db, http, migrations};
-use std::sync::Arc;
+
+use std::sync::{atomic::Ordering, Arc};
 use std::thread;
 
 #[derive(Parser)]
@@ -22,7 +24,7 @@ enum Command {
     Serve,
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -39,7 +41,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn adb_check() -> Result<()> {
+fn adb_check() -> Result<(), anyhow::Error> {
     let config = DbConfig::from_env().context("failed to load database configuration")?;
     let conn = db::connect(&config).context("failed to connect to Oracle")?;
     let row = conn
@@ -56,22 +58,39 @@ fn adb_check() -> Result<()> {
     Ok(())
 }
 
-fn serve() -> Result<()> {
+fn serve() -> Result<(), anyhow::Error> {
+    env_logger::init();
+
     let db_config = DbConfig::from_env().context("failed to load database configuration")?;
     let http_config = HttpConfig::from_env().context("failed to load HTTP configuration")?;
     let bind_addr = http_config.bind_addr.clone();
-    let worker_count = http_config.request_worker_count;
-    let store = Arc::new(OracleImportWriteStore::new(db_config));
+    let request_worker_count = http_config.request_worker_count;
+    let enrichment_worker_count = http_config.enrichment_worker_count;
+    let store = Arc::new(OracleImportWriteStore::new(db_config.clone()));
     let server: Arc<tiny_http::Server> = Arc::new(
         tiny_http::Server::http(&bind_addr)
             .map_err(|err| anyhow::anyhow!("failed to start HTTP server: {err}"))?,
     );
 
     println!("listening={bind_addr}");
-    println!("request_workers={worker_count}");
+    println!("request_workers={request_worker_count}");
+    println!("enrichment_workers={enrichment_worker_count}");
 
-    let mut workers = Vec::with_capacity(worker_count);
-    for worker_index in 0..worker_count {
+    // Start enrichment workers if enabled
+    let (enrichment_workers, enrichment_shutdown) = if enrichment_worker_count > 0 {
+        log::info!("Starting {} enrichment workers", enrichment_worker_count);
+        let (workers, shutdown) = start_enrichment_workers(
+            &http_config,
+            Arc::new(OracleEnrichmentJobStore::new(db_config)),
+        )?;
+        (workers, Some(shutdown))
+    } else {
+        log::info!("Enrichment workers disabled (OA_ENRICHMENT_WORKERS=0)");
+        (Vec::new(), None)
+    };
+
+    let mut workers = Vec::with_capacity(request_worker_count);
+    for worker_index in 0..request_worker_count {
         let server = Arc::clone(&server);
         let store = Arc::clone(&store);
         workers.push(
@@ -98,6 +117,18 @@ fn serve() -> Result<()> {
         worker
             .join()
             .map_err(|_| anyhow::anyhow!("HTTP worker thread panicked"))?;
+    }
+
+    // Signal enrichment workers to shut down gracefully
+    if let Some(shutdown) = &enrichment_shutdown {
+        log::info!("Signaling enrichment workers to shut down");
+        shutdown.store(true, Ordering::SeqCst);
+    }
+
+    for worker in enrichment_workers {
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("Enrichment worker thread panicked"))?;
     }
 
     Ok(())
