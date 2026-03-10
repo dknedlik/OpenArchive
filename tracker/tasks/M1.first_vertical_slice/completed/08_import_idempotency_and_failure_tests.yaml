@@ -1,0 +1,40 @@
+id: "08"
+title: Add import idempotency and failure-path tests
+assignee: david
+status: done
+type: test
+priority: high
+planned_order: 7
+milestone: M1.first_vertical_slice
+labels: [testing, ingestion, idempotency]
+depends_on: ["03", "04", "05", "06"]
+description: |
+  Lock down the import behavior with tests that cover duplicate imports, malformed
+  payload handling, and partial failure behavior for multi-conversation exports.
+acceptance_criteria:
+  - Re-import behavior is tested against the slice-one uniqueness contract at both the payload and per-conversation content-hash levels.
+  - A duplicate payload import reuses the existing payload row, returns `200`/success through the service boundary, and marks duplicate artifacts with `ingest_result = already_exists` rather than creating duplicate rows.
+  - A duplicate conversation hash import does not create a second `oa_artifact`, `oa_segment`, participant, or job row for the same canonical conversation.
+  - Malformed input fails explicitly at the service boundary and does not create a new import, artifact, segment, or job row.
+  - A multi-conversation import can partially succeed when one conversation persists and a later conversation fails at the storage layer.
+  - Partial-success imports finalize with explicit import counts and do not corrupt successfully written conversations.
+files_touched:
+  - tests/
+  - src/
+implementation_plan: |
+  - Test parser/service-boundary malformed-input behavior separately from Oracle-backed persistence behavior.
+  - Use the service boundary (`import_chatgpt_payload`) for request-shaped success/failure assertions and Oracle integration tests for durable row-count and idempotency assertions.
+  - Treat duplicate re-import as idempotent success, not as a partial-failure case.
+  - Use a deterministic multi-conversation fixture or seeded-DB setup to force one artifact write to succeed and a later artifact write to fail.
+test_plan: |
+  - Add a malformed-input test at the service boundary that proves parser failure returns an explicit error and leaves prior persisted data unchanged.
+  - Add an Oracle integration test for duplicate payload re-import that verifies only one payload row exists and duplicate artifacts surface as `already_exists`.
+  - Add an Oracle integration test for duplicate conversation-hash re-import that verifies no duplicate artifact, segment, participant, or job rows are created.
+  - Add an Oracle integration test for deterministic multi-conversation partial success that verifies one conversation is persisted, the failed conversation does not leave partial rows behind, and import counts/status match the slice-one contract.
+  - Verify returned status values as well as database state; do not rely on DB row counts alone.
+risks: |
+  - Without these tests, the first import path will look stable until the first real re-import or malformed export arrives.
+notes: |
+  - This task should land before substantial enrichment work begins.
+  - For this task, `already_exists` is treated as idempotent success rather than as an import failure.
+  - Prefer explicit fixture inputs over ad hoc test mutations so the import contract stays reviewable.

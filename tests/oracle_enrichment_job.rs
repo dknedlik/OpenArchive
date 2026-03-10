@@ -45,17 +45,6 @@ static HARNESS_INIT: OnceLock<Result<DbConfig, String>> = OnceLock::new();
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 static LIVE_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
-#[cfg(unix)]
-unsafe extern "C" {
-    fn atexit(cb: extern "C" fn()) -> i32;
-}
-
-extern "C" fn teardown_test_schema() {
-    if let Some(Ok(config)) = HARNESS_INIT.get() {
-        let _ = migrations::reset(config);
-    }
-}
-
 fn ensure_test_harness() -> Option<DbConfig> {
     let config = adb_config()?;
 
@@ -79,13 +68,6 @@ fn ensure_test_harness() -> Option<DbConfig> {
         migrations::reset(&config)
             .and_then(|_| migrations::migrate(&config))
             .map_err(|err| format!("{err:#}"))?;
-
-        #[cfg(unix)]
-        unsafe {
-            if atexit(teardown_test_schema) != 0 {
-                return Err("failed to register integration schema teardown".to_string());
-            }
-        }
 
         Ok(config.clone())
     });

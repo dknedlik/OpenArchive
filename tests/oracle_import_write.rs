@@ -46,17 +46,6 @@ static HARNESS_INIT: OnceLock<Result<DbConfig, String>> = OnceLock::new();
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 static LIVE_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
-#[cfg(unix)]
-unsafe extern "C" {
-    fn atexit(cb: extern "C" fn()) -> i32;
-}
-
-extern "C" fn teardown_test_schema() {
-    if let Some(Ok(config)) = HARNESS_INIT.get() {
-        let _ = migrations::reset(config);
-    }
-}
-
 fn ensure_test_harness() -> Option<DbConfig> {
     let config = adb_config()?;
 
@@ -80,13 +69,6 @@ fn ensure_test_harness() -> Option<DbConfig> {
         migrations::reset(&config)
             .and_then(|_| migrations::migrate(&config))
             .map_err(|err| format!("{err:#}"))?;
-
-        #[cfg(unix)]
-        unsafe {
-            if atexit(teardown_test_schema) != 0 {
-                return Err("failed to register integration schema teardown".to_string());
-            }
-        }
 
         Ok(config.clone())
     });
@@ -336,6 +318,16 @@ fn seed_existing_artifact(conn: &oracle::Connection, import_set: &WriteImportSet
     conn.commit().expect("commit seed artifact");
 }
 
+fn count_rows(
+    conn: &oracle::Connection,
+    sql: &str,
+    bind: &dyn oracle::sql_type::ToSql,
+) -> i64 {
+    conn.query_row_as::<(i64,)>(sql, &[bind])
+        .expect("count query")
+        .0
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -436,12 +428,19 @@ fn test_write_import_rollback_on_duplicate_payload() {
             .write_import(import_set_1)
             .expect("first write should succeed");
 
+        let original_artifact_id = format!("artifact-{suffix}");
+
         // Build a second import with a different import_id but reuse the same payload sha256
         let mut import_set_2 = make_test_import_set(&suffix); // same suffix => same sha256
         import_set_2.import.import_id = format!("import-{suffix}-2nd");
         import_set_2.payload.payload_id = format!("payload-{suffix}-2nd"); // different payload_id but same sha256
 
         let import_id_2 = import_set_2.import.import_id.clone();
+        let payload_sha256 = import_set_2.payload.payload_sha256.clone();
+        let duplicate_hash = import_set_2.artifact_sets[0]
+            .artifact
+            .source_conversation_hash
+            .clone();
 
         let result = store
             .write_import(import_set_2)
@@ -466,11 +465,45 @@ fn test_write_import_rollback_on_duplicate_payload() {
 
         let (payload_count,): (i64,) = verify_conn
             .query_row_as::<(i64,)>(
-                "SELECT COUNT(*) FROM oa_import_payload WHERE payload_id = :1",
-                &[&payload_id],
+                "SELECT COUNT(*) FROM oa_import_payload WHERE payload_sha256 = :1",
+                &[&payload_sha256],
             )
             .expect("payload count query");
         assert_eq!(payload_count, 1);
+        assert_eq!(payload_id, format!("payload-{suffix}"));
+
+        assert_eq!(
+            count_rows(
+                &verify_conn,
+                "SELECT COUNT(*) FROM oa_artifact WHERE source_conversation_hash = :1",
+                &duplicate_hash,
+            ),
+            1
+        );
+        assert_eq!(
+            count_rows(
+                &verify_conn,
+                "SELECT COUNT(*) FROM oa_segment WHERE artifact_id = :1",
+                &original_artifact_id,
+            ),
+            3
+        );
+        assert_eq!(
+            count_rows(
+                &verify_conn,
+                "SELECT COUNT(*) FROM oa_conversation_participant WHERE artifact_id = :1",
+                &original_artifact_id,
+            ),
+            2
+        );
+        assert_eq!(
+            count_rows(
+                &verify_conn,
+                "SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = :1",
+                &original_artifact_id,
+            ),
+            1
+        );
     }
 }
 
@@ -506,6 +539,10 @@ fn test_write_import_rollback_on_duplicate_artifact_hash() {
         // Keep source_type and content_hash_version the same (they are already "chatgpt_export" and "v1")
 
         let import_id_2 = import_set_2.import.import_id.clone();
+        let duplicate_hash = import_set_2.artifact_sets[0]
+            .artifact
+            .source_conversation_hash
+            .clone();
 
         let result = store
             .write_import(import_set_2)
@@ -541,6 +578,41 @@ fn test_write_import_rollback_on_duplicate_artifact_hash() {
         assert_eq!(status, "completed");
         assert_eq!(count_imported, 0);
         assert_eq!(count_failed, 0);
+        assert_eq!(
+            count_rows(
+                &verify_conn,
+                "SELECT COUNT(*) FROM oa_artifact WHERE source_conversation_hash = :1",
+                &duplicate_hash,
+            ),
+            1
+        );
+        assert_eq!(
+            count_rows(
+                &verify_conn,
+                "SELECT COUNT(*) FROM oa_segment WHERE artifact_id = :1",
+                &import_set_1.artifact_sets[0].artifact.artifact_id,
+            ),
+            0,
+            "seeded duplicate-hash fixture only creates the artifact row"
+        );
+        assert_eq!(
+            count_rows(
+                &verify_conn,
+                "SELECT COUNT(*) FROM oa_conversation_participant WHERE artifact_id = :1",
+                &import_set_1.artifact_sets[0].artifact.artifact_id,
+            ),
+            0,
+            "seeded duplicate-hash fixture only creates the artifact row"
+        );
+        assert_eq!(
+            count_rows(
+                &verify_conn,
+                "SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = :1",
+                &import_set_1.artifact_sets[0].artifact.artifact_id,
+            ),
+            0,
+            "seeded duplicate-hash fixture only creates the artifact row"
+        );
     }
 }
 
@@ -556,19 +628,13 @@ fn test_write_import_partial_success_finalizes_completed_with_errors() {
     let suffix = unique_suffix("partial");
     let mut import_set = make_test_import_set(&suffix);
     let import_id = import_set.import.import_id.clone();
+    let successful_artifact_id = import_set.artifact_sets[0].artifact.artifact_id.clone();
 
     let second_suffix = unique_suffix("partialb");
     let mut second_artifact = make_test_import_set(&second_suffix).artifact_sets.remove(0);
     second_artifact.artifact.import_id = import_id.clone();
-    second_artifact.artifact.source_conversation_hash = import_set.artifact_sets[0]
-        .artifact
-        .source_conversation_hash
-        .clone();
-    second_artifact.artifact.content_hash_version = import_set.artifact_sets[0]
-        .artifact
-        .content_hash_version
-        .clone();
-    second_artifact.artifact.source_type = import_set.artifact_sets[0].artifact.source_type;
+    second_artifact.segments[1].sequence_no = second_artifact.segments[0].sequence_no;
+    let failed_artifact_id = second_artifact.artifact.artifact_id.clone();
 
     import_set.import.conversation_count_detected = 2;
     import_set.artifact_sets.push(second_artifact);
@@ -579,18 +645,15 @@ fn test_write_import_partial_success_finalizes_completed_with_errors() {
             .write_import(import_set)
             .expect("write_import should succeed with partial failures recorded");
 
-        assert_eq!(result.import_status, ImportStatus::Completed);
-        assert_eq!(result.artifacts.len(), 2);
-        assert_eq!(result.failed_artifact_ids.len(), 0);
+        assert_eq!(result.import_status, ImportStatus::CompletedWithErrors);
+        assert_eq!(result.artifacts.len(), 1);
+        assert_eq!(result.failed_artifact_ids, vec![failed_artifact_id.clone()]);
         assert_eq!(result.segments_written, 3);
         assert_eq!(
             result.artifacts[0].ingest_result,
             ArtifactIngestResult::Created
         );
-        assert_eq!(
-            result.artifacts[1].ingest_result,
-            ArtifactIngestResult::AlreadyExists
-        );
+        assert_eq!(result.artifacts[0].artifact_id, successful_artifact_id);
 
         let verify_conn = open_archive::db::connect(&config).expect("connect");
         let (status, count_imported, count_failed): (String, i64, i64) = verify_conn
@@ -600,9 +663,9 @@ fn test_write_import_partial_success_finalizes_completed_with_errors() {
                 &[&import_id],
             )
             .expect("import row should exist");
-        assert_eq!(status, "completed");
+        assert_eq!(status, "completed_with_errors");
         assert_eq!(count_imported, 1);
-        assert_eq!(count_failed, 0);
+        assert_eq!(count_failed, 1);
 
         let (artifact_count,): (i64,) = verify_conn
             .query_row_as::<(i64,)>(
@@ -611,5 +674,62 @@ fn test_write_import_partial_success_finalizes_completed_with_errors() {
             )
             .expect("artifact count query");
         assert_eq!(artifact_count, 1);
+
+        assert_eq!(
+            count_rows(
+                &verify_conn,
+                "SELECT COUNT(*) FROM oa_artifact WHERE artifact_id = :1",
+                &failed_artifact_id,
+            ),
+            0
+        );
+        assert_eq!(
+            count_rows(
+                &verify_conn,
+                "SELECT COUNT(*) FROM oa_conversation_participant WHERE artifact_id = :1",
+                &failed_artifact_id,
+            ),
+            0
+        );
+        assert_eq!(
+            count_rows(
+                &verify_conn,
+                "SELECT COUNT(*) FROM oa_segment WHERE artifact_id = :1",
+                &failed_artifact_id,
+            ),
+            0
+        );
+        assert_eq!(
+            count_rows(
+                &verify_conn,
+                "SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = :1",
+                &failed_artifact_id,
+            ),
+            0
+        );
+        assert_eq!(
+            count_rows(
+                &verify_conn,
+                "SELECT COUNT(*) FROM oa_conversation_participant WHERE artifact_id = :1",
+                &successful_artifact_id,
+            ),
+            2
+        );
+        assert_eq!(
+            count_rows(
+                &verify_conn,
+                "SELECT COUNT(*) FROM oa_segment WHERE artifact_id = :1",
+                &successful_artifact_id,
+            ),
+            3
+        );
+        assert_eq!(
+            count_rows(
+                &verify_conn,
+                "SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = :1",
+                &successful_artifact_id,
+            ),
+            1
+        );
     }
 }

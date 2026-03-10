@@ -426,5 +426,25 @@ mod tests {
         let store = MockStore::new();
         let err = import_chatgpt_payload(&store, br#"{"bad":true}"#).unwrap_err();
         assert!(matches!(err, OpenArchiveError::Parser(_)));
+        assert!(
+            store.captured.lock().unwrap().is_empty(),
+            "parser failures must not call the storage boundary"
+        );
+    }
+
+    #[test]
+    fn import_chatgpt_payload_parser_failure_does_not_mutate_prior_store_state() {
+        let store = MockStore::new();
+        import_chatgpt_payload(&store, single_conversation_export().as_bytes()).unwrap();
+
+        let err = import_chatgpt_payload(&store, br#"{"bad":true}"#).unwrap_err();
+        assert!(matches!(err, OpenArchiveError::Parser(_)));
+
+        let captured = store.captured.lock().unwrap();
+        assert_eq!(
+            captured.len(),
+            1,
+            "malformed payloads must not enqueue a second write"
+        );
     }
 }
