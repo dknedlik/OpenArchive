@@ -51,6 +51,37 @@ Initial derived outputs:
 - extracted memories
 - embeddings or other search features later
 
+### Inference boundary
+
+Inference should follow the same boundary discipline as storage.
+
+The application layer should depend on feature-specific, provider-agnostic
+interfaces rather than raw provider verbs such as chat completion or
+embeddings.
+
+Examples of the desired interface shape:
+
+- `ConversationSummarizer`
+- `MemoryExtractor`
+- `ClassificationExtractor`
+- later `EntityExtractor`
+- later `RelationshipExtractor`
+- later `EmbeddingGenerator`
+
+These interfaces should:
+
+- accept OpenArchive-shaped inputs such as artifact windows, segment sets, or
+  context-pack requests
+- return typed OpenArchive-shaped outputs rather than provider-native payloads
+- include enough execution metadata for provenance, replay, and evaluation
+  such as provider, model, prompt version, latency, token usage, and parse
+  status
+
+Concrete provider adapters should live below that boundary.
+
+That lower layer may talk to OpenAI, Anthropic, OpenRouter, local models, or
+other providers, but those concerns should not leak into the application core.
+
 ### Retrieval API
 
 A likely initial API surface:
@@ -60,6 +91,40 @@ A likely initial API surface:
 - full-text and metadata search
 - summary retrieval
 - memory retrieval
+
+### Caching direction
+
+Caching will likely become useful in later slices, but it should be applied
+selectively.
+
+The default rule should be:
+
+- cache rebuildable outputs
+- do not treat caches as canonical storage
+- prefer explicit cache types with clear invalidation inputs over a generic
+  catch-all cache layer
+
+Strong early cache candidates:
+
+- inference outputs such as summaries, classifications, memories, and later
+  embeddings when the input scope and pipeline are stable
+- task-shaped context packs that are expensive to rebuild and likely to be
+  requested repeatedly
+- repeated retrieval candidate sets or rankings when a real workload shows
+  that they are costly enough to justify caching
+
+Cache keys should include the factors that materially affect meaning, such as:
+
+- source content hash or normalized input hash
+- feature or pack type
+- pipeline version
+- prompt version
+- provider/model choice when relevant
+- retrieval or policy version where applicable
+
+This implies that caching should sit above canonical storage and below
+consumer-facing request handling where appropriate, rather than being confused
+with the durable archive itself.
 
 ### Later integration surfaces
 

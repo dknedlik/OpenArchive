@@ -75,6 +75,20 @@ one, but only one concrete backend in slice one:
 - Do not build provider selection, plugin registration, or multi-backend
   execution yet
 
+Inference boundary note:
+
+- The OpenArchive-facing inference interfaces should be feature-specific and
+  provider-agnostic, similar to the storage boundary.
+- The application layer should call contracts such as
+  `ConversationSummarizer`, `MemoryExtractor`, and
+  `ClassificationExtractor`, not generic provider-shaped APIs such as
+  `chat()` or `embed()`.
+- Provider/model selection, prompt transport, upstream retries, and
+  provider-native request or response shapes should remain below the inference
+  boundary.
+- Inference results should carry provenance-friendly execution metadata such as
+  provider, model, prompt version, latency, token usage, and parse warnings.
+
 ### Execution and concurrency guardrails
 
 - Slice one may run in a single application process, but internal execution
@@ -202,6 +216,9 @@ Initial runtime choice for slice one:
 - Do not perform remote model calls inline in the request path
 - Keep worker concurrency conservative by default on small OCI instances and
   expand only with measurement
+- Keep the first slice to one concrete inference implementation, but preserve
+  the feature-specific interface seam so later provider diversity does not
+  require redesign of the enrichment pipeline
 
 Initial `POST /imports/chatgpt` success response shape:
 
@@ -235,6 +252,24 @@ Initial `POST /imports/chatgpt` success response shape:
 - Context pack should be rebuildable
 - Persisting the context pack itself is optional; the default should be
   generate-on-demand unless caching is clearly needed during implementation
+
+Caching note for later slices:
+
+- Treat caching as an optimization layer for rebuildable outputs, not as a
+  replacement for canonical artifacts, derived objects, or provenance records.
+- The strongest future cache candidates are:
+  - inference outputs keyed by normalized input scope plus pipeline and prompt
+    version
+  - context-pack responses keyed by pack type, request hash, and policy
+    version
+  - repeated retrieval candidate sets if query-layer cost becomes meaningful
+- Cache invalidation should be version-driven first:
+  - source content hash changes
+  - normalization or pipeline version changes
+  - prompt version changes
+  - provider/model choice changes when the output depends on them
+- Avoid introducing a broad generic cache before there is measurement showing
+  which specific layers are actually expensive
 
 ### Context-pack response shape
 
