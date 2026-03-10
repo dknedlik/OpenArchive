@@ -1,0 +1,47 @@
+id: "09"
+title: Add enrichment worker skeleton
+assignee: david
+status: done
+type: feature
+priority: medium
+planned_order: 8
+milestone: M1.first_vertical_slice
+labels: [jobs, enrichment, workers]
+depends_on: ["06"]
+description: |
+  Add the first bounded in-process enrichment worker runtime that can poll the
+  persistent job store, claim pending jobs, run deterministic placeholder work,
+  and finalize job lifecycle state without introducing real enrichment logic.
+acceptance_criteria:
+  - `Serve` starts a bounded in-process enrichment worker pool alongside HTTP workers.
+  - Enrichment worker count is configurable independently from HTTP worker count, including disabling enrichment workers entirely.
+  - Each enrichment worker repeatedly polls the persistent job store, claims eligible jobs, runs deterministic placeholder work, and finalizes claimed jobs as `completed` or `failed`.
+  - Workers use explicit claimant-aware `worker_id` values compatible with future out-of-process execution.
+  - Tests cover disabled startup, empty-queue polling, success finalization, and failure finalization without relying on real inference or metadata persistence.
+files_touched:
+  - src/
+  - tests/
+implementation_plan: |
+  - Start enrichment workers from the existing `Serve` runtime so HTTP and enrichment can share one process in slice one while remaining independently configurable.
+  - Add worker config for `OA_ENRICHMENT_WORKERS` (default `1`) and `OA_ENRICHMENT_POLL_INTERVAL_MS` (default `500`).
+  - Treat `OA_ENRICHMENT_WORKERS=0` as "do not start enrichment workers".
+  - Implement a fixed-size polling worker pool with loop shape: `claim_next_job(worker_id)` -> if none, sleep for `poll_interval_ms` -> otherwise run placeholder executor -> `complete_job` on success or `fail_job` on executor error.
+  - Use `worker_id` format `enrichment:<pid>:<worker_index>` for the lifetime of the process.
+  - Keep the placeholder executor deterministic and local to the worker runtime. It may validate the claimed payload shape, but it must not load conversation data, call models, or persist derived metadata.
+  - On store errors before a claim, log and continue after one poll interval. On `complete_job` or `fail_job` errors, log and continue; reconciliation logic is out of scope here.
+  - Emit minimal logs for worker start, job claim, job completion, job failure, and poll/claim errors.
+test_plan: |
+  - Add unit tests around the worker orchestration loop using a fake lifecycle store and fake placeholder executor.
+  - Cover `OA_ENRICHMENT_WORKERS=0` or equivalent disabled-start behavior so no enrichment workers are launched.
+  - Cover empty-queue polling behavior to prove no finalize call occurs when no job is claimed.
+  - Cover claimed-job success flow to prove the worker calls `complete_job` with its own `worker_id`.
+  - Cover claimed-job failure flow to prove placeholder executor errors lead to `fail_job` with an error message.
+  - Reuse task 06 Oracle integration coverage for lifecycle-store correctness rather than duplicating storage semantics here.
+risks: |
+  - Busy-loop polling, hidden coupling to HTTP handlers, or re-defining storage semantics here would make later out-of-process execution harder.
+notes: |
+  - This task owns only the worker runtime skeleton.
+  - Non-goals for this task: processor boundary, derived metadata persistence, artifact enrichment-status updates, partial-success semantics, retry policy beyond idle polling, and real model-backed inference.
+  - Task 06 already defines the storage lifecycle contract; this task should consume that contract rather than re-specify it.
+  - Task 11 owns the explicit processor boundary and deterministic stub processor for enrichment outputs.
+  - Task 13 owns artifact-level enrichment finalization and partial-failure semantics.
