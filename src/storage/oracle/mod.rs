@@ -15,6 +15,7 @@ use crate::storage::{
     ArtifactIngestResult, ArtifactReadStore, ImportWriteResult, ImportWriteStore, ImportedArtifact,
     StorageTx, WriteImportSet,
 };
+use log::error;
 
 // ---------------------------------------------------------------------------
 // Transaction handle
@@ -71,11 +72,15 @@ impl ImportWriteStore for OracleImportWriteStore {
         {
             import_set.import.payload_id = existing_payload_id;
         } else if let Err(e) = import::insert_payload(&tx.conn, &import_set.payload) {
-            let _ = tx.conn.rollback();
+            if let Err(rollback_err) = tx.conn.rollback() {
+                error!("Failed to rollback after payload insert error (operation=phase1_payload_insert): {}", rollback_err);
+            }
             return Err(e);
         }
         if let Err(e) = import::insert_import(&tx.conn, &import_set.import) {
-            let _ = tx.conn.rollback();
+            if let Err(rollback_err) = tx.conn.rollback() {
+                error!("Failed to rollback after import insert error (operation=phase1_import_insert): {}", rollback_err);
+            }
             return Err(e);
         }
         tx.commit()?;
@@ -178,7 +183,9 @@ impl ImportWriteStore for OracleImportWriteStore {
             import_status,
             error_message.as_deref(),
         ) {
-            let _ = tx.conn.rollback();
+            if let Err(rollback_err) = tx.conn.rollback() {
+                error!("Failed to rollback after phase 3 finalize error (import_id={}, operation=phase3_finalize_import): {}", import_id, rollback_err);
+            }
             let recovery_message = format!("phase 3 failure after committed artifacts: {e:#}");
             recover_import_finalization(
                 &self.config,

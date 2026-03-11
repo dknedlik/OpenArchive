@@ -1,7 +1,7 @@
 id: "20"
 title: Log rollback failures in Oracle storage error paths
 assignee: david
-status: todo
+status: done
 type: bug
 priority: medium
 planned_order: 20
