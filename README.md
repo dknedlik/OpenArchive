@@ -1,86 +1,108 @@
 # OpenArchive
 
-OpenArchive is a local-first archive and memory layer for AI-era personal data.
+OpenArchive is a local-first archive and memory layer for AI-era personal
+data.
 
-The current project direction is intentionally biased toward an open source,
-easy-to-run slice one:
+The pitch is simple: a lot of your best thinking is trapped inside AI chat
+sessions, exports, and tool-specific histories that are hard to query, reuse,
+or hand back to another machine. OpenArchive is the substrate for preserving
+that work, enriching it asynchronously, and making it retrievable through a
+machine-first interface.
 
-- one-command local startup with `make up`
-- containerized services with Docker Compose
-- Postgres for canonical relational state and job coordination
-- local filesystem-backed object storage on a Docker volume
-- MCP as the primary external interface
-- optional local inference via Ollama for enrichment
+## Mental Model
 
-The goal is simple: ingest source artifacts, preserve them faithfully, enrich
-them asynchronously, and make them queryable by machines with minimal setup.
+OpenArchive is a pipeline:
 
-## Current Working Idea
+```text
+ingest -> normalize -> store -> enrich -> retrieve
+```
 
-- Build a user-owned archive and memory substrate rather than a new chat client
-- Start with AI chats as the primary early source, but support broader artifact
-  types over time
-- Preserve raw source material while extracting structured, machine-usable
-  meaning
-- Keep the application core transport-agnostic so local MCP, remote MCP, CLI,
-  and later HTTP can all sit on the same use cases
-- Keep provider seams explicit:
-  - relational store provider
-  - object store provider
-  - inference provider
+Slice one is intentionally local-first:
 
-## Slice 1 Direction
+- `make up` should bring up the stack with Docker Compose
+- Postgres stores canonical relational state and job coordination
+- a local filesystem-backed object store keeps raw payloads out of the database
+- enrichment runs asynchronously and may use a stub provider or local Ollama
+- MCP is the primary external interface
 
-Slice 1 is now local-first rather than OCI-first.
+## Why This Project Exists
 
-The working target is:
+Most AI tooling treats conversation history as an application detail.
+OpenArchive treats it as durable user data.
 
-- `docker compose` starts the stack locally
-- ingestion, query, and enrichment run as separate modules/processes
-- raw payloads are copied into OpenArchive-managed storage rather than
-  referencing arbitrary user filesystem paths
-- large artifact bytes live outside the relational database from day one
-- the enrichment queue remains database-backed rather than requiring a
-  standalone MQ
+The project is aimed at building a user-owned archive and memory substrate
+rather than another chat client. It starts with AI chats, but the longer-term
+shape is broader: preserve source material, attach provenance, extract useful
+structure, and return compact machine-usable context for future tools and
+agents.
 
-Planned concrete slice-one defaults:
+## Status
 
-- relational store: Postgres
-- object store: local filesystem volume
-- inference: stub or Ollama-backed local provider
-- external interface: local MCP server
+OpenArchive is pre-alpha and still building slice one.
 
-## Architecture Notes
+What exists today:
 
-OpenArchive is not aiming for a generic plugin system.
+- a Rust codebase with the first import, storage, and enrichment boundaries
+- ChatGPT-export-oriented parsing and canonical archive work
+- slice-one brain-layer docs and schema planning
+- the old Oracle-first implementation path, now being replaced
 
-The intended extension model is narrower:
+What is being built now:
 
-- contributors add a provider module for one concern
-- the module implements the relevant traits
-- config parsing is updated to recognize the provider
-- factory wiring is updated to construct it
+- provider-based service assembly
+- Postgres as the default relational backend
+- local filesystem-backed object storage
+- local MCP as the primary transport
+- a one-command local developer stack
 
-That should make new providers straightforward to add without pushing the
-application core into provider-specific branching or protocol-shaped logic.
+## Architecture Direction
 
-## Current Repo Contents
+The current architecture is intentionally opinionated:
 
-- [docs/01-product-overview.md](/Users/david/src/open_archive/docs/01-product-overview.md)
-- [docs/02-architecture.md](/Users/david/src/open_archive/docs/02-architecture.md)
-- [docs/03-data-model.md](/Users/david/src/open_archive/docs/03-data-model.md)
-- [docs/05-roadmap.md](/Users/david/src/open_archive/docs/05-roadmap.md)
-- [docs/06-brain-overview.md](/Users/david/src/open_archive/docs/06-brain-overview.md)
-- [docs/07-artifact-model.md](/Users/david/src/open_archive/docs/07-artifact-model.md)
-- [docs/08-provenance-model.md](/Users/david/src/open_archive/docs/08-provenance-model.md)
-- [docs/09-derived-metadata-model.md](/Users/david/src/open_archive/docs/09-derived-metadata-model.md)
-- [docs/10-context-pack-model.md](/Users/david/src/open_archive/docs/10-context-pack-model.md)
-- [docs/11-first-vertical-slice-plan.md](/Users/david/src/open_archive/docs/11-first-vertical-slice-plan.md)
-- [docs/12-first-slice-schema.md](/Users/david/src/open_archive/docs/12-first-slice-schema.md)
-- [src/main.rs](/Users/david/src/open_archive/src/main.rs)
+- transport-agnostic application core
+- explicit provider seams for relational storage, object storage, and inference
+- database-backed durable job queue rather than a separate MQ
+- local-first defaults without blocking future remote MCP deployment
+
+This is not intended to become a generic plugin system. The target is simpler:
+if someone wants to add a provider, they should be able to implement the
+relevant traits, wire config parsing, update the factory, and move on.
+
+## Open Problems
+
+The most interesting open problems are architectural, not cosmetic:
+
+- Postgres-backed repository implementations
+- filesystem-backed object store abstraction
+- provider/factory assembly from config
+- local MCP server over the application use cases
+- ChatGPT export ingestion hardening
+- durable enrichment worker behavior and job leasing
+- optional Ollama-backed inference provider
+
+If you like Rust, AI systems, storage boundaries, retrieval, provenance, or
+personal data infrastructure, this is the class of problem the repo is trying
+to solve.
+
+## Docs
+
+Project direction:
+
+- [docs/01-product-overview.md](docs/01-product-overview.md)
+- [docs/02-architecture.md](docs/02-architecture.md)
+- [docs/05-roadmap.md](docs/05-roadmap.md)
+- [docs/06-brain-overview.md](docs/06-brain-overview.md)
+- [docs/11-first-vertical-slice-plan.md](docs/11-first-vertical-slice-plan.md)
+- [docs/12-first-slice-schema.md](docs/12-first-slice-schema.md)
+
+Brain-layer design:
+
+- [docs/07-artifact-model.md](docs/07-artifact-model.md)
+- [docs/08-provenance-model.md](docs/08-provenance-model.md)
+- [docs/09-derived-metadata-model.md](docs/09-derived-metadata-model.md)
+- [docs/10-context-pack-model.md](docs/10-context-pack-model.md)
 
 ## Historical Notes
 
 Earlier Oracle ADB and OCI exploration documents remain in the repo as
-historical references. They should not be treated as the default slice-one
-path.
+historical references. They are no longer the default slice-one path.
