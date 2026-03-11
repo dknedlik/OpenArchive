@@ -22,7 +22,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    AdbCheck,
+    OracleCheck,
     Migrate,
     MigrateCheck,
     Serve,
@@ -32,7 +32,7 @@ fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::AdbCheck => adb_check(),
+        Command::OracleCheck => oracle_check(),
         Command::Migrate => {
             let config = AppConfig::from_env().context("failed to load application configuration")?;
             migrations::migrate(&config).context("failed to apply database migrations")
@@ -45,7 +45,7 @@ fn main() -> Result<(), anyhow::Error> {
     }
 }
 
-fn adb_check() -> Result<(), anyhow::Error> {
+fn oracle_check() -> Result<(), anyhow::Error> {
     let config = AppConfig::from_env().context("failed to load application configuration")?;
     let config =
         require_oracle_db_config(&config).context("failed to resolve Oracle database configuration")?;
@@ -60,7 +60,7 @@ fn adb_check() -> Result<(), anyhow::Error> {
     println!("connected={}", row.0);
     println!("service_name={}", row.1);
     println!("username={}", config.username);
-    println!("tns_alias={}", config.tns_alias);
+    println!("connect_string={}", config.connect_string);
     Ok(())
 }
 

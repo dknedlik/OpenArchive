@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, DbConfig, PostgresConfig, RelationalStoreConfig};
+use crate::config::{AppConfig, OracleConfig, PostgresConfig, RelationalStoreConfig};
 use crate::db;
 use crate::error::{preview_sql_statement, MigrationsError, MigrationsResult};
 use ::oracle::Connection;
@@ -32,7 +32,7 @@ pub mod oracle {
 
     const MIGRATIONS_DIR: &str = "sql/oracle/migrations";
 
-    pub fn check(config: &DbConfig) -> MigrationsResult<()> {
+    pub fn check(config: &OracleConfig) -> MigrationsResult<()> {
         let conn = db::connect(config)?;
         ensure_schema_migration_table(&conn)?;
         let pending = pending_migrations(&conn)?;
@@ -50,7 +50,7 @@ pub mod oracle {
         Err(MigrationsError::DatabaseNotUpToDate)
     }
 
-    pub fn migrate(config: &DbConfig) -> MigrationsResult<()> {
+    pub fn migrate(config: &OracleConfig) -> MigrationsResult<()> {
         let conn = db::connect(config)?;
         ensure_schema_migration_table(&conn)?;
         let pending = pending_migrations(&conn)?;
@@ -67,7 +67,7 @@ pub mod oracle {
         Ok(())
     }
 
-    pub fn reset(config: &DbConfig) -> MigrationsResult<()> {
+    pub fn reset(config: &OracleConfig) -> MigrationsResult<()> {
         let conn = db::connect(config)?;
         reset_schema_objects(&conn)
     }

@@ -2,9 +2,9 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_DB: openarchive
-      POSTGRES_USER: openarchive
-      POSTGRES_PASSWORD: openarchive
+      POSTGRES_DB: ${OA_POSTGRES_DB:-openarchive}
+      POSTGRES_USER: ${OA_POSTGRES_USER:-openarchive}
+      POSTGRES_PASSWORD: ${OA_POSTGRES_PASSWORD:-openarchive}
     ports:
       - "5432:5432"
     volumes:
@@ -23,15 +23,15 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      OA_RELATIONAL_STORE: postgres
-      OA_POSTGRES_URL: postgres://openarchive:openarchive@postgres:5432/openarchive
-      OA_OBJECT_STORE: local_fs
-      OA_OBJECT_STORE_ROOT: /var/lib/openarchive/objects
-      OA_HTTP_BIND: 0.0.0.0:3000
-      OA_HTTP_REQUEST_WORKERS: 2
-      OA_ENRICHMENT_WORKERS: 1
-      OA_ENRICHMENT_POLL_INTERVAL_MS: 500
-      RUST_LOG: info
+      OA_RELATIONAL_STORE: ${OA_RELATIONAL_STORE:-postgres}
+      OA_POSTGRES_URL: ${OA_POSTGRES_URL:-postgres://openarchive:openarchive@postgres:5432/openarchive}
+      OA_OBJECT_STORE: ${OA_OBJECT_STORE:-local_fs}
+      OA_OBJECT_STORE_ROOT: ${OA_OBJECT_STORE_ROOT:-/var/lib/openarchive/objects}
+      OA_HTTP_BIND: ${OA_HTTP_BIND:-0.0.0.0:3000}
+      OA_HTTP_REQUEST_WORKERS: ${OA_HTTP_REQUEST_WORKERS:-2}
+      OA_ENRICHMENT_WORKERS: ${OA_ENRICHMENT_WORKERS:-1}
+      OA_ENRICHMENT_POLL_INTERVAL_MS: ${OA_ENRICHMENT_POLL_INTERVAL_MS:-500}
+      RUST_LOG: ${RUST_LOG:-info}
     ports:
       - "3000:3000"
     volumes:
@@ -51,13 +51,13 @@ services:
       - ollama_data:/root/.ollama
 
   oracle:
-    image: container-registry.oracle.com/database/free:latest
+    image: container-registry.oracle.com/database/free:latest-lite
     profiles: ["oracle"]
     ports:
       - "1521:1521"
       - "5500:5500"
     environment:
-      ORACLE_PWD: openarchive
+      ORACLE_PWD: ${OA_ORACLE_CONTAINER_PASSWORD:-openarchive}
     volumes:
       - oracle_data:/opt/oracle/oradata
 

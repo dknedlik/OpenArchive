@@ -94,7 +94,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
 /// Temporary helper for legacy commands that still talk directly to the Oracle
 /// migration and probe code paths. This should disappear once those commands
 /// become provider-backed too.
-pub fn require_oracle_db_config(config: &AppConfig) -> ConfigResult<&crate::config::DbConfig> {
+pub fn require_oracle_db_config(config: &AppConfig) -> ConfigResult<&crate::config::OracleConfig> {
     config
         .relational_store
         .oracle_config()

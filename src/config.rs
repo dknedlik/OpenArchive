@@ -1,6 +1,7 @@
 use crate::error::{ConfigError, ConfigResult};
 use std::env;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Top-level runtime configuration. Provider-specific settings stay nested so
 /// the composition root can switch implementations without leaking details into
@@ -27,7 +28,7 @@ impl AppConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelationalStoreConfig {
     Postgres(PostgresConfig),
-    Oracle(DbConfig),
+    Oracle(OracleConfig),
 }
 
 impl RelationalStoreConfig {
@@ -35,7 +36,7 @@ impl RelationalStoreConfig {
         let provider = env::var("OA_RELATIONAL_STORE").unwrap_or_else(|_| "postgres".to_string());
         match provider.as_str() {
             "postgres" => Ok(Self::Postgres(PostgresConfig::from_env()?)),
-            "oracle" => Ok(Self::Oracle(DbConfig::from_env()?)),
+            "oracle" => Ok(Self::Oracle(OracleConfig::from_env()?)),
             _ => Err(ConfigError::InvalidEnumEnv {
                 key: "OA_RELATIONAL_STORE",
                 value: provider,
@@ -44,7 +45,7 @@ impl RelationalStoreConfig {
         }
     }
 
-    pub fn oracle_config(&self) -> Option<&DbConfig> {
+    pub fn oracle_config(&self) -> Option<&OracleConfig> {
         match self {
             Self::Postgres(_) => None,
             Self::Oracle(config) => Some(config),
@@ -126,33 +127,54 @@ impl InferenceConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DbConfig {
-    pub wallet_dir: PathBuf,
-    pub tns_alias: String,
+pub struct OracleConfig {
+    pub connect_string: String,
     pub username: String,
     pub password: String,
+    pub call_timeout: Option<Duration>,
+    pub pool: ConnectionPoolConfig,
 }
 
-impl DbConfig {
-    pub fn from_env() -> ConfigResult<Self> {
-        let wallet_dir = if let Ok(value) = env::var("WALLET_DIR") {
-            PathBuf::from(value)
-        } else {
-            let home = env::var("HOME")
-                .map_err(|_| ConfigError::MissingEnvWithDependency { key: "HOME" })?;
-            PathBuf::from(home).join(".clean-engine").join("wallet")
-        };
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ConnectionPoolConfig {
+    pub min_connections: u32,
+    pub max_connections: u32,
+    pub connection_increment: u32,
+    pub stmt_cache_size: u32,
+    pub get_timeout: Duration,
+    pub ping_interval: Duration,
+}
 
-        let tns_alias = env::var("TNS_ALIAS").unwrap_or_else(|_| "cleanengine_medium".to_string());
-        let username =
-            env::var("DB_USERNAME").map_err(|_| ConfigError::MissingEnv { key: "DB_USERNAME" })?;
-        let password = resolve_password()?;
+impl OracleConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        let connect_string = env::var("OA_ORACLE_CONNECT_STRING")
+            .map_err(|_| ConfigError::MissingEnv { key: "OA_ORACLE_CONNECT_STRING" })?;
+        let username = env::var("OA_ORACLE_USERNAME")
+            .map_err(|_| ConfigError::MissingEnv { key: "OA_ORACLE_USERNAME" })?;
+        let password = env::var("OA_ORACLE_PASSWORD")
+            .map_err(|_| ConfigError::MissingEnv { key: "OA_ORACLE_PASSWORD" })?;
 
         Ok(Self {
-            wallet_dir,
-            tns_alias,
+            connect_string,
             username,
             password,
+            call_timeout: optional_duration_env_ms("OA_ORACLE_CALL_TIMEOUT_MS")?,
+            pool: ConnectionPoolConfig::from_env()?,
+        })
+    }
+}
+
+impl ConnectionPoolConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        Ok(Self {
+            min_connections: positive_u32_env("OA_DB_POOL_MIN")?.unwrap_or(1),
+            max_connections: positive_u32_env("OA_DB_POOL_MAX")?.unwrap_or(8),
+            connection_increment: positive_u32_env("OA_DB_POOL_INCREMENT")?.unwrap_or(1),
+            stmt_cache_size: positive_u32_env("OA_DB_POOL_STMT_CACHE_SIZE")?.unwrap_or(50),
+            get_timeout: optional_duration_env_ms("OA_DB_POOL_GET_TIMEOUT_MS")?
+                .unwrap_or_else(|| Duration::from_secs(30)),
+            ping_interval: optional_duration_env_ms("OA_DB_POOL_PING_INTERVAL_MS")?
+                .unwrap_or_else(|| Duration::from_secs(60)),
         })
     }
 }
@@ -189,21 +211,40 @@ impl HttpConfig {
     }
 }
 
-fn resolve_password() -> ConfigResult<String> {
-    for key in [
-        "DB_PASSWORD",
-        "DB_DEV_PASSWORD",
-        "DB_PROD_PASSWORD",
-        "DB_ADMIN_PASSWORD",
-    ] {
-        if let Ok(value) = env::var(key) {
-            if !value.trim().is_empty() {
-                return Ok(value);
+fn positive_u32_env(key: &'static str) -> ConfigResult<Option<u32>> {
+    match env::var(key) {
+        Ok(raw) => {
+            let value =
+                raw.parse::<u32>()
+                    .map_err(|_| ConfigError::InvalidPositiveIntegerEnv {
+                        key,
+                        value: raw.clone(),
+                    })?;
+            if value == 0 {
+                return Err(ConfigError::InvalidPositiveIntegerEnv { key, value: raw });
             }
+            Ok(Some(value))
         }
+        Err(_) => Ok(None),
     }
+}
 
-    Err(ConfigError::MissingPassword)
+fn optional_duration_env_ms(key: &'static str) -> ConfigResult<Option<Duration>> {
+    match env::var(key) {
+        Ok(raw) => {
+            let value =
+                raw.parse::<u64>()
+                    .map_err(|_| ConfigError::InvalidPositiveIntegerEnv {
+                        key,
+                        value: raw.clone(),
+                    })?;
+            if value == 0 {
+                return Err(ConfigError::InvalidPositiveIntegerEnv { key, value: raw });
+            }
+            Ok(Some(Duration::from_millis(value)))
+        }
+        Err(_) => Ok(None),
+    }
 }
 
 fn positive_usize_env(key: &'static str) -> ConfigResult<Option<usize>> {
@@ -254,13 +295,16 @@ mod tests {
             "OA_RELATIONAL_STORE",
             "OA_OBJECT_STORE",
             "OA_INFERENCE_PROVIDER",
-            "WALLET_DIR",
-            "TNS_ALIAS",
-            "DB_USERNAME",
-            "DB_PASSWORD",
-            "DB_DEV_PASSWORD",
-            "DB_PROD_PASSWORD",
-            "DB_ADMIN_PASSWORD",
+            "OA_ORACLE_CONNECT_STRING",
+            "OA_ORACLE_USERNAME",
+            "OA_ORACLE_PASSWORD",
+            "OA_ORACLE_CALL_TIMEOUT_MS",
+            "OA_DB_POOL_MIN",
+            "OA_DB_POOL_MAX",
+            "OA_DB_POOL_INCREMENT",
+            "OA_DB_POOL_STMT_CACHE_SIZE",
+            "OA_DB_POOL_GET_TIMEOUT_MS",
+            "OA_DB_POOL_PING_INTERVAL_MS",
             "OA_HTTP_BIND",
             "OA_HTTP_REQUEST_WORKERS",
             "OA_ENRICHMENT_WORKERS",
@@ -303,6 +347,30 @@ mod tests {
             config.relational_store,
             RelationalStoreConfig::Postgres(_)
         ));
+    }
+
+    #[test]
+    fn oracle_provider_loads_typed_pool_defaults() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var("OA_RELATIONAL_STORE", "oracle");
+        std::env::set_var("OA_ORACLE_CONNECT_STRING", "localhost:1521/FREEPDB1");
+        std::env::set_var("OA_ORACLE_USERNAME", "oracle_user");
+        std::env::set_var("OA_ORACLE_PASSWORD", "oracle_pass");
+
+        let config = AppConfig::from_env().expect("oracle provider should load");
+        let RelationalStoreConfig::Oracle(config) = config.relational_store else {
+            panic!("expected oracle config");
+        };
+
+        assert_eq!(config.connect_string, "localhost:1521/FREEPDB1");
+        assert_eq!(config.call_timeout, None);
+        assert_eq!(config.pool.min_connections, 1);
+        assert_eq!(config.pool.max_connections, 8);
+        assert_eq!(config.pool.connection_increment, 1);
+        assert_eq!(config.pool.stmt_cache_size, 50);
+        assert_eq!(config.pool.get_timeout, Duration::from_secs(30));
+        assert_eq!(config.pool.ping_interval, Duration::from_secs(60));
     }
 
     #[test]

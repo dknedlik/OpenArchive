@@ -69,7 +69,7 @@ pub enum ConfigError {
     #[error("{key} is required")]
     MissingEnv { key: &'static str },
 
-    #[error("{key} is required when WALLET_DIR is not provided")]
+    #[error("{key} is required")]
     MissingEnvWithDependency { key: &'static str },
 
     #[error("invalid {key} value {value:?}; expected one of: {expected}")]
@@ -82,34 +82,26 @@ pub enum ConfigError {
     #[error("invalid {key} value {value:?}; expected positive integer")]
     InvalidPositiveIntegerEnv { key: &'static str, value: String },
 
-    #[error("set DB_PASSWORD or one of DB_DEV_PASSWORD / DB_PROD_PASSWORD / DB_ADMIN_PASSWORD")]
-    MissingPassword,
 }
 
 #[derive(Debug, Error)]
 pub enum DbError {
-    #[error("invalid {key} value {value:?}; expected integer")]
-    InvalidIntegerEnv { key: &'static str, value: String },
-
-    #[error("invalid {key} value {value:?}; expected integer milliseconds")]
-    InvalidDurationEnv { key: &'static str, value: String },
-
     #[error("failed to configure Oracle pool ping interval")]
     ConfigurePoolPingInterval {
         #[source]
         source: oracle::Error,
     },
 
-    #[error("failed to create Oracle pool for alias {tns_alias}")]
+    #[error("failed to create Oracle pool for connect string {connect_string}")]
     CreatePool {
-        tns_alias: String,
+        connect_string: String,
         #[source]
         source: oracle::Error,
     },
 
-    #[error("failed to acquire Oracle connection for alias {tns_alias}")]
+    #[error("failed to acquire Oracle connection for connect string {connect_string}")]
     AcquireConnection {
-        tns_alias: String,
+        connect_string: String,
         #[source]
         source: oracle::Error,
     },

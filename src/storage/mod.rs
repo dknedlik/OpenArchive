@@ -38,7 +38,9 @@ pub use derivation_store::{
 pub use import_store::{ImportPayloadStore, ImportStore};
 pub use job_store::{EnrichmentJobLifecycleStore, EnrichmentJobStore};
 pub use oracle::{OracleDerivedMetadataStore, OracleEnrichmentJobStore, OracleImportWriteStore};
-pub use postgres::{PostgresEnrichmentJobStore, PostgresImportWriteStore};
+pub use postgres::{
+    PostgresDerivedMetadataStore, PostgresEnrichmentJobStore, PostgresImportWriteStore,
+};
 pub use segment_store::SegmentStore;
 pub use types::{
     ArtifactClass, ArtifactIngestResult, ArtifactListItem, ArtifactStatus, ClaimedJob,

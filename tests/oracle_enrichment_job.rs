@@ -1,41 +1,35 @@
 mod support;
 
-use open_archive::config::DbConfig;
+use open_archive::config::OracleConfig;
 use open_archive::migrations;
 use open_archive::storage::{EnrichmentJobLifecycleStore, ImportWriteStore};
 use std::sync::OnceLock;
 use support::{ImportRecord, JobRecord, ProviderHarness};
 
-fn oracle_config() -> Option<DbConfig> {
-    if std::env::var("OA_INTEGRATION_TESTS").is_err() {
+fn oracle_config() -> Option<OracleConfig> {
+    if std::env::var("OA_ORACLE_INTEGRATION_TESTS").is_err() {
         return None;
     }
-    if std::env::var("OA_ORACLE_CALL_TIMEOUT_MS").is_err() {
-        std::env::set_var("OA_ORACLE_CALL_TIMEOUT_MS", "30000");
-    }
 
-    let mut config = DbConfig::from_env().ok()?;
-    if let Ok(value) = std::env::var("OA_TEST_DB_USERNAME") {
+    let mut config = OracleConfig::from_env().ok()?;
+    if let Ok(value) = std::env::var("OA_TEST_ORACLE_USERNAME") {
         config.username = value;
     }
-    if let Ok(value) = std::env::var("OA_TEST_DB_PASSWORD") {
+    if let Ok(value) = std::env::var("OA_TEST_ORACLE_PASSWORD") {
         config.password = value;
     }
-    if let Ok(value) = std::env::var("OA_TEST_TNS_ALIAS") {
-        config.tns_alias = value;
-    }
-    if let Ok(value) = std::env::var("OA_TEST_WALLET_DIR") {
-        config.wallet_dir = value.into();
+    if let Ok(value) = std::env::var("OA_TEST_ORACLE_CONNECT_STRING") {
+        config.connect_string = value;
     }
     Some(config)
 }
 
 fn harness() -> Option<OracleHarness> {
-    static CONFIG: OnceLock<Option<DbConfig>> = OnceLock::new();
+    static CONFIG: OnceLock<Option<OracleConfig>> = OnceLock::new();
     CONFIG.get_or_init(oracle_config).clone().map(OracleHarness)
 }
 
-struct OracleHarness(DbConfig);
+struct OracleHarness(OracleConfig);
 
 impl ProviderHarness for OracleHarness {
     fn reset_schema(&self) {
@@ -108,63 +102,63 @@ impl ProviderHarness for OracleHarness {
 }
 
 #[test]
-#[ignore = "requires Oracle integration env; set OA_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+#[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_claim_complete_happy_path() {
     let Some(harness) = harness() else { return };
     support::contract_claim_complete_happy_path(&harness);
 }
 
 #[test]
-#[ignore = "requires Oracle integration env; set OA_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+#[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_claim_fail_terminal() {
     let Some(harness) = harness() else { return };
     support::contract_claim_fail_terminal(&harness);
 }
 
 #[test]
-#[ignore = "requires Oracle integration env; set OA_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+#[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_claim_retryable_reclaim_complete() {
     let Some(harness) = harness() else { return };
     support::contract_claim_retryable_reclaim_complete(&harness);
 }
 
 #[test]
-#[ignore = "requires Oracle integration env; set OA_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+#[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_retryable_exhausted_becomes_terminal() {
     let Some(harness) = harness() else { return };
     support::contract_retryable_exhausted_becomes_terminal(&harness);
 }
 
 #[test]
-#[ignore = "requires Oracle integration env; set OA_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+#[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_claim_returns_none_when_empty() {
     let Some(harness) = harness() else { return };
     support::contract_claim_returns_none_when_empty(&harness);
 }
 
 #[test]
-#[ignore = "requires Oracle integration env; set OA_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+#[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_concurrent_claim_protection() {
     let Some(harness) = harness() else { return };
     support::contract_concurrent_claim_protection(&harness);
 }
 
 #[test]
-#[ignore = "requires Oracle integration env; set OA_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+#[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_payload_matches_documented_schema() {
     let Some(harness) = harness() else { return };
     support::contract_payload_matches_documented_schema(&harness);
 }
 
 #[test]
-#[ignore = "requires Oracle integration env; set OA_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+#[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_claim_skips_future_available_at() {
     let Some(harness) = harness() else { return };
     support::contract_claim_skips_future_available_at(&harness);
 }
 
 #[test]
-#[ignore = "requires Oracle integration env; set OA_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+#[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_non_claiming_worker_cannot_complete_job() {
     let Some(harness) = harness() else { return };
     support::contract_non_claiming_worker_cannot_complete_job(&harness);

@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use support::{ImportRecord, JobRecord, ProviderHarness};
 
 fn postgres_config() -> Option<PostgresConfig> {
-    if std::env::var("OA_PG_INTEGRATION_TESTS").is_err() {
+    if std::env::var("OA_POSTGRES_INTEGRATION_TESTS").is_err() {
         return None;
     }
 
@@ -57,6 +57,11 @@ struct PostgresHarness(PostgresConfig);
 
 impl ProviderHarness for PostgresHarness {
     fn reset_schema(&self) {
+        assert_eq!(
+            std::env::var("OA_ALLOW_SCHEMA_RESET").as_deref(),
+            Ok("1"),
+            "refusing to reset integration schema without OA_ALLOW_SCHEMA_RESET=1"
+        );
         recreate_test_database(&self.0);
         migrations::postgres::migrate(&self.0).expect("postgres schema migrate should succeed");
     }
@@ -120,63 +125,63 @@ impl ProviderHarness for PostgresHarness {
 }
 
 #[test]
-#[ignore = "requires local Postgres; set OA_PG_INTEGRATION_TESTS=1"]
+#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_claim_complete_happy_path() {
     let Some(harness) = harness() else { return };
     support::contract_claim_complete_happy_path(&harness);
 }
 
 #[test]
-#[ignore = "requires local Postgres; set OA_PG_INTEGRATION_TESTS=1"]
+#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_claim_fail_terminal() {
     let Some(harness) = harness() else { return };
     support::contract_claim_fail_terminal(&harness);
 }
 
 #[test]
-#[ignore = "requires local Postgres; set OA_PG_INTEGRATION_TESTS=1"]
+#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_claim_retryable_reclaim_complete() {
     let Some(harness) = harness() else { return };
     support::contract_claim_retryable_reclaim_complete(&harness);
 }
 
 #[test]
-#[ignore = "requires local Postgres; set OA_PG_INTEGRATION_TESTS=1"]
+#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_retryable_exhausted_becomes_terminal() {
     let Some(harness) = harness() else { return };
     support::contract_retryable_exhausted_becomes_terminal(&harness);
 }
 
 #[test]
-#[ignore = "requires local Postgres; set OA_PG_INTEGRATION_TESTS=1"]
+#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_claim_returns_none_when_empty() {
     let Some(harness) = harness() else { return };
     support::contract_claim_returns_none_when_empty(&harness);
 }
 
 #[test]
-#[ignore = "requires local Postgres; set OA_PG_INTEGRATION_TESTS=1"]
+#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_concurrent_claim_protection() {
     let Some(harness) = harness() else { return };
     support::contract_concurrent_claim_protection(&harness);
 }
 
 #[test]
-#[ignore = "requires local Postgres; set OA_PG_INTEGRATION_TESTS=1"]
+#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_payload_matches_documented_schema() {
     let Some(harness) = harness() else { return };
     support::contract_payload_matches_documented_schema(&harness);
 }
 
 #[test]
-#[ignore = "requires local Postgres; set OA_PG_INTEGRATION_TESTS=1"]
+#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_claim_skips_future_available_at() {
     let Some(harness) = harness() else { return };
     support::contract_claim_skips_future_available_at(&harness);
 }
 
 #[test]
-#[ignore = "requires local Postgres; set OA_PG_INTEGRATION_TESTS=1"]
+#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_non_claiming_worker_cannot_complete_job() {
     let Some(harness) = harness() else { return };
     support::contract_non_claiming_worker_cannot_complete_job(&harness);

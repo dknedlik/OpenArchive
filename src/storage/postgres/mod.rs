@@ -1,4 +1,5 @@
 pub mod artifact;
+pub mod derivation;
 pub mod import;
 pub mod job;
 pub mod segment;
@@ -6,6 +7,9 @@ pub mod segment;
 use crate::config::PostgresConfig;
 use crate::error::StorageResult;
 use crate::postgres_db;
+use crate::storage::derivation_store::{
+    DerivationWriteResult, DerivedMetadataWriteStore, WriteDerivationAttempt,
+};
 use crate::storage::job_store::EnrichmentJobLifecycleStore;
 use crate::storage::types::{ClaimedJob, RetryOutcome};
 use crate::storage::{
@@ -185,6 +189,16 @@ pub struct PostgresEnrichmentJobStore {
     config: PostgresConfig,
 }
 
+pub struct PostgresDerivedMetadataStore {
+    config: PostgresConfig,
+}
+
+impl PostgresDerivedMetadataStore {
+    pub fn new(config: PostgresConfig) -> Self {
+        Self { config }
+    }
+}
+
 impl PostgresEnrichmentJobStore {
     pub fn new(config: PostgresConfig) -> Self {
         Self { config }
@@ -216,5 +230,80 @@ impl EnrichmentJobLifecycleStore for PostgresEnrichmentJobStore {
     ) -> StorageResult<RetryOutcome> {
         let mut client = postgres_db::connect(&self.config)?;
         job::mark_job_retryable(&mut client, worker_id, job_id, error_message, retry_after_seconds)
+    }
+}
+
+impl DerivedMetadataWriteStore for PostgresDerivedMetadataStore {
+    fn write_derivation_attempt(
+        &self,
+        attempt: WriteDerivationAttempt,
+    ) -> StorageResult<DerivationWriteResult> {
+        let mut client = postgres_db::connect(&self.config)?;
+        client
+            .batch_execute("BEGIN")
+            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                connection_string: self.config.connection_string.clone(),
+                source,
+            }))?;
+
+        let result = (|| {
+            derivation::validate_derivation_attempt(
+                &mut client,
+                &self.config.connection_string,
+                &attempt,
+            )?;
+            derivation::insert_derivation_run(
+                &mut client,
+                &self.config.connection_string,
+                &attempt.run,
+            )?;
+
+            let mut derived_object_ids = Vec::with_capacity(attempt.objects.len());
+            let mut evidence_links_written = 0usize;
+            for object_write in &attempt.objects {
+                derivation::insert_derived_object(
+                    &mut client,
+                    &self.config.connection_string,
+                    &object_write.object,
+                )?;
+                derived_object_ids.push(object_write.object.derived_object_id.clone());
+
+                for link in &object_write.evidence_links {
+                    derivation::insert_evidence_link(
+                        &mut client,
+                        &self.config.connection_string,
+                        link,
+                    )?;
+                    evidence_links_written += 1;
+                }
+            }
+
+            Ok(DerivationWriteResult {
+                derivation_run_id: attempt.run.derivation_run_id.clone(),
+                derived_object_ids,
+                evidence_links_written,
+            })
+        })();
+
+        match result {
+            Ok(result) => {
+                client
+                    .batch_execute("COMMIT")
+                    .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                        connection_string: self.config.connection_string.clone(),
+                        source,
+                    }))?;
+                Ok(result)
+            }
+            Err(error) => {
+                client
+                    .batch_execute("ROLLBACK")
+                    .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                        connection_string: self.config.connection_string.clone(),
+                        source,
+                    }))?;
+                Err(error)
+            }
+        }
     }
 }

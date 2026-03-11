@@ -60,6 +60,7 @@ What is being built now:
 The default local stack is Postgres plus the OpenArchive app container.
 
 ```bash
+cp .env.example .env
 make up
 ```
 
@@ -69,6 +70,9 @@ That starts:
 - OpenArchive with filesystem-backed object storage on a Docker volume
 
 The app runs migrations on startup and serves on `http://localhost:3000`.
+OpenArchive reads process env once into typed config in
+`src/config.rs`; `.env` is just the local development source for those
+settings.
 
 Useful commands:
 
@@ -77,11 +81,18 @@ make logs
 make down
 make up-ollama
 make up-oracle-db
+make test-postgres-integration
+make test-oracle-integration
 ```
 
 `make up-ollama` and `make up-oracle-db` currently add those containers to the
 local stack for provider and inference development. The default app path still
 runs against Postgres unless you explicitly reconfigure it.
+
+Live provider tests follow the same pattern for both databases: start the local
+container, then run the matching `make test-...-integration` target. Both
+providers require `OA_ALLOW_SCHEMA_RESET=1` because the test harness recreates
+its schema/database.
 
 ## Architecture Direction
 

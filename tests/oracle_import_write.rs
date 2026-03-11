@@ -1,41 +1,35 @@
 mod support;
 
-use open_archive::config::DbConfig;
+use open_archive::config::OracleConfig;
 use open_archive::migrations;
 use open_archive::storage::{ImportWriteStore, OracleImportWriteStore};
 use support::{ImportRecord, ProviderHarness};
 use std::sync::OnceLock;
 
-fn oracle_config() -> Option<DbConfig> {
-    if std::env::var("OA_INTEGRATION_TESTS").is_err() {
+fn oracle_config() -> Option<OracleConfig> {
+    if std::env::var("OA_ORACLE_INTEGRATION_TESTS").is_err() {
         return None;
     }
-    if std::env::var("OA_ORACLE_CALL_TIMEOUT_MS").is_err() {
-        std::env::set_var("OA_ORACLE_CALL_TIMEOUT_MS", "30000");
-    }
 
-    let mut config = DbConfig::from_env().ok()?;
-    if let Ok(value) = std::env::var("OA_TEST_DB_USERNAME") {
+    let mut config = OracleConfig::from_env().ok()?;
+    if let Ok(value) = std::env::var("OA_TEST_ORACLE_USERNAME") {
         config.username = value;
     }
-    if let Ok(value) = std::env::var("OA_TEST_DB_PASSWORD") {
+    if let Ok(value) = std::env::var("OA_TEST_ORACLE_PASSWORD") {
         config.password = value;
     }
-    if let Ok(value) = std::env::var("OA_TEST_TNS_ALIAS") {
-        config.tns_alias = value;
-    }
-    if let Ok(value) = std::env::var("OA_TEST_WALLET_DIR") {
-        config.wallet_dir = value.into();
+    if let Ok(value) = std::env::var("OA_TEST_ORACLE_CONNECT_STRING") {
+        config.connect_string = value;
     }
     Some(config)
 }
 
 fn harness() -> Option<OracleHarness> {
-    static CONFIG: OnceLock<Option<DbConfig>> = OnceLock::new();
+    static CONFIG: OnceLock<Option<OracleConfig>> = OnceLock::new();
     CONFIG.get_or_init(oracle_config).clone().map(OracleHarness)
 }
 
-struct OracleHarness(DbConfig);
+struct OracleHarness(OracleConfig);
 
 impl ProviderHarness for OracleHarness {
     fn reset_schema(&self) {
@@ -208,28 +202,28 @@ impl ProviderHarness for OracleHarness {
 }
 
 #[test]
-#[ignore = "requires Oracle integration env; set OA_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+#[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_write_single_import_happy_path() {
     let Some(harness) = harness() else { return };
     support::contract_write_single_import_happy_path(&harness);
 }
 
 #[test]
-#[ignore = "requires Oracle integration env; set OA_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+#[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_write_import_duplicate_payload_is_idempotent() {
     let Some(harness) = harness() else { return };
     support::contract_write_import_duplicate_payload_is_idempotent(&harness);
 }
 
 #[test]
-#[ignore = "requires Oracle integration env; set OA_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+#[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_write_import_duplicate_artifact_hash_is_idempotent() {
     let Some(harness) = harness() else { return };
     support::contract_write_import_duplicate_artifact_hash_is_idempotent(&harness);
 }
 
 #[test]
-#[ignore = "requires Oracle integration env; set OA_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+#[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_write_import_partial_success_finalizes_completed_with_errors() {
     let Some(harness) = harness() else { return };
     support::contract_write_import_partial_success_finalizes_completed_with_errors(&harness);

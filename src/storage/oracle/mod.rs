@@ -4,7 +4,7 @@ pub mod import;
 pub mod job;
 pub mod segment;
 
-use crate::config::DbConfig;
+use crate::config::OracleConfig;
 use crate::db;
 use crate::error::{StorageError, StorageResult};
 use crate::storage::derivation_store::{
@@ -39,11 +39,11 @@ impl StorageTx for OracleStorageTx {
 // ---------------------------------------------------------------------------
 
 pub struct OracleImportWriteStore {
-    config: DbConfig,
+    config: OracleConfig,
 }
 
 impl OracleImportWriteStore {
-    pub fn new(config: DbConfig) -> Self {
+    pub fn new(config: OracleConfig) -> Self {
         Self { config }
     }
 }
@@ -220,11 +220,11 @@ use crate::storage::job_store::EnrichmentJobLifecycleStore;
 use crate::storage::types::{ClaimedJob, RetryOutcome};
 
 pub struct OracleEnrichmentJobStore {
-    config: DbConfig,
+    config: OracleConfig,
 }
 
 impl OracleEnrichmentJobStore {
-    pub fn new(config: DbConfig) -> Self {
+    pub fn new(config: OracleConfig) -> Self {
         Self { config }
     }
 }
@@ -258,11 +258,11 @@ impl EnrichmentJobLifecycleStore for OracleEnrichmentJobStore {
 }
 
 pub struct OracleDerivedMetadataStore {
-    config: DbConfig,
+    config: OracleConfig,
 }
 
 impl OracleDerivedMetadataStore {
-    pub fn new(config: DbConfig) -> Self {
+    pub fn new(config: OracleConfig) -> Self {
         Self { config }
     }
 }
@@ -340,7 +340,7 @@ fn finalize_import(
 }
 
 fn recover_import_finalization(
-    config: &DbConfig,
+    config: &OracleConfig,
     import_id: &str,
     count_imported: i64,
     count_failed: i64,

@@ -3,11 +3,16 @@
 use open_archive::object_store::StoredObject;
 use open_archive::storage::{
     ArtifactClass, ArtifactIngestResult, ArtifactStatus, ConversationEnrichmentPayload,
+    ClassificationObjectJson, DerivedMetadataWriteStore, DerivedObjectPayload, DerivationRunStatus,
+    DerivationRunType,
     EnrichmentJobLifecycleStore, EnrichmentStatus, ImportStatus, ImportWriteStore, JobStatus,
-    JobType, NewArtifact, NewEnrichmentJob, NewImport, NewImportObjectRef, NewParticipant,
-    NewSegment, ParticipantRole, PayloadFormat, RetryOutcome, SegmentType, SourceType,
-    VisibilityStatus, WriteArtifactSet, WriteImportSet,
+    JobType, MemoryObjectJson, NewArtifact, NewDerivationRun, NewDerivedObject, NewEnrichmentJob,
+    NewEvidenceLink, NewImport, NewImportObjectRef, NewParticipant, NewSegment, ObjectStatus,
+    OriginKind, ParticipantRole, PayloadFormat, RetryOutcome, ScopeType, SegmentType, SourceType,
+    SummaryObjectJson, SupportStrength, VisibilityStatus, WriteArtifactSet, WriteDerivationAttempt,
+    WriteDerivedObject, WriteImportSet, EvidenceRole, InputScopeType,
 };
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -229,6 +234,12 @@ pub struct JobRecord {
     pub error_message: Option<String>,
 }
 
+pub struct DerivationRunRecord {
+    pub artifact_id: String,
+    pub run_type: String,
+    pub run_status: String,
+}
+
 pub trait ProviderHarness {
     fn reset_schema(&self);
     fn import_store(&self) -> Box<dyn ImportWriteStore>;
@@ -245,6 +256,19 @@ pub trait ProviderHarness {
     fn count_segments_by_artifact_id(&self, artifact_id: &str) -> i64;
     fn count_participants_by_artifact_id(&self, artifact_id: &str) -> i64;
     fn count_jobs_by_artifact_id(&self, artifact_id: &str) -> i64;
+}
+
+pub trait DerivedMetadataHarness {
+    fn reset_schema(&self);
+    fn derivation_store(&self) -> Box<dyn DerivedMetadataWriteStore>;
+    fn seed_artifact(&self, fixture: &TestImportFixture);
+    fn fetch_derivation_run_record(&self, derivation_run_id: &str) -> DerivationRunRecord;
+    fn count_derived_objects_for_run(&self, derivation_run_id: &str) -> i64;
+    fn count_evidence_links_for_objects(&self, derived_object_ids: &[String]) -> i64;
+    fn fetch_object_json(&self, derived_object_id: &str) -> Value;
+    fn count_derivation_run_by_id(&self, derivation_run_id: &str) -> i64;
+    fn count_derived_object_by_id(&self, derived_object_id: &str) -> i64;
+    fn count_evidence_links_for_object(&self, derived_object_id: &str) -> i64;
 }
 
 pub fn contract_write_single_import_happy_path<H: ProviderHarness>(harness: &H) {
@@ -726,4 +750,315 @@ pub fn contract_non_claiming_worker_cannot_complete_job<H: ProviderHarness>(harn
     let job = harness.fetch_job_record(&expected_job_id);
     assert_eq!(job.status, "running");
     assert_eq!(job.claimed_by.as_deref(), Some("worker-owner"));
+}
+
+pub fn contract_writes_summary_classification_and_memory_with_evidence<H: DerivedMetadataHarness>(
+    harness: &H,
+) {
+    let _guard = lock_live_test();
+    harness.reset_schema();
+
+    let fixture = make_test_import_fixture(&unique_suffix("drvok"));
+    harness.seed_artifact(&fixture);
+
+    let run_id = format!("drv-run-{}", fixture.artifact_id);
+    let summary_id = format!("summary-{}", fixture.artifact_id);
+    let classification_id = format!("class-{}", fixture.artifact_id);
+    let memory_id = format!("memory-{}", fixture.artifact_id);
+
+    let result = harness
+        .derivation_store()
+        .write_derivation_attempt(WriteDerivationAttempt {
+            run: NewDerivationRun {
+                derivation_run_id: run_id.clone(),
+                artifact_id: fixture.artifact_id.clone(),
+                job_id: Some(fixture.job_id.clone()),
+                run_type: DerivationRunType::SummaryExtraction,
+                pipeline_name: "fixture_pipeline".to_string(),
+                pipeline_version: "1.0.0".to_string(),
+                provider_name: Some("fixture".to_string()),
+                model_name: Some("stub-v1".to_string()),
+                prompt_version: Some("p1".to_string()),
+                run_status: DerivationRunStatus::Completed,
+                input_scope_type: InputScopeType::Artifact,
+                input_scope_json: format!(r#"{{"artifact_id":"{}"}}"#, fixture.artifact_id),
+                completed_at: None,
+                error_message: None,
+            },
+            objects: vec![
+                WriteDerivedObject {
+                    object: NewDerivedObject {
+                        derived_object_id: summary_id.clone(),
+                        artifact_id: fixture.artifact_id.clone(),
+                        derivation_run_id: run_id.clone(),
+                        origin_kind: OriginKind::Inferred,
+                        object_status: ObjectStatus::Active,
+                        confidence_score: Some(0.91),
+                        confidence_label: Some("high".to_string()),
+                        scope_type: ScopeType::Artifact,
+                        scope_id: fixture.artifact_id.clone(),
+                        supersedes_derived_object_id: None,
+                        payload: DerivedObjectPayload::Summary {
+                            title: Some("conversation_summary".to_string()),
+                            body_text: "This conversation covered setup and parting.".to_string(),
+                            object_json: Some(SummaryObjectJson {
+                                summary_kind: Some("conversation_resume".to_string()),
+                                summary_version: Some("1".to_string()),
+                            }),
+                        },
+                    },
+                    evidence_links: vec![
+                        NewEvidenceLink {
+                            evidence_link_id: format!("evidence-{}-1", summary_id),
+                            derived_object_id: summary_id.clone(),
+                            segment_id: fixture.segment_ids[0].clone(),
+                            evidence_role: EvidenceRole::PrimarySupport,
+                            evidence_rank: 1,
+                            support_strength: SupportStrength::Strong,
+                        },
+                        NewEvidenceLink {
+                            evidence_link_id: format!("evidence-{}-2", summary_id),
+                            derived_object_id: summary_id.clone(),
+                            segment_id: fixture.segment_ids[2].clone(),
+                            evidence_role: EvidenceRole::SecondarySupport,
+                            evidence_rank: 2,
+                            support_strength: SupportStrength::Medium,
+                        },
+                    ],
+                },
+                WriteDerivedObject {
+                    object: NewDerivedObject {
+                        derived_object_id: classification_id.clone(),
+                        artifact_id: fixture.artifact_id.clone(),
+                        derivation_run_id: run_id.clone(),
+                        origin_kind: OriginKind::Deterministic,
+                        object_status: ObjectStatus::Active,
+                        confidence_score: Some(0.88),
+                        confidence_label: Some("medium".to_string()),
+                        scope_type: ScopeType::Artifact,
+                        scope_id: fixture.artifact_id.clone(),
+                        supersedes_derived_object_id: None,
+                        payload: DerivedObjectPayload::Classification {
+                            title: Some("conversation_type".to_string()),
+                            body_text: Some("Greeting and sign-off exchange".to_string()),
+                            object_json: ClassificationObjectJson {
+                                classification_type: "conversation_type".to_string(),
+                                classification_value: "greeting".to_string(),
+                            },
+                        },
+                    },
+                    evidence_links: vec![NewEvidenceLink {
+                        evidence_link_id: format!("evidence-{}-1", classification_id),
+                        derived_object_id: classification_id.clone(),
+                        segment_id: fixture.segment_ids[1].clone(),
+                        evidence_role: EvidenceRole::PrimarySupport,
+                        evidence_rank: 1,
+                        support_strength: SupportStrength::Strong,
+                    }],
+                },
+                WriteDerivedObject {
+                    object: NewDerivedObject {
+                        derived_object_id: memory_id.clone(),
+                        artifact_id: fixture.artifact_id.clone(),
+                        derivation_run_id: run_id.clone(),
+                        origin_kind: OriginKind::Inferred,
+                        object_status: ObjectStatus::Active,
+                        confidence_score: Some(0.72),
+                        confidence_label: Some("medium".to_string()),
+                        scope_type: ScopeType::Segment,
+                        scope_id: fixture.segment_ids[2].clone(),
+                        supersedes_derived_object_id: None,
+                        payload: DerivedObjectPayload::Memory {
+                            title: Some("closing_pattern".to_string()),
+                            body_text: "The user closes the conversation politely.".to_string(),
+                            object_json: MemoryObjectJson {
+                                memory_type: "preference".to_string(),
+                                memory_scope: ScopeType::Segment,
+                                memory_scope_value: fixture.segment_ids[2].clone(),
+                            },
+                        },
+                    },
+                    evidence_links: vec![NewEvidenceLink {
+                        evidence_link_id: format!("evidence-{}-1", memory_id),
+                        derived_object_id: memory_id.clone(),
+                        segment_id: fixture.segment_ids[2].clone(),
+                        evidence_role: EvidenceRole::PrimarySupport,
+                        evidence_rank: 1,
+                        support_strength: SupportStrength::Strong,
+                    }],
+                },
+            ],
+        })
+        .expect("derivation write should succeed");
+
+    assert_eq!(result.derivation_run_id, run_id);
+    assert_eq!(result.derived_object_ids.len(), 3);
+    assert_eq!(result.evidence_links_written, 4);
+
+    let run_row = harness.fetch_derivation_run_record(&run_id);
+    assert_eq!(run_row.artifact_id, fixture.artifact_id);
+    assert_eq!(run_row.run_type, "summary_extraction");
+    assert_eq!(run_row.run_status, "completed");
+    assert_eq!(harness.count_derived_objects_for_run(&run_id), 3);
+    assert_eq!(
+        harness.count_evidence_links_for_objects(&[
+            summary_id,
+            classification_id.clone(),
+            memory_id,
+        ]),
+        4
+    );
+
+    let classification_payload = harness.fetch_object_json(&classification_id);
+    assert_eq!(classification_payload["classification_type"], "conversation_type");
+    assert_eq!(classification_payload["classification_value"], "greeting");
+}
+
+pub fn contract_rejects_cross_artifact_evidence_links_without_writing_rows<
+    H: DerivedMetadataHarness,
+>(
+    harness: &H,
+) {
+    let _guard = lock_live_test();
+    harness.reset_schema();
+
+    let fixture_a = make_test_import_fixture(&unique_suffix("drva"));
+    let fixture_b = make_test_import_fixture(&unique_suffix("drvb"));
+    harness.seed_artifact(&fixture_a);
+    harness.seed_artifact(&fixture_b);
+
+    let run_id = format!("drv-run-cross-{}", fixture_a.artifact_id);
+    let summary_id = format!("summary-cross-{}", fixture_a.artifact_id);
+
+    let error = harness
+        .derivation_store()
+        .write_derivation_attempt(WriteDerivationAttempt {
+            run: NewDerivationRun {
+                derivation_run_id: run_id.clone(),
+                artifact_id: fixture_a.artifact_id.clone(),
+                job_id: Some(fixture_a.job_id.clone()),
+                run_type: DerivationRunType::SummaryExtraction,
+                pipeline_name: "fixture_pipeline".to_string(),
+                pipeline_version: "1.0.0".to_string(),
+                provider_name: Some("fixture".to_string()),
+                model_name: Some("stub-v1".to_string()),
+                prompt_version: Some("p1".to_string()),
+                run_status: DerivationRunStatus::Completed,
+                input_scope_type: InputScopeType::Artifact,
+                input_scope_json: format!(r#"{{"artifact_id":"{}"}}"#, fixture_a.artifact_id),
+                completed_at: None,
+                error_message: None,
+            },
+            objects: vec![WriteDerivedObject {
+                object: NewDerivedObject {
+                    derived_object_id: summary_id.clone(),
+                    artifact_id: fixture_a.artifact_id.clone(),
+                    derivation_run_id: run_id.clone(),
+                    origin_kind: OriginKind::Inferred,
+                    object_status: ObjectStatus::Active,
+                    confidence_score: Some(0.9),
+                    confidence_label: Some("high".to_string()),
+                    scope_type: ScopeType::Artifact,
+                    scope_id: fixture_a.artifact_id.clone(),
+                    supersedes_derived_object_id: None,
+                    payload: DerivedObjectPayload::Summary {
+                        title: Some("conversation_summary".to_string()),
+                        body_text: "This should be rejected.".to_string(),
+                        object_json: None,
+                    },
+                },
+                evidence_links: vec![NewEvidenceLink {
+                    evidence_link_id: format!("evidence-{}-1", summary_id),
+                    derived_object_id: summary_id.clone(),
+                    segment_id: fixture_b.segment_ids[0].clone(),
+                    evidence_role: EvidenceRole::PrimarySupport,
+                    evidence_rank: 1,
+                    support_strength: SupportStrength::Strong,
+                }],
+            }],
+        })
+        .expect_err("cross-artifact evidence should be rejected");
+
+    assert!(error.to_string().contains("outside artifact"));
+    assert_eq!(harness.count_derivation_run_by_id(&run_id), 0);
+    assert_eq!(harness.count_derived_object_by_id(&summary_id), 0);
+}
+
+pub fn contract_rolls_back_partial_writes_when_evidence_insert_fails<
+    H: DerivedMetadataHarness,
+>(
+    harness: &H,
+) {
+    let _guard = lock_live_test();
+    harness.reset_schema();
+
+    let fixture = make_test_import_fixture(&unique_suffix("drvrb"));
+    harness.seed_artifact(&fixture);
+
+    let run_id = format!("drv-run-rb-{}", fixture.artifact_id);
+    let summary_id = format!("summary-rb-{}", fixture.artifact_id);
+
+    let error = harness
+        .derivation_store()
+        .write_derivation_attempt(WriteDerivationAttempt {
+            run: NewDerivationRun {
+                derivation_run_id: run_id.clone(),
+                artifact_id: fixture.artifact_id.clone(),
+                job_id: Some(fixture.job_id.clone()),
+                run_type: DerivationRunType::SummaryExtraction,
+                pipeline_name: "fixture_pipeline".to_string(),
+                pipeline_version: "1.0.0".to_string(),
+                provider_name: Some("fixture".to_string()),
+                model_name: Some("stub-v1".to_string()),
+                prompt_version: Some("p1".to_string()),
+                run_status: DerivationRunStatus::Completed,
+                input_scope_type: InputScopeType::Artifact,
+                input_scope_json: format!(r#"{{"artifact_id":"{}"}}"#, fixture.artifact_id),
+                completed_at: None,
+                error_message: None,
+            },
+            objects: vec![WriteDerivedObject {
+                object: NewDerivedObject {
+                    derived_object_id: summary_id.clone(),
+                    artifact_id: fixture.artifact_id.clone(),
+                    derivation_run_id: run_id.clone(),
+                    origin_kind: OriginKind::Inferred,
+                    object_status: ObjectStatus::Active,
+                    confidence_score: Some(0.93),
+                    confidence_label: Some("high".to_string()),
+                    scope_type: ScopeType::Artifact,
+                    scope_id: fixture.artifact_id.clone(),
+                    supersedes_derived_object_id: None,
+                    payload: DerivedObjectPayload::Summary {
+                        title: Some("conversation_summary".to_string()),
+                        body_text: "This insert should rollback.".to_string(),
+                        object_json: None,
+                    },
+                },
+                evidence_links: vec![
+                    NewEvidenceLink {
+                        evidence_link_id: format!("evidence-{}-1", summary_id),
+                        derived_object_id: summary_id.clone(),
+                        segment_id: fixture.segment_ids[0].clone(),
+                        evidence_role: EvidenceRole::PrimarySupport,
+                        evidence_rank: 1,
+                        support_strength: SupportStrength::Strong,
+                    },
+                    NewEvidenceLink {
+                        evidence_link_id: format!("evidence-{}-2", summary_id),
+                        derived_object_id: summary_id.clone(),
+                        segment_id: fixture.segment_ids[1].clone(),
+                        evidence_role: EvidenceRole::SecondarySupport,
+                        evidence_rank: 1,
+                        support_strength: SupportStrength::Medium,
+                    },
+                ],
+            }],
+        })
+        .expect_err("duplicate evidence rank should fail");
+
+    assert!(!error.to_string().is_empty());
+    assert_eq!(harness.count_derivation_run_by_id(&run_id), 0);
+    assert_eq!(harness.count_derived_object_by_id(&summary_id), 0);
+    assert_eq!(harness.count_evidence_links_for_object(&summary_id), 0);
 }

@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
-use open_archive::config::DbConfig;
+use open_archive::config::OracleConfig;
 use open_archive::db;
 
 fn main() -> Result<()> {
     println!("probe:start");
-    let config = DbConfig::from_env()?;
+    let config = OracleConfig::from_env()?;
     println!("probe:config");
     let conn = db::connect(&config)?;
     println!("probe:connected");
@@ -16,5 +16,6 @@ fn main() -> Result<()> {
         .context("connected, but test query failed")?;
     println!("connected={connected}");
     println!("service_name={service_name}");
+    println!("connect_string={}", config.connect_string);
     Ok(())
 }

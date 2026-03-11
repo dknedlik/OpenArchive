@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use support::{ImportRecord, ProviderHarness};
 
 fn postgres_config() -> Option<PostgresConfig> {
-    if std::env::var("OA_PG_INTEGRATION_TESTS").is_err() {
+    if std::env::var("OA_POSTGRES_INTEGRATION_TESTS").is_err() {
         return None;
     }
 
@@ -57,6 +57,11 @@ struct PostgresHarness(PostgresConfig);
 
 impl ProviderHarness for PostgresHarness {
     fn reset_schema(&self) {
+        assert_eq!(
+            std::env::var("OA_ALLOW_SCHEMA_RESET").as_deref(),
+            Ok("1"),
+            "refusing to reset integration schema without OA_ALLOW_SCHEMA_RESET=1"
+        );
         recreate_test_database(&self.0);
         migrations::postgres::migrate(&self.0).expect("postgres schema migrate should succeed");
     }
@@ -221,28 +226,28 @@ impl ProviderHarness for PostgresHarness {
 }
 
 #[test]
-#[ignore = "requires local Postgres; set OA_PG_INTEGRATION_TESTS=1"]
+#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_write_single_import_happy_path() {
     let Some(harness) = harness() else { return };
     support::contract_write_single_import_happy_path(&harness);
 }
 
 #[test]
-#[ignore = "requires local Postgres; set OA_PG_INTEGRATION_TESTS=1"]
+#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_write_import_duplicate_payload_is_idempotent() {
     let Some(harness) = harness() else { return };
     support::contract_write_import_duplicate_payload_is_idempotent(&harness);
 }
 
 #[test]
-#[ignore = "requires local Postgres; set OA_PG_INTEGRATION_TESTS=1"]
+#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_write_import_duplicate_artifact_hash_is_idempotent() {
     let Some(harness) = harness() else { return };
     support::contract_write_import_duplicate_artifact_hash_is_idempotent(&harness);
 }
 
 #[test]
-#[ignore = "requires local Postgres; set OA_PG_INTEGRATION_TESTS=1"]
+#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_write_import_partial_success_finalizes_completed_with_errors() {
     let Some(harness) = harness() else { return };
     support::contract_write_import_partial_success_finalizes_completed_with_errors(&harness);
