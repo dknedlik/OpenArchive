@@ -1,0 +1,68 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: openarchive
+      POSTGRES_USER: openarchive
+      POSTGRES_PASSWORD: openarchive
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openarchive -d openarchive"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      OA_RELATIONAL_STORE: postgres
+      OA_POSTGRES_URL: postgres://openarchive:openarchive@postgres:5432/openarchive
+      OA_OBJECT_STORE: local_fs
+      OA_OBJECT_STORE_ROOT: /var/lib/openarchive/objects
+      OA_HTTP_BIND: 0.0.0.0:3000
+      OA_HTTP_REQUEST_WORKERS: 2
+      OA_ENRICHMENT_WORKERS: 1
+      OA_ENRICHMENT_POLL_INTERVAL_MS: 500
+      RUST_LOG: info
+    ports:
+      - "3000:3000"
+    volumes:
+      - object_data:/var/lib/openarchive/objects
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:3000/artifacts >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+  oracle:
+    image: container-registry.oracle.com/database/free:latest
+    profiles: ["oracle"]
+    ports:
+      - "1521:1521"
+      - "5500:5500"
+    environment:
+      ORACLE_PWD: openarchive
+    volumes:
+      - oracle_data:/opt/oracle/oradata
+
+volumes:
+  postgres_data:
+  object_data:
+  ollama_data:
+  oracle_data:

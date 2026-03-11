@@ -103,7 +103,7 @@ fn build_import_set(
             payload_object_id,
             source_filename: None,
             source_content_hash: payload_sha256,
-            conversation_count_detected: artifact_sets.len() as i64,
+            conversation_count_detected: artifact_sets.len() as i32,
         },
         artifact_sets,
     })
@@ -146,7 +146,7 @@ fn build_artifact_set(
                 provider_name: None,
                 model_name: participant.model_name,
                 source_participant_key: Some(participant.source_key),
-                sequence_no: participant.sequence_no,
+                sequence_no: participant.sequence_no as i32,
             }
         })
         .collect::<Vec<_>>();
@@ -237,7 +237,7 @@ fn build_segment(
         segment_type: SegmentType::Message,
         source_segment_key: Some(message.source_node_id.clone()),
         parent_segment_id: None,
-        sequence_no: sequence_no as i64,
+        sequence_no: sequence_no as i32,
         created_at_source: message.create_time.map(SourceTimestamp::from),
         text_content_hash: sha256_hex(message.text_content.as_bytes()),
         text_content: message.text_content,

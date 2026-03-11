@@ -26,26 +26,44 @@ impl AppConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelationalStoreConfig {
+    Postgres(PostgresConfig),
     Oracle(DbConfig),
 }
 
 impl RelationalStoreConfig {
     pub fn from_env() -> ConfigResult<Self> {
-        let provider = env::var("OA_RELATIONAL_STORE").unwrap_or_else(|_| "oracle".to_string());
+        let provider = env::var("OA_RELATIONAL_STORE").unwrap_or_else(|_| "postgres".to_string());
         match provider.as_str() {
+            "postgres" => Ok(Self::Postgres(PostgresConfig::from_env()?)),
             "oracle" => Ok(Self::Oracle(DbConfig::from_env()?)),
             _ => Err(ConfigError::InvalidEnumEnv {
                 key: "OA_RELATIONAL_STORE",
                 value: provider,
-                expected: "oracle",
+                expected: "postgres, oracle",
             }),
         }
     }
 
     pub fn oracle_config(&self) -> Option<&DbConfig> {
         match self {
+            Self::Postgres(_) => None,
             Self::Oracle(config) => Some(config),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PostgresConfig {
+    pub connection_string: String,
+}
+
+impl PostgresConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        let connection_string = env::var("OA_POSTGRES_URL")
+            .or_else(|_| env::var("DATABASE_URL"))
+            .map_err(|_| ConfigError::MissingEnv { key: "OA_POSTGRES_URL" })?;
+
+        Ok(Self { connection_string })
     }
 }
 
@@ -247,24 +265,24 @@ mod tests {
             "OA_HTTP_REQUEST_WORKERS",
             "OA_ENRICHMENT_WORKERS",
             "OA_ENRICHMENT_POLL_INTERVAL_MS",
+            "OA_POSTGRES_URL",
+            "DATABASE_URL",
         ] {
             std::env::remove_var(key);
         }
     }
 
     #[test]
-    fn app_config_defaults_to_oracle_and_stubbed_future_providers() {
+    fn app_config_defaults_to_postgres_and_stubbed_future_providers() {
         let _guard = env_lock();
         clear_test_env();
-        std::env::set_var("HOME", "/tmp/open-archive-test-home");
-        std::env::set_var("DB_USERNAME", "test-user");
-        std::env::set_var("DB_PASSWORD", "test-password");
+        std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
 
         let config = AppConfig::from_env().expect("app config should load");
 
         assert!(matches!(
             config.relational_store,
-            RelationalStoreConfig::Oracle(_)
+            RelationalStoreConfig::Postgres(_)
         ));
         assert!(matches!(
             config.object_store,
@@ -274,13 +292,25 @@ mod tests {
     }
 
     #[test]
-    fn invalid_relational_store_provider_is_rejected() {
+    fn postgres_provider_loads_when_configured() {
         let _guard = env_lock();
         clear_test_env();
         std::env::set_var("OA_RELATIONAL_STORE", "postgres");
-        std::env::set_var("HOME", "/tmp/open-archive-test-home");
-        std::env::set_var("DB_USERNAME", "test-user");
-        std::env::set_var("DB_PASSWORD", "test-password");
+        std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
+
+        let config = AppConfig::from_env().expect("postgres provider should load");
+        assert!(matches!(
+            config.relational_store,
+            RelationalStoreConfig::Postgres(_)
+        ));
+    }
+
+    #[test]
+    fn invalid_relational_store_provider_is_rejected() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var("OA_RELATIONAL_STORE", "sqlite");
+        std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
 
         let error = AppConfig::from_env().expect_err("provider should be rejected");
         assert!(matches!(

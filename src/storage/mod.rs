@@ -25,6 +25,7 @@ pub mod derivation_store;
 pub mod import_store;
 pub mod job_store;
 pub mod oracle;
+pub mod postgres;
 pub mod segment_store;
 pub mod types;
 
@@ -37,6 +38,7 @@ pub use derivation_store::{
 pub use import_store::{ImportPayloadStore, ImportStore};
 pub use job_store::{EnrichmentJobLifecycleStore, EnrichmentJobStore};
 pub use oracle::{OracleDerivedMetadataStore, OracleEnrichmentJobStore, OracleImportWriteStore};
+pub use postgres::{PostgresEnrichmentJobStore, PostgresImportWriteStore};
 pub use segment_store::SegmentStore;
 pub use types::{
     ArtifactClass, ArtifactIngestResult, ArtifactListItem, ArtifactStatus, ClaimedJob,

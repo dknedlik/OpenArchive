@@ -119,6 +119,13 @@ pub enum DbError {
         #[source]
         source: oracle::Error,
     },
+
+    #[error("failed to use Postgres via {connection_string}: {source}")]
+    ConnectPostgres {
+        connection_string: String,
+        #[source]
+        source: postgres::Error,
+    },
 }
 
 #[derive(Debug, Error)]

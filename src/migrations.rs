@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, DbConfig, RelationalStoreConfig};
+use crate::config::{AppConfig, DbConfig, PostgresConfig, RelationalStoreConfig};
 use crate::db;
 use crate::error::{preview_sql_statement, MigrationsError, MigrationsResult};
 use ::oracle::Connection;
@@ -8,18 +8,21 @@ use std::path::Path;
 
 pub fn check(config: &AppConfig) -> MigrationsResult<()> {
     match &config.relational_store {
+        RelationalStoreConfig::Postgres(pg_config) => postgres::check(pg_config),
         RelationalStoreConfig::Oracle(db_config) => oracle::check(db_config),
     }
 }
 
 pub fn migrate(config: &AppConfig) -> MigrationsResult<()> {
     match &config.relational_store {
+        RelationalStoreConfig::Postgres(pg_config) => postgres::migrate(pg_config),
         RelationalStoreConfig::Oracle(db_config) => oracle::migrate(db_config),
     }
 }
 
 pub fn reset(config: &AppConfig) -> MigrationsResult<()> {
     match &config.relational_store {
+        RelationalStoreConfig::Postgres(pg_config) => postgres::reset(pg_config),
         RelationalStoreConfig::Oracle(db_config) => oracle::reset(db_config),
     }
 }
@@ -212,7 +215,156 @@ end;
 }
 
 pub mod postgres {
+    use super::*;
+    use ::postgres::Client;
+
     pub const MIGRATIONS_DIR: &str = "sql/postgres/migrations";
+
+    pub fn check(config: &PostgresConfig) -> MigrationsResult<()> {
+        let mut client = crate::postgres_db::connect(config)?;
+        ensure_schema_migration_table(&mut client)?;
+        let pending = pending_migrations(&mut client)?;
+
+        if pending.is_empty() {
+            println!("schema is current");
+            return Ok(());
+        }
+
+        println!("pending migrations:");
+        for migration in pending {
+            println!("  {} {}", migration.version, migration.name);
+        }
+
+        Err(MigrationsError::DatabaseNotUpToDate)
+    }
+
+    pub fn migrate(config: &PostgresConfig) -> MigrationsResult<()> {
+        let mut client = crate::postgres_db::connect(config)?;
+        ensure_schema_migration_table(&mut client)?;
+        let pending = pending_migrations(&mut client)?;
+
+        if pending.is_empty() {
+            println!("no pending migrations");
+            return Ok(());
+        }
+
+        for migration in pending {
+            apply_migration(&mut client, &migration)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn reset(config: &PostgresConfig) -> MigrationsResult<()> {
+        let mut client = crate::postgres_db::connect(config)?;
+        reset_schema_objects(&mut client)
+    }
+
+    fn ensure_schema_migration_table(client: &mut Client) -> MigrationsResult<()> {
+        client
+            .batch_execute(
+                "CREATE TABLE IF NOT EXISTS oa_schema_migration (
+                    version TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    checksum TEXT NOT NULL,
+                    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )",
+            )
+            .map_err(|source| MigrationsError::Db(crate::error::DbError::ConnectPostgres {
+                connection_string: "postgres".to_string(),
+                source,
+            }))?;
+        Ok(())
+    }
+
+    fn reset_schema_objects(client: &mut Client) -> MigrationsResult<()> {
+        let rows = client
+            .query(
+                "SELECT tablename FROM pg_tables WHERE schemaname = current_schema() AND tablename LIKE 'oa_%'",
+                &[],
+            )
+            .map_err(|source| MigrationsError::Db(crate::error::DbError::ConnectPostgres {
+                connection_string: "postgres".to_string(),
+                source,
+            }))?;
+
+        for row in rows {
+            let table_name: String = row.get(0);
+            client
+                .batch_execute(&format!("DROP TABLE IF EXISTS \"{}\" CASCADE", table_name))
+                .map_err(|source| MigrationsError::Db(crate::error::DbError::ConnectPostgres {
+                    connection_string: "postgres".to_string(),
+                    source,
+                }))?;
+        }
+        Ok(())
+    }
+
+    fn pending_migrations(client: &mut Client) -> MigrationsResult<Vec<Migration>> {
+        let applied = load_applied_migrations(client)?;
+        let mut pending = Vec::new();
+
+        for migration in load_migrations_from_dir(Path::new(MIGRATIONS_DIR))? {
+            if let Some(existing_checksum) = applied.get(&migration.version) {
+                if existing_checksum != &migration.checksum {
+                    return Err(MigrationsError::ChecksumMismatch {
+                        version: migration.version,
+                        filename: migration.filename,
+                    });
+                }
+                continue;
+            }
+
+            pending.push(migration);
+        }
+
+        Ok(pending)
+    }
+
+    fn load_applied_migrations(
+        client: &mut Client,
+    ) -> MigrationsResult<std::collections::BTreeMap<String, String>> {
+        let mut map = std::collections::BTreeMap::new();
+        let rows = client
+            .query(
+                "SELECT version, checksum FROM oa_schema_migration ORDER BY version",
+                &[],
+            )
+            .map_err(|source| MigrationsError::Db(crate::error::DbError::ConnectPostgres {
+                connection_string: "postgres".to_string(),
+                source,
+            }))?;
+
+        for row in rows {
+            let version: String = row.get(0);
+            let checksum: String = row.get(1);
+            map.insert(version, checksum);
+        }
+
+        Ok(map)
+    }
+
+    fn apply_migration(client: &mut Client, migration: &Migration) -> MigrationsResult<()> {
+        println!("applying {} {}", migration.version, migration.name);
+        client
+            .batch_execute(&migration.sql)
+            .map_err(|source| MigrationsError::Db(crate::error::DbError::ConnectPostgres {
+                connection_string: "postgres".to_string(),
+                source,
+            }))?;
+        client
+            .execute(
+                "INSERT INTO oa_schema_migration (version, name, filename, checksum, applied_at) VALUES ($1, $2, $3, $4, NOW())",
+                &[&migration.version, &migration.name, &migration.filename, &migration.checksum],
+            )
+            .map_err(|source| MigrationsError::Db(crate::error::DbError::ConnectPostgres {
+                connection_string: "postgres".to_string(),
+                source,
+            }))?;
+        println!("applied {} {}", migration.version, migration.name);
+        Ok(())
+    }
 }
 
 #[derive(Debug)]

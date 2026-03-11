@@ -55,6 +55,34 @@ What is being built now:
 - local MCP as the primary transport
 - a one-command local developer stack
 
+## Running Locally
+
+The default local stack is Postgres plus the OpenArchive app container.
+
+```bash
+make up
+```
+
+That starts:
+
+- Postgres for canonical relational state and job coordination
+- OpenArchive with filesystem-backed object storage on a Docker volume
+
+The app runs migrations on startup and serves on `http://localhost:3000`.
+
+Useful commands:
+
+```bash
+make logs
+make down
+make up-ollama
+make up-oracle-db
+```
+
+`make up-ollama` and `make up-oracle-db` currently add those containers to the
+local stack for provider and inference development. The default app path still
+runs against Postgres unless you explicitly reconfigure it.
+
 ## Architecture Direction
 
 The current architecture is intentionally opinionated:

@@ -9,6 +9,7 @@ pub mod import_service;
 pub mod migrations;
 pub mod object_store;
 pub mod parser;
+pub mod postgres_db;
 pub mod shutdown;
 pub mod storage;
 

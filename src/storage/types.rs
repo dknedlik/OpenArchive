@@ -430,7 +430,7 @@ pub struct NewImport {
     /// SHA-256 hex digest of the raw source bytes. NOT NULL in DDL.
     pub source_content_hash: String,
     /// Best-effort conversation count at intake time. DDL DEFAULT 0 NOT NULL.
-    pub conversation_count_detected: i64,
+    pub conversation_count_detected: i32,
 }
 
 /// Data required to create one oa_artifact row.
@@ -474,7 +474,7 @@ pub struct NewParticipant {
     pub model_name: Option<String>,
     pub source_participant_key: Option<String>,
     /// Zero-based ordering within the artifact. Unique per (artifact_id, sequence_no).
-    pub sequence_no: i64,
+    pub sequence_no: i32,
 }
 
 /// Data required to create one oa_segment row.
@@ -494,7 +494,7 @@ pub struct NewSegment {
     /// Self-FK, nullable in DDL.
     pub parent_segment_id: Option<String>,
     /// Zero-based ordering. Unique per (artifact_id, sequence_no, segment_type).
-    pub sequence_no: i64,
+    pub sequence_no: i32,
     /// Timestamp from the source export, nullable in DDL.
     pub created_at_source: Option<SourceTimestamp>,
     pub text_content: String,

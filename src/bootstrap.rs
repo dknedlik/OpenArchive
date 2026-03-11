@@ -10,7 +10,7 @@ use crate::error::{ConfigError, ConfigResult};
 use crate::object_store::{LocalFsObjectStore, ObjectStore};
 use crate::storage::{
     ArtifactReadStore, EnrichmentJobLifecycleStore, ImportWriteStore, OracleEnrichmentJobStore,
-    OracleImportWriteStore,
+    OracleImportWriteStore, PostgresEnrichmentJobStore, PostgresImportWriteStore,
 };
 
 pub trait ArchiveStore: ImportWriteStore + ArtifactReadStore + Send + Sync {}
@@ -74,6 +74,13 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
     };
 
     match &config.relational_store {
+        RelationalStoreConfig::Postgres(pg_config) => Ok(ServiceBundle {
+            archive_service: Arc::new(DelegatingArchiveAppService {
+                archive_store: Arc::new(PostgresImportWriteStore::new(pg_config.clone())),
+                object_store,
+            }),
+            enrichment_store: Arc::new(PostgresEnrichmentJobStore::new(pg_config.clone())),
+        }),
         RelationalStoreConfig::Oracle(db_config) => Ok(ServiceBundle {
             archive_service: Arc::new(DelegatingArchiveAppService {
                 archive_store: Arc::new(OracleImportWriteStore::new(db_config.clone())),
