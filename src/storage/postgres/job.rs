@@ -183,7 +183,7 @@ fn update_terminal_job(
     _operation: &'static str,
 ) -> StorageResult<()> {
     client.batch_execute("BEGIN").map_err(map_pg_storage_err)?;
-    client
+    let rows_updated = client
         .execute(
             "UPDATE oa_enrichment_job \
              SET job_status = $1, \
@@ -195,6 +195,13 @@ fn update_terminal_job(
             &[&status, &error_message, &job_id, &worker_id],
         )
         .map_err(map_pg_storage_err)?;
+    if rows_updated == 0 {
+        client.batch_execute("ROLLBACK").map_err(map_pg_storage_err)?;
+        return Err(crate::error::StorageError::JobNotClaimed {
+            job_id: job_id.to_string(),
+            worker_id: worker_id.to_string(),
+        });
+    }
     client.batch_execute("COMMIT").map_err(map_pg_storage_err)?;
     Ok(())
 }

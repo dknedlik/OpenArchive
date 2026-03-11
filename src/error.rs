@@ -375,6 +375,9 @@ pub enum StorageError {
     #[error("invalid job_type '{job_type}' for job {job_id}")]
     InvalidJobType { job_id: String, job_type: String },
 
+    #[error("worker {worker_id} does not own running job {job_id}")]
+    JobNotClaimed { job_id: String, worker_id: String },
+
     #[error("failed to commit {operation}")]
     Commit {
         operation: &'static str,
