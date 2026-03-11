@@ -2,20 +2,33 @@
 
 ## Status
 
-This is a candidate architecture sketch, not a committed design.
+This is a working architecture sketch, not a final design.
 
-It is also intentionally brain-layer biased at this stage. Concerns outside the
-brain layer, such as polished mobile UX, final auth flows, and non-core access
-surface details, may be stubbed or underdesigned on purpose for now.
+The current direction is local-first, containerized, and machine-first.
 
 ## Candidate System Shape
 
-OpenArchive may become a cloud-first service with four major responsibilities:
+OpenArchive is a modular archive and memory system with four major
+responsibilities:
 
-1. ingest source conversations from multiple tools
+1. ingest source artifacts from external tools
 2. normalize them into a canonical archive
-3. derive searchable metadata and reusable memories
-4. expose retrieval through an API and later remote MCP
+3. derive searchable metadata and reusable memory
+4. expose retrieval through MCP and other transport adapters
+
+## Primary Slice-One Deployment Shape
+
+Slice one should run locally with one command.
+
+Target shape:
+
+- Docker Compose brings up the system
+- Postgres stores canonical metadata, provenance, and jobs
+- a local filesystem-backed object store on Docker volumes stores raw payloads
+  and other large objects
+- ingestion/query and enrichment run as separate modules or processes
+- Ollama is optional for local inference
+- local MCP is the primary external interface
 
 ## Major Components
 
@@ -32,199 +45,154 @@ Examples:
 
 ### Canonical archive service
 
-This service would likely own:
+This service owns:
 
-- conversation, message, participant, and source models
-- raw transcript storage references
+- artifact, segment, participant, and source models
 - normalization and idempotency rules
-- extraction job orchestration
+- references to raw payloads stored in the object store
+- import and enrichment job orchestration
 
-### Extraction pipeline
+### Object storage service
+
+Binary and large text objects should live behind a dedicated object-store
+interface from day one.
+
+That includes:
+
+- raw import payloads
+- canonical source copies when needed
+- larger derived artifacts if they outgrow practical row storage
+
+Slice-one default:
+
+- local filesystem-backed object store on a Docker volume
+
+Near-term follow-on:
+
+- S3-compatible object store provider
+
+### Relational storage service
+
+Canonical records, provenance, and jobs should live behind a relational-store
+boundary.
+
+Slice-one default:
+
+- Postgres
+
+Possible future providers:
+
+- SQLite
+- other SQL backends that implement the required traits
+
+### Enrichment pipeline
 
 Derived artifacts are separate from raw archive data.
 
 Initial derived outputs:
 
 - conversation summary
-- tags
-- participants and tool metadata
+- classifications
 - extracted memories
-- embeddings or other search features later
+
+The enrichment pipeline should be durable, asynchronous, and location-flexible.
+
+That means workers may run:
+
+- in the same local Compose stack
+- on another local machine
+- in a remote deployment later
 
 ### Inference boundary
 
 Inference should follow the same boundary discipline as storage.
 
 The application layer should depend on feature-specific, provider-agnostic
-interfaces rather than raw provider verbs such as chat completion or
-embeddings.
-
-Examples of the desired interface shape:
+interfaces such as:
 
 - `ConversationSummarizer`
 - `MemoryExtractor`
 - `ClassificationExtractor`
-- later `EntityExtractor`
-- later `RelationshipExtractor`
-- later `EmbeddingGenerator`
 
-These interfaces should:
+Concrete inference providers live below that boundary.
 
-- accept OpenArchive-shaped inputs such as artifact windows, segment sets, or
-  context-pack requests
-- return typed OpenArchive-shaped outputs rather than provider-native payloads
-- include enough execution metadata for provenance, replay, and evaluation
-  such as provider, model, prompt version, latency, token usage, and parse
-  status
+Likely providers:
 
-Concrete provider adapters should live below that boundary.
+- local Ollama-backed inference
+- stub provider for development
+- later, remote hosted model providers
 
-That lower layer may talk to OpenAI, Anthropic, OpenRouter, local models, or
-other providers, but those concerns should not leak into the application core.
+### Retrieval surface
 
-### Retrieval API
+MCP is the primary external interface for slice one.
 
-A likely initial API surface:
+That does not mean the application core should be shaped like the MCP
+protocol. Instead:
 
-- archive import
-- conversation lookup
-- full-text and metadata search
-- summary retrieval
-- memory retrieval
+- use-case services live in the middle
+- local MCP and remote MCP become transport adapters over those use cases
+- CLI and later HTTP can reuse the same application services
 
-### Caching direction
+## Provider Model
 
-Caching will likely become useful in later slices, but it should be applied
-selectively.
+OpenArchive should use a bounded provider model, not a generic plugin system.
 
-The default rule should be:
+Rules:
 
-- cache rebuildable outputs
-- do not treat caches as canonical storage
-- prefer explicit cache types with clear invalidation inputs over a generic
-  catch-all cache layer
+- providers implement concern-specific traits
+- config selects explicit provider types
+- factory functions assemble the configured services
+- the domain layer does not branch on provider type
 
-Strong early cache candidates:
+The important concern boundaries are:
 
-- inference outputs such as summaries, classifications, memories, and later
-  embeddings when the input scope and pipeline are stable
-- task-shaped context packs that are expensive to rebuild and likely to be
-  requested repeatedly
-- repeated retrieval candidate sets or rankings when a real workload shows
-  that they are costly enough to justify caching
+- relational store
+- object store
+- inference provider
 
-Cache keys should include the factors that materially affect meaning, such as:
-
-- source content hash or normalized input hash
-- feature or pack type
-- pipeline version
-- prompt version
-- provider/model choice when relevant
-- retrieval or policy version where applicable
-
-This implies that caching should sit above canonical storage and below
-consumer-facing request handling where appropriate, rather than being confused
-with the durable archive itself.
-
-### Later integration surfaces
-
-- remote MCP server
-- webhook-driven ingestion
-- browser capture helpers
-
-These access-surface ideas are intentionally secondary to the current brain
-layer work and should not be mistaken for detailed interface designs yet.
-
-## Candidate Deployment Direction
-
-- Rust service on OCI Compute or equivalent OCI-hosted runtime
-- Oracle Autonomous Database as a possible primary system of record
-- New database schema in the existing ADB instance as the default starting
-  assumption
-- OCI Vault and the existing wallet pattern as reusable ingredients
+It is acceptable for a higher-level data service to aggregate repositories from
+multiple providers.
 
 ## Execution Model Direction
 
-The current preferred execution model is pipeline-first rather than
+The preferred execution model is pipeline-first rather than
 request-lifecycle-first.
 
-- Keep user-facing request handlers short and bounded
-- Move slow enrichment and hydration work behind durable job boundaries
-- Allow the system to start as one process while preserving seams that let
-  stages move into separate workers later
-- Prefer synchronous Rust and bounded worker pools by default where the
-  underlying client libraries are already blocking
-
-This implies a staged flow such as:
+Stages:
 
 1. intake and validation
 2. canonical normalization and persistence
 3. enrichment and derivation
 4. retrieval and context assembly
 
-These stages may reside in one application initially, but they should behave as
-decoupled pipeline stages rather than one long end-to-end request path.
+These stages may start in one local stack, but they should behave as decoupled
+pipeline stages rather than one long synchronous request path.
 
-### Concurrency Principles
+## Job Queue Direction
 
-- Use fixed-size worker pools rather than ad hoc thread spawning
-- Keep separate worker classes for different load profiles when useful
-- treat CPU-heavy normalization separately from latency-heavy enrichment
-- Bound Oracle connection usage explicitly with small pools sized to the target
-  machine
-- Treat the database as the durable source of truth for job lifecycle and stage
-  progress
-- Use in-process channels only as an optimization, not as the sole source of
-  work state
+The current preferred queue model is database-backed job coordination rather
+than a dedicated MQ.
 
-### Async Versus Sync Guidance
+That is a good fit for this system because jobs are:
 
-Async is not a requirement for every layer.
+- durable
+- coarse-grained
+- provenance-sensitive
+- low enough throughput that SQL visibility matters more than queue fan-out
 
-- Synchronous HTTP and storage layers are acceptable if request concurrency is
-  modest and long-running work is pushed out of band
-- Blocking Oracle access is an acceptable implementation choice if worker and
-  connection counts are bounded
-- Async should be introduced only where it provides clear value, especially for
-  services that spend large amounts of time waiting on remote providers
-- The initial HTTP transport should prefer a synchronous, thread-pooled server
-  rather than an async runtime wrapped around blocking Oracle calls
-- A small framework dependency is acceptable when it replaces real protocol and
-  connection-handling complexity; avoid framework dependencies that only hide
-  straightforward application control flow
+The job system should support:
 
-### Initial HTTP Runtime Decision
-
-For slice one, the preferred HTTP runtime is:
-
-- `tiny_http` for blocking HTTP request handling with a narrow in-repo router
-- explicit bounded request worker counts rather than unbounded thread creation
-- synchronous handler execution through parse plus canonical persistence
-- asynchronous enrichment only through durable jobs, never inline in request
-  handlers
-
-This keeps the runtime aligned with the blocking Oracle client, while still
-preserving a clean seam if a later stage needs an async or split-process model.
-
-The architecture should optimize first for clear stage boundaries, backpressure,
-and operability. Concurrency model details can then evolve per stage without
-rewriting the full system shape.
+- lease/claim semantics
+- retries and backoff
+- crash recovery through lease expiry
+- idempotent handlers
+- job inspection with ordinary SQL
 
 ## Constraints And Heuristics
 
 - preserve source fidelity while still normalizing aggressively
-- avoid lock-in to any one AI tool or model provider
 - keep ingestion-specific logic outside the core model
 - keep extracted memory traceable back to exact source messages
-
-## Why The Strongest Idea Is Not A Chat Client
-
-Replacing the front-end chat experience would expand scope into:
-
-- real-time conversation UX
-- per-provider message streaming
-- auth/session management per tool
-- tool invocation UX
-
-That does not currently look like the leverage point. Durable memory and reuse
-across tools looks more promising.
+- keep provider seams explicit without overbuilding extensibility
+- make local startup and contribution materially easier than the earlier
+  OCI/Oracle path

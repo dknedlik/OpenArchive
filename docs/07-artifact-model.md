@@ -155,7 +155,7 @@ Examples:
 - shared URL
 - clipboard dump
 - screenshot with no further classification yet
-- imported blob from a basic intake flow
+- imported file or raw payload from a basic intake flow
 
 Behavioral properties:
 

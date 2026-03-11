@@ -11,17 +11,17 @@ AI work is increasingly fragmented across tools. Valuable knowledge ends up
 trapped inside chat sessions, export formats, browser tabs, and agent-specific
 memory systems.
 
-OpenArchive may be a good vehicle for preserving and reusing that knowledge
-without requiring a new chat client.
+OpenArchive should preserve and reuse that knowledge without requiring a new
+chat client.
 
-The strongest idea so far is to build a memory substrate beside existing tools,
-not a replacement for them.
+The strongest idea is to build a machine-first archive and memory substrate
+beside existing tools, not a replacement for them.
 
 ## Candidate Job To Be Done
 
-When a user has important AI conversations spread across multiple tools, they
-need one place to archive, search, summarize, and reuse those conversations
-across future tools and agents.
+When a user has important AI conversations and related artifacts spread across
+multiple tools, they need one place to ingest, preserve, enrich, query, and
+reuse those artifacts across future tools and agents.
 
 ## Candidate Scope
 
@@ -31,31 +31,37 @@ OpenArchive may eventually:
 - normalize them into a canonical internal model
 - retain raw source fidelity for audit and reprocessing
 - extract structured metadata and reusable memories
-- provide search and retrieval through an API
-- support later integrations like remote MCP
+- provide machine-oriented retrieval through MCP-first interfaces
+- support both local and remote deployment shapes
 
 OpenArchive probably should not initially:
 
 - become a full end-user chat client
 - require direct replacement of existing AI tools
-- depend on one model provider or one agent runtime
+- depend on one model provider, one database, or one hosting target
 
 ## Working Principles
 
-- Raw transcript preservation seems essential
+- Raw artifact preservation is essential
 - Derived metadata should be versioned and reproducible
 - Tool-specific ingestion should stay separate from the canonical archive model
-- Search likely matters before advanced agent integration exists
+- The application core should be transport-agnostic
+- MCP can be the primary external interface without making the core
+  MCP-protocol-shaped
+- Enrichment should be asynchronous and durable
 - Memory extraction is only trustworthy if provenance remains attached
 
 ## Likely Initial Users
 
-- a single power user archiving their own AI work
+- a single power user archiving their own AI work locally
 - later, a small team with shared archives and permissions
+- contributors who want an open source memory/archive system that runs with
+  modest local setup
 
 ## Near-Term Outcomes To Validate
 
-- import a chat export into canonical storage
-- browse or query archived threads by source, date, tag, and full text
-- generate concise summaries and extracted memory with source grounding
-- retrieve relevant prior threads for a new agent workflow
+- import a ChatGPT export into canonical storage
+- preserve raw payloads outside the relational database
+- query archived artifacts through a local MCP server
+- run enrichment asynchronously with a database-backed job queue
+- support optional local inference for users who want GPU-backed enrichment

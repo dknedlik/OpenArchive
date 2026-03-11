@@ -1,60 +1,67 @@
-# OpenArchive Brainstorming Roadmap
+# OpenArchive Roadmap
 
 This is a sequencing sketch, not a committed delivery plan.
 
-## Phase 0: Framing
+## Phase 0: Reset The Foundation
 
-- document the problem and the non-goals
-- decide whether the memory-substrate framing still holds up
-- choose candidate canonical model boundaries
-- keep stack choices provisional while de-risking major constraints
+- rewrite the project around a local-first, open source slice one
+- remove Oracle/OCI assumptions from the mainline path
+- define provider boundaries for relational storage, object storage, and
+  inference
+- make MCP the primary external interface
 
-## Phase 1: Canonical Archive MVP Candidate
+Exit criteria:
 
-- create schema for artifacts, segments, provenance, and core derived metadata
-- implement one ingestion path from a concrete source format
-- persist raw source reference plus normalized rows
-- expose a basic read API for artifact retrieval and context-oriented queries
+- docs and code describe the same architecture
+- the default local path does not require Oracle-specific tooling or accounts
+
+## Phase 1: Local Archive Slice
+
+- provide a `make up` path backed by Docker Compose
+- run Postgres, core services, and optional Ollama locally
+- ingest one concrete source format end to end
+- persist canonical rows plus copied raw payloads
+- expose artifact retrieval and context-oriented queries through local MCP
+- run enrichment asynchronously through a database-backed job queue
 
 Exit criteria:
 
 - one real export can be imported end to end
-- imported artifact data can be fetched from the API
+- imported artifact data can be queried through MCP
 - import is idempotent by source identity or content hash
+- the local stack is usable with modest setup
 
-## Phase 2: Search and Summary Candidate
+## Phase 2: Stronger Retrieval And Search
 
-- add metadata-aware and full-text retrieval
-- generate stored summaries and useful semantic enrichments
-- support filtering by source, date range, artifact type, and core metadata
-
-Exit criteria:
-
-- stored artifacts are retrievable without manually browsing raw source material
-
-## Phase 3: Extracted Memory Candidate
-
-- define memory types and evidence linkage
-- extract reusable memories from imported artifacts
-- retrieve memory items with provenance
+- add metadata-aware retrieval and full-text search
+- improve context-pack generation
+- add richer query flows for machine consumers
 
 Exit criteria:
 
-- a new agent workflow can pull prior memory with source grounding
+- stored artifacts are retrievable without manually browsing raw source
+  material
+- the MCP surface is useful as a daily machine-facing archive interface
 
-## Phase 4: Integration Surfaces Candidate
+## Phase 3: Better Enrichment
 
-- remote MCP
-- more ingestion adapters
-- automation hooks
+- support local inference through Ollama as a first-class provider
+- improve stored summaries, classifications, and memories
+- allow enrichment workers to run outside the main local stack when needed
 
 Exit criteria:
 
-- OpenArchive can participate as shared memory across more than one tool
+- a user with local inference capacity can run meaningful enrichment locally
+- enrichment remains durable even when workers are restarted or moved
 
-## Better Immediate Next Steps
+## Phase 4: Remote Deployment Shapes
 
-1. capture the brainstorm as explicit hypotheses and open questions
-2. choose one concrete import source to design around first
-3. turn the brain-layer docs into a first-pass schema and ingestion pipeline
-4. only then decide whether to start with schema, service code, or both
+- add S3-compatible object storage
+- support remote MCP deployment for personal cloud-hosted use
+- keep local and remote deployment shapes aligned around the same application
+  core
+
+Exit criteria:
+
+- OpenArchive can run locally or remotely without re-architecting the core
+- the remote MCP path is structurally natural rather than bolted on

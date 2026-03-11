@@ -20,7 +20,7 @@
 ## Current Taxonomy
 
 - `ConfigError`: environment and configuration loading failures.
-- `DbError`: Oracle pool and connection failures plus DB-related env parsing.
+- `DbError`: relational-store connection, pool, and DB-related env parsing failures.
 - `MigrationsError`: migration discovery, validation, and schema update failures.
 - `StorageError`: write-path failures for imports, artifacts, segments, jobs, commit, and rollback.
 - `OpenArchiveError`: top-level library error enum that wraps the layer-specific enums.
