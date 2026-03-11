@@ -125,16 +125,6 @@ impl ProviderHarness for OracleHarness {
         conn.commit().expect("commit seed artifact");
     }
 
-    fn insert_invalid_job_type_row(
-        &self,
-        _job_id: &str,
-        _artifact_id: &str,
-        _job_type: &str,
-        _payload_json: &str,
-    ) {
-        unreachable!("import harness does not exercise invalid job_type insert")
-    }
-
     fn fetch_import_record(&self, import_id: &str) -> ImportRecord {
         let conn = open_archive::db::connect(&self.0).expect("connect");
         let row = conn

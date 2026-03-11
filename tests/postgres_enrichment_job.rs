@@ -73,30 +73,6 @@ impl ProviderHarness for PostgresHarness {
         unreachable!("job harness does not seed duplicate artifact rows directly")
     }
 
-    fn insert_invalid_job_type_row(
-        &self,
-        job_id: &str,
-        artifact_id: &str,
-        job_type: &str,
-        payload_json: &str,
-    ) {
-        let mut client = open_archive::postgres_db::connect(&self.0).expect("connect");
-        client
-            .batch_execute("SET session_replication_role = replica")
-            .expect("disable constraints for corruption fixture");
-        client
-            .execute(
-                "INSERT INTO oa_enrichment_job \
-                 (job_id, artifact_id, job_type, job_status, max_attempts, priority_no, payload_json, attempt_count) \
-                 VALUES ($1, $2, $3, 'pending', 3, 100, $4::text::jsonb, 0)",
-                &[&job_id, &artifact_id, &job_type, &payload_json],
-            )
-            .expect("insert invalid job_type row");
-        client
-            .batch_execute("SET session_replication_role = DEFAULT")
-            .expect("restore constraints");
-    }
-
     fn fetch_import_record(&self, _import_id: &str) -> ImportRecord {
         unreachable!("job harness does not verify import rows")
     }

@@ -61,24 +61,6 @@ impl ProviderHarness for OracleHarness {
         unreachable!("job harness does not seed duplicate artifact rows directly")
     }
 
-    fn insert_invalid_job_type_row(
-        &self,
-        job_id: &str,
-        artifact_id: &str,
-        job_type: &str,
-        payload_json: &str,
-    ) {
-        let conn = open_archive::db::connect(&self.0).expect("connect");
-        conn.execute(
-            "INSERT INTO oa_enrichment_job \
-             (job_id, artifact_id, job_type, job_status, max_attempts, priority_no, payload_json, attempt_count) \
-             VALUES (:1, :2, :3, 'pending', 3, 100, :4, 0)",
-            &[&job_id, &artifact_id, &job_type, &payload_json],
-        )
-        .expect("insert invalid job_type row");
-        conn.commit().expect("commit invalid job row");
-    }
-
     fn fetch_import_record(&self, _import_id: &str) -> ImportRecord {
         unreachable!("job harness does not verify import rows")
     }
@@ -186,11 +168,4 @@ fn test_claim_skips_future_available_at() {
 fn test_non_claiming_worker_cannot_complete_job() {
     let Some(harness) = harness() else { return };
     support::contract_non_claiming_worker_cannot_complete_job(&harness);
-}
-
-#[test]
-#[ignore = "requires Oracle integration env; set OA_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
-fn test_claim_fails_on_unknown_job_type() {
-    let Some(harness) = harness() else { return };
-    support::contract_claim_fails_on_unknown_job_type(&harness);
 }

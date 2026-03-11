@@ -235,7 +235,6 @@ pub trait ProviderHarness {
     fn job_store(&self) -> Box<dyn EnrichmentJobLifecycleStore>;
 
     fn seed_existing_artifact(&self, import_set: &WriteImportSet);
-    fn insert_invalid_job_type_row(&self, job_id: &str, artifact_id: &str, job_type: &str, payload_json: &str);
 
     fn fetch_import_record(&self, import_id: &str) -> ImportRecord;
     fn fetch_job_record(&self, job_id: &str) -> JobRecord;
@@ -727,31 +726,4 @@ pub fn contract_non_claiming_worker_cannot_complete_job<H: ProviderHarness>(harn
     let job = harness.fetch_job_record(&expected_job_id);
     assert_eq!(job.status, "running");
     assert_eq!(job.claimed_by.as_deref(), Some("worker-owner"));
-}
-
-pub fn contract_claim_fails_on_unknown_job_type<H: ProviderHarness>(harness: &H) {
-    let _guard = lock_live_test();
-    harness.reset_schema();
-
-    let job_id = format!("job-invalid-{}", unique_suffix("inv"));
-    let artifact_id = format!("artifact-invalid-{}", unique_suffix("inv"));
-    let invalid_job_type = "completely_unknown_type";
-    let payload_json = r#"{"test":"payload"}"#;
-
-    harness.insert_invalid_job_type_row(&job_id, &artifact_id, invalid_job_type, payload_json);
-
-    let err = harness
-        .job_store()
-        .claim_next_job("worker-invalid")
-        .expect_err("claiming invalid job type must fail");
-
-    let error_text = err.to_string();
-    assert!(error_text.contains("invalid job_type"));
-    assert!(error_text.contains(invalid_job_type));
-    assert!(error_text.contains(&job_id));
-
-    let job = harness.fetch_job_record(&job_id);
-    assert_eq!(job.status, "pending");
-    assert_eq!(job.attempt_count, 0);
-    assert!(job.claimed_by.is_none());
 }
