@@ -8,7 +8,7 @@ use crate::storage::{ArtifactReadStore, ImportWriteStore};
 
 pub fn build_response<S>(request: &mut Request, store: &S) -> Response<Cursor<Vec<u8>>>
 where
-    S: ImportWriteStore + ArtifactReadStore,
+    S: ImportWriteStore + ArtifactReadStore + ?Sized,
 {
     match (request.method(), request.url()) {
         (&Method::Post, "/imports/chatgpt") => handle_post_imports_chatgpt(request, store),
@@ -19,7 +19,7 @@ where
 
 fn handle_post_imports_chatgpt<S>(request: &mut Request, store: &S) -> Response<Cursor<Vec<u8>>>
 where
-    S: ImportWriteStore + ArtifactReadStore,
+    S: ImportWriteStore + ArtifactReadStore + ?Sized,
 {
     match read_request_body(request)
         .and_then(|body| import_chatgpt_payload(store, &body).map_err(HttpError::from))
@@ -31,7 +31,7 @@ where
 
 fn handle_get_artifacts<S>(store: &S) -> Response<Cursor<Vec<u8>>>
 where
-    S: ArtifactReadStore,
+    S: ArtifactReadStore + ?Sized,
 {
     #[derive(serde::Serialize)]
     struct ArtifactListResponse {

@@ -64,6 +64,14 @@ The current architecture is intentionally opinionated:
 - database-backed durable job queue rather than a separate MQ
 - local-first defaults without blocking future remote MCP deployment
 
+OpenArchive uses synchronous Rust throughout. This is intentional. The
+workload here — ingestion, job polling, enrichment coordination, and MCP
+serving — does not benefit meaningfully from async complexity. Synchronous
+Rust is easier to understand, easier to contribute to, and fits the system's
+explicit worker-pool model. If a transport edge eventually requires an async
+library, it should remain a thin boundary layer rather than reshape the
+application core.
+
 This is not intended to become a generic plugin system. The target is simpler:
 if someone wants to add a provider, they should be able to implement the
 relevant traits, wire config parsing, update the factory, and move on.

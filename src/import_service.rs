@@ -39,7 +39,7 @@ pub fn import_chatgpt_payload<S>(
     payload_bytes: &[u8],
 ) -> Result<ImportResponse, OpenArchiveError>
 where
-    S: ImportWriteStore,
+    S: ImportWriteStore + ?Sized,
 {
     let parsed = parser::chatgpt::parse_conversations(payload_bytes)?;
     let import_set = build_import_set(payload_bytes, parsed)?;

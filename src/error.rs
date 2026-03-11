@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+// Library code stays on typed errors so binaries and future transport adapters
+// can decide presentation and retry behavior at the boundary.
 pub type Result<T> = std::result::Result<T, OpenArchiveError>;
 pub type ConfigResult<T> = std::result::Result<T, ConfigError>;
 pub type DbResult<T> = std::result::Result<T, DbError>;
@@ -36,6 +38,13 @@ pub enum ConfigError {
 
     #[error("{key} is required when WALLET_DIR is not provided")]
     MissingEnvWithDependency { key: &'static str },
+
+    #[error("invalid {key} value {value:?}; expected one of: {expected}")]
+    InvalidEnumEnv {
+        key: &'static str,
+        value: String,
+        expected: &'static str,
+    },
 
     #[error("invalid {key} value {value:?}; expected positive integer")]
     InvalidPositiveIntegerEnv { key: &'static str, value: String },

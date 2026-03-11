@@ -1,0 +1,80 @@
+# OpenArchive Agent Guide
+
+## Purpose
+
+OpenArchive is a local-first archive and memory layer for AI-era personal
+data. The current slice-one direction is:
+
+- local startup via Docker Compose
+- Postgres as the default relational backend target
+- filesystem-backed object storage for raw payloads
+- MCP as the primary external interface
+- asynchronous enrichment with a database-backed job queue
+
+The current code still contains Oracle-first implementation pieces. Treat the
+docs as the architectural target and the code as an in-progress migration.
+
+## Repo Priorities
+
+- Preserve clean boundaries between transport, application logic, relational
+  persistence, object storage, and inference.
+- Prefer explicit provider wiring over generic plugin systems.
+- Keep raw payload bytes out of the relational layer.
+- Keep MCP as a transport adapter over application use cases, not the shape of
+  the core.
+
+## Composition Rules
+
+- The composition root is [`src/main.rs`](src/main.rs) plus
+  [`src/bootstrap.rs`](src/bootstrap.rs).
+- Do not hardcode concrete providers in `main`.
+- Add providers by updating config parsing, implementing the relevant traits,
+  and extending the bootstrap factory.
+- Keep provider-specific branching out of domain and request-handling code.
+
+## Runtime And Concurrency
+
+- Default to synchronous Rust.
+- Do not introduce async runtimes or async-first libraries without a concrete,
+  demonstrated need.
+- Treat any future async requirement as a thin transport-edge concern, not a
+  reason to reshape the application core.
+- Keep request handlers short and bounded.
+- Enrichment runs out of band through bounded worker threads and durable job
+  state in the database.
+
+## Error Handling
+
+- Library code returns typed errors from [`src/error.rs`](src/error.rs).
+- `anyhow` belongs at binary and composition boundaries, not inside library
+  modules.
+- Preserve source errors when wrapping failures.
+- Do not collapse structured error variants into generic strings.
+
+## Documentation And Comments
+
+- Add comments only where they explain a boundary, invariant, or non-obvious
+  behavior.
+- Prefer rustdoc on public traits, modules, and types at architecture seams.
+- Do not add comments that only restate the code or mention that docs and code
+  are temporarily out of sync.
+
+## Verification
+
+- For Rust code changes, run focused tests first, then broader ones if the
+  touched area compiles cleanly.
+- Prefer `cargo test --lib` and targeted binary or integration tests over
+  speculative refactors without verification.
+- For docs-only changes, do not run tests unless the docs describe changed
+  commands or code paths.
+
+## Important Files
+
+- [`README.md`](README.md): project pitch and current status
+- [`docs/02-architecture.md`](docs/02-architecture.md): working architecture
+- [`src/bootstrap.rs`](src/bootstrap.rs): provider assembly
+- [`src/config.rs`](src/config.rs): provider-shaped configuration
+- [`src/storage/mod.rs`](src/storage/mod.rs): storage-facing traits and write
+  path types
+- [`src/import_service.rs`](src/import_service.rs): import pipeline entry point
+- [`src/enrichment_worker.rs`](src/enrichment_worker.rs): durable worker loop

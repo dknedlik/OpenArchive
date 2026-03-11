@@ -1,11 +1,10 @@
 use anyhow::Context;
 use clap::{command, Parser, Subcommand};
-use open_archive::config::{DbConfig, HttpConfig};
+use open_archive::bootstrap::{build_service_bundle, require_oracle_db_config};
+use open_archive::config::AppConfig;
 use open_archive::enrichment_worker::start_enrichment_workers;
 use open_archive::shutdown::ShutdownToken;
-use open_archive::storage::{
-    ArtifactReadStore, ImportWriteStore, OracleEnrichmentJobStore, OracleImportWriteStore,
-};
+use open_archive::storage::{ArtifactReadStore, ImportWriteStore};
 use open_archive::{db, http, migrations};
 
 use std::sync::Arc;
@@ -34,11 +33,15 @@ fn main() -> Result<(), anyhow::Error> {
     match cli.command {
         Command::AdbCheck => adb_check(),
         Command::Migrate => {
-            let config = DbConfig::from_env().context("failed to load database configuration")?;
+            let config = AppConfig::from_env().context("failed to load application configuration")?;
+            let config = require_oracle_db_config(&config)
+                .context("failed to resolve Oracle database configuration")?;
             migrations::migrate(&config).context("failed to apply database migrations")
         }
         Command::MigrateCheck => {
-            let config = DbConfig::from_env().context("failed to load database configuration")?;
+            let config = AppConfig::from_env().context("failed to load application configuration")?;
+            let config = require_oracle_db_config(&config)
+                .context("failed to resolve Oracle database configuration")?;
             migrations::check(&config).context("database migration check failed")
         }
         Command::Serve => serve(),
@@ -46,7 +49,9 @@ fn main() -> Result<(), anyhow::Error> {
 }
 
 fn adb_check() -> Result<(), anyhow::Error> {
-    let config = DbConfig::from_env().context("failed to load database configuration")?;
+    let config = AppConfig::from_env().context("failed to load application configuration")?;
+    let config =
+        require_oracle_db_config(&config).context("failed to resolve Oracle database configuration")?;
     let conn = db::connect(&config).context("failed to connect to Oracle")?;
     let row = conn
         .query_row_as::<(i32, String)>(
@@ -65,8 +70,10 @@ fn adb_check() -> Result<(), anyhow::Error> {
 fn serve() -> Result<(), anyhow::Error> {
     env_logger::init();
 
-    let db_config = DbConfig::from_env().context("failed to load database configuration")?;
-    let http_config = HttpConfig::from_env().context("failed to load HTTP configuration")?;
+    let app_config = AppConfig::from_env().context("failed to load application configuration")?;
+    let http_config = app_config.http.clone();
+    let services = build_service_bundle(&app_config)
+        .context("failed to construct configured service providers")?;
     let bind_addr = http_config.bind_addr.clone();
     let request_worker_count = http_config.request_worker_count;
     let enrichment_worker_count = http_config.enrichment_worker_count;
@@ -81,7 +88,7 @@ fn serve() -> Result<(), anyhow::Error> {
         })?;
     }
 
-    let store = Arc::new(OracleImportWriteStore::new(db_config.clone()));
+    let store = Arc::clone(&services.archive_store);
     let server: Arc<tiny_http::Server> = Arc::new(
         tiny_http::Server::http(&bind_addr)
             .map_err(|err| anyhow::anyhow!("failed to start HTTP server: {err}"))?,
@@ -95,7 +102,7 @@ fn serve() -> Result<(), anyhow::Error> {
         log::info!("Starting {} enrichment workers", enrichment_worker_count);
         start_enrichment_workers(
             &http_config,
-            Arc::new(OracleEnrichmentJobStore::new(db_config)),
+            Arc::clone(&services.enrichment_store),
             shutdown.clone(),
         )?
     } else {
@@ -149,7 +156,7 @@ impl RequestReceiver for tiny_http::Server {
 
 fn run_http_worker_loop<S>(receiver: &impl RequestReceiver, store: &S, shutdown: ShutdownToken)
 where
-    S: ImportWriteStore + ArtifactReadStore,
+    S: ImportWriteStore + ArtifactReadStore + ?Sized,
 {
     loop {
         if shutdown.is_shutdown() {
