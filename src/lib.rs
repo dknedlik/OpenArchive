@@ -7,11 +7,13 @@ pub mod error;
 pub mod http;
 pub mod import_service;
 pub mod migrations;
+pub mod object_store;
 pub mod parser;
 pub mod shutdown;
 pub mod storage;
 
 pub use domain::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 pub use error::{
-    ConfigError, DbError, MigrationsError, OpenArchiveError, ParserError, Result, StorageError,
+    ConfigError, DbError, MigrationsError, ObjectStoreError, OpenArchiveError, ParserError,
+    Result, StorageError,
 };

@@ -7,6 +7,7 @@ pub type Result<T> = std::result::Result<T, OpenArchiveError>;
 pub type ConfigResult<T> = std::result::Result<T, ConfigError>;
 pub type DbResult<T> = std::result::Result<T, DbError>;
 pub type MigrationsResult<T> = std::result::Result<T, MigrationsError>;
+pub type ObjectStoreResult<T> = std::result::Result<T, ObjectStoreError>;
 pub type StorageResult<T> = std::result::Result<T, StorageError>;
 pub type ParserResult<T> = std::result::Result<T, ParserError>;
 
@@ -22,6 +23,9 @@ pub enum OpenArchiveError {
     Migrations(#[from] MigrationsError),
 
     #[error(transparent)]
+    ObjectStore(#[from] ObjectStoreError),
+
+    #[error(transparent)]
     Storage(#[from] StorageError),
 
     #[error(transparent)]
@@ -29,6 +33,35 @@ pub enum OpenArchiveError {
 
     #[error("internal invariant violated: {0}")]
     Invariant(String),
+}
+
+#[derive(Debug, Error)]
+pub enum ObjectStoreError {
+    #[error("{key} is required when OA_OBJECT_STORE_ROOT is not provided")]
+    MissingEnvWithDependency { key: &'static str },
+
+    #[error("failed to create object-store directory {path}")]
+    CreateDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to write object {object_id} to {path}")]
+    WriteObject {
+        object_id: String,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to read object {object_id} from {path}")]
+    ReadObject {
+        object_id: String,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[derive(Debug, Error)]

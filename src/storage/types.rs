@@ -10,6 +10,7 @@
 /// Server-assigned timestamps (created_at, captured_at, etc.) are omitted —
 /// the DB sets them via DEFAULT SYSTIMESTAMP.
 use crate::domain::{ParticipantRole, SourceTimestamp, VisibilityStatus};
+use crate::object_store::StoredObject;
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -396,17 +397,23 @@ impl SupportStrength {
 // "New" structs — data needed to create one row, minus server-set fields
 // ---------------------------------------------------------------------------
 
-/// Data required to create one oa_import_payload row.
-/// All fields match the NOT NULL DDL columns; server-set created_at is omitted.
+/// Data required to create the relational metadata row for one copied import
+/// payload object.
 #[derive(Debug)]
-pub struct NewImportPayload {
-    pub payload_id: String,
+pub struct NewImportObjectRef {
+    pub object_id: String,
     pub payload_format: PayloadFormat,
-    pub payload_mime_type: String,
-    pub payload_bytes: Vec<u8>,
-    pub payload_size_bytes: i64,
+    pub mime_type: String,
+    /// Transitional field used only by the legacy Oracle adapter until all
+    /// relational providers read from the object store directly.
+    pub copied_bytes: Vec<u8>,
+    pub size_bytes: i64,
     /// SHA-256 hex digest. Unique constraint enforces payload-level deduplication.
-    pub payload_sha256: String,
+    pub sha256: String,
+    /// Object-store metadata for the copied raw payload. Oracle still writes the
+    /// bytes inline today, but the application boundary now treats this as the
+    /// durable payload reference.
+    pub stored_object: StoredObject,
 }
 
 /// Data required to create one oa_import row.
@@ -415,8 +422,9 @@ pub struct NewImport {
     pub import_id: String,
     pub source_type: SourceType,
     pub import_status: ImportStatus,
-    /// FK to oa_import_payload. Must be inserted before the import row.
-    pub payload_id: String,
+    /// FK to the payload object-reference row. Must be inserted before the
+    /// import row.
+    pub payload_object_id: String,
     /// Original filename from the upload, nullable in DDL.
     pub source_filename: Option<String>,
     /// SHA-256 hex digest of the raw source bytes. NOT NULL in DDL.

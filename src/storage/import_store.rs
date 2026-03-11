@@ -1,16 +1,20 @@
 use crate::error::StorageResult;
 
-use crate::storage::types::{ImportStatus, NewImport, NewImportPayload};
+use crate::storage::types::{ImportStatus, NewImport, NewImportObjectRef};
 use crate::storage::StorageTx;
 
-/// Stores the raw uploaded export payload.
+/// Stores the relational metadata for a copied raw payload object.
 ///
 /// `tx` must be the same transaction used for the subsequent `insert_import`
-/// call so both rows land in the same commit.
+/// call so the object reference row and import row land in the same commit.
 pub trait ImportPayloadStore {
     type Tx: StorageTx;
 
-    fn insert_payload(&self, tx: &mut Self::Tx, payload: &NewImportPayload) -> StorageResult<()>;
+    fn insert_payload(
+        &self,
+        tx: &mut Self::Tx,
+        payload: &NewImportObjectRef,
+    ) -> StorageResult<()>;
 }
 
 /// Manages the lifecycle of one import request.

@@ -4,11 +4,12 @@ use tiny_http::{Header, Method, Request, Response, StatusCode};
 
 use crate::error::OpenArchiveError;
 use crate::import_service::import_chatgpt_payload;
+use crate::object_store::ObjectStore;
 use crate::storage::{ArtifactReadStore, ImportWriteStore};
 
 pub fn build_response<S>(request: &mut Request, store: &S) -> Response<Cursor<Vec<u8>>>
 where
-    S: ImportWriteStore + ArtifactReadStore + ?Sized,
+    S: ImportWriteStore + ArtifactReadStore + ObjectStore + ?Sized,
 {
     match (request.method(), request.url()) {
         (&Method::Post, "/imports/chatgpt") => handle_post_imports_chatgpt(request, store),
@@ -19,10 +20,10 @@ where
 
 fn handle_post_imports_chatgpt<S>(request: &mut Request, store: &S) -> Response<Cursor<Vec<u8>>>
 where
-    S: ImportWriteStore + ArtifactReadStore + ?Sized,
+    S: ImportWriteStore + ArtifactReadStore + ObjectStore + ?Sized,
 {
     match read_request_body(request)
-        .and_then(|body| import_chatgpt_payload(store, &body).map_err(HttpError::from))
+        .and_then(|body| import_chatgpt_payload(store, store, &body).map_err(HttpError::from))
     {
         Ok(result) => json_response(StatusCode(200), &result),
         Err(err) => err.into_response(),
@@ -92,6 +93,7 @@ impl From<OpenArchiveError> for HttpError {
             OpenArchiveError::Config(err) => Self::Internal(err.to_string()),
             OpenArchiveError::Db(err) => Self::Internal(err.to_string()),
             OpenArchiveError::Migrations(err) => Self::Internal(err.to_string()),
+            OpenArchiveError::ObjectStore(err) => Self::Internal(err.to_string()),
             OpenArchiveError::Storage(err) => Self::Internal(err.to_string()),
             OpenArchiveError::Invariant(err) => Self::Internal(err),
         }
@@ -125,6 +127,7 @@ mod tests {
         ArtifactIngestResult, ArtifactListItem, ArtifactReadStore, EnrichmentStatus, ImportStatus,
         ImportWriteResult, ImportedArtifact, WriteImportSet,
     };
+    use crate::object_store::{NewObject, ObjectStore, StoredObject};
     use std::io::Read;
     use tiny_http::TestRequest;
 
@@ -158,6 +161,26 @@ mod tests {
     impl ArtifactReadStore for MockStore {
         fn list_artifacts(&self) -> crate::error::StorageResult<Vec<ArtifactListItem>> {
             Ok(self.artifacts.clone())
+        }
+    }
+
+    impl ObjectStore for MockStore {
+        fn put_object(&self, object: NewObject) -> crate::error::ObjectStoreResult<StoredObject> {
+            Ok(StoredObject {
+                object_id: object.object_id,
+                provider: "mock".to_string(),
+                storage_key: "mock-key".to_string(),
+                mime_type: object.mime_type,
+                size_bytes: object.bytes.len() as i64,
+                sha256: object.sha256,
+            })
+        }
+
+        fn get_object_bytes(
+            &self,
+            object: &StoredObject,
+        ) -> crate::error::ObjectStoreResult<Vec<u8>> {
+            Ok(object.storage_key.as_bytes().to_vec())
         }
     }
 

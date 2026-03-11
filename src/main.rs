@@ -4,6 +4,7 @@ use open_archive::bootstrap::{build_service_bundle, require_oracle_db_config};
 use open_archive::config::AppConfig;
 use open_archive::enrichment_worker::start_enrichment_workers;
 use open_archive::shutdown::ShutdownToken;
+use open_archive::object_store::ObjectStore;
 use open_archive::storage::{ArtifactReadStore, ImportWriteStore};
 use open_archive::{db, http, migrations};
 
@@ -34,14 +35,10 @@ fn main() -> Result<(), anyhow::Error> {
         Command::AdbCheck => adb_check(),
         Command::Migrate => {
             let config = AppConfig::from_env().context("failed to load application configuration")?;
-            let config = require_oracle_db_config(&config)
-                .context("failed to resolve Oracle database configuration")?;
             migrations::migrate(&config).context("failed to apply database migrations")
         }
         Command::MigrateCheck => {
             let config = AppConfig::from_env().context("failed to load application configuration")?;
-            let config = require_oracle_db_config(&config)
-                .context("failed to resolve Oracle database configuration")?;
             migrations::check(&config).context("database migration check failed")
         }
         Command::Serve => serve(),
@@ -88,7 +85,7 @@ fn serve() -> Result<(), anyhow::Error> {
         })?;
     }
 
-    let store = Arc::clone(&services.archive_store);
+    let store = Arc::clone(&services.archive_service);
     let server: Arc<tiny_http::Server> = Arc::new(
         tiny_http::Server::http(&bind_addr)
             .map_err(|err| anyhow::anyhow!("failed to start HTTP server: {err}"))?,
@@ -156,7 +153,7 @@ impl RequestReceiver for tiny_http::Server {
 
 fn run_http_worker_loop<S>(receiver: &impl RequestReceiver, store: &S, shutdown: ShutdownToken)
 where
-    S: ImportWriteStore + ArtifactReadStore + ?Sized,
+    S: ImportWriteStore + ArtifactReadStore + ObjectStore + ?Sized,
 {
     loop {
         if shutdown.is_shutdown() {
@@ -184,6 +181,7 @@ where
 mod tests {
     use super::*;
 
+    use open_archive::object_store::{NewObject, ObjectStore, StoredObject};
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -233,6 +231,29 @@ mod tests {
     impl ArtifactReadStore for MockStore {
         fn list_artifacts(&self) -> open_archive::error::StorageResult<Vec<ArtifactListItem>> {
             Ok(self.artifacts.clone())
+        }
+    }
+
+    impl ObjectStore for MockStore {
+        fn put_object(
+            &self,
+            object: NewObject,
+        ) -> open_archive::error::ObjectStoreResult<StoredObject> {
+            Ok(StoredObject {
+                object_id: object.object_id,
+                provider: "mock".to_string(),
+                storage_key: "mock-key".to_string(),
+                mime_type: object.mime_type,
+                size_bytes: object.bytes.len() as i64,
+                sha256: object.sha256,
+            })
+        }
+
+        fn get_object_bytes(
+            &self,
+            object: &StoredObject,
+        ) -> open_archive::error::ObjectStoreResult<Vec<u8>> {
+            Ok(object.storage_key.as_bytes().to_vec())
         }
     }
 

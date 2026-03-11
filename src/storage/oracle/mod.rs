@@ -67,11 +67,11 @@ impl ImportWriteStore for OracleImportWriteStore {
         // ------------------------------------------------------------------
         // Phase 1: payload + import header
         // ------------------------------------------------------------------
-        if let Some(existing_payload_id) =
-            import::find_payload_id_by_sha256(&tx.conn, &import_set.payload.payload_sha256)?
+        if let Some(existing_payload_object_id) =
+            import::find_payload_object_id_by_sha256(&tx.conn, &import_set.payload_object.sha256)?
         {
-            import_set.import.payload_id = existing_payload_id;
-        } else if let Err(e) = import::insert_payload(&tx.conn, &import_set.payload) {
+            import_set.import.payload_object_id = existing_payload_object_id;
+        } else if let Err(e) = import::insert_payload_object(&tx.conn, &import_set.payload_object) {
             if let Err(rollback_err) = tx.conn.rollback() {
                 error!("Failed to rollback after payload insert error (operation=phase1_payload_insert): {}", rollback_err);
             }

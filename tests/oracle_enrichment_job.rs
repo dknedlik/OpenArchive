@@ -1,9 +1,10 @@
 use open_archive::config::DbConfig;
 use open_archive::migrations;
+use open_archive::object_store::StoredObject;
 use open_archive::storage::{
     ArtifactClass, ArtifactStatus, ConversationEnrichmentPayload, EnrichmentJobLifecycleStore,
     EnrichmentStatus, ImportWriteStore, JobStatus, JobType, NewArtifact, NewEnrichmentJob,
-    NewImport, NewImportPayload, NewParticipant, NewSegment, OracleEnrichmentJobStore,
+    NewImport, NewImportObjectRef, NewParticipant, NewSegment, OracleEnrichmentJobStore,
     OracleImportWriteStore, PayloadFormat, RetryOutcome, SegmentType, SourceType, VisibilityStatus,
     WriteArtifactSet, WriteImportSet,
 };
@@ -65,8 +66,8 @@ fn ensure_test_harness() -> Option<DbConfig> {
             ));
         }
 
-        migrations::reset(&config)
-            .and_then(|_| migrations::migrate(&config))
+        migrations::oracle::reset(&config)
+            .and_then(|_| migrations::oracle::migrate(&config))
             .map_err(|err| format!("{err:#}"))?;
 
         Ok(config.clone())
@@ -118,7 +119,7 @@ fn make_test_import_set_with_max_attempts(suffix: &str, max_attempts: i32) -> Wr
     };
     let payload_size = payload_bytes.len() as i64;
 
-    let payload_id = format!("payload-{suffix}");
+    let payload_object_id = format!("payload-{suffix}");
     let import_id = format!("import-{suffix}");
     let artifact_id = format!("artifact-{suffix}");
     let participant_id_user = format!("part-user-{suffix}");
@@ -137,19 +138,27 @@ fn make_test_import_set_with_max_attempts(suffix: &str, max_attempts: i32) -> Wr
         ConversationEnrichmentPayload::new_v1(&artifact_id, &import_id, SourceType::ChatGptExport);
 
     WriteImportSet {
-        payload: NewImportPayload {
-            payload_id: payload_id.clone(),
+        payload_object: NewImportObjectRef {
+            object_id: payload_object_id.clone(),
             payload_format: PayloadFormat::ChatGptExportJson,
-            payload_mime_type: "application/json".to_string(),
-            payload_bytes,
-            payload_size_bytes: payload_size,
-            payload_sha256,
+            mime_type: "application/json".to_string(),
+            copied_bytes: payload_bytes,
+            size_bytes: payload_size,
+            sha256: payload_sha256,
+            stored_object: StoredObject {
+                object_id: payload_object_id.clone(),
+                provider: "test".to_string(),
+                storage_key: format!("test/{payload_object_id}"),
+                mime_type: "application/json".to_string(),
+                size_bytes: payload_size,
+                sha256: sha256_hex(&format!("payload-{suffix}")),
+            },
         },
         import: NewImport {
             import_id: import_id.clone(),
             source_type: SourceType::ChatGptExport,
             import_status: open_archive::storage::ImportStatus::Pending,
-            payload_id,
+            payload_object_id,
             source_filename: Some(format!("export-{suffix}.json")),
             source_content_hash: conv_hash.clone(),
             conversation_count_detected: 1,

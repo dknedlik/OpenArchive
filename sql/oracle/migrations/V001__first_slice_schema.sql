@@ -1,28 +1,25 @@
-CREATE TABLE oa_import_payload (
-    payload_id VARCHAR2(36 CHAR) NOT NULL,
-    payload_format VARCHAR2(40 CHAR) NOT NULL,
-    payload_mime_type VARCHAR2(255 CHAR) NOT NULL,
-    payload_bytes BLOB NOT NULL,
-    payload_size_bytes NUMBER(19) NOT NULL,
-    payload_sha256 VARCHAR2(64 CHAR) NOT NULL,
+CREATE TABLE oa_object_ref (
+    object_id VARCHAR2(36 CHAR) NOT NULL,
+    object_kind VARCHAR2(40 CHAR) NOT NULL,
+    storage_provider VARCHAR2(40 CHAR) NOT NULL,
+    storage_key VARCHAR2(1024 CHAR) NOT NULL,
+    mime_type VARCHAR2(255 CHAR) NOT NULL,
+    size_bytes NUMBER(19) NOT NULL,
+    sha256 VARCHAR2(64 CHAR) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
-    CONSTRAINT pk_oa_import_payload PRIMARY KEY (payload_id),
-    CONSTRAINT uq_oa_import_payload_sha256 UNIQUE (payload_sha256),
-    CONSTRAINT ck_oa_import_payload_format CHECK (
-        payload_format IN (
-            'chatgpt_export_zip',
-            'chatgpt_export_json',
-            'chatgpt_export_canonical_json'
-        )
+    CONSTRAINT pk_oa_object_ref PRIMARY KEY (object_id),
+    CONSTRAINT uq_oa_object_ref_sha256 UNIQUE (sha256),
+    CONSTRAINT ck_oa_object_kind CHECK (
+        object_kind IN ('import_payload', 'canonical_source_copy')
     ),
-    CONSTRAINT ck_oa_import_payload_size CHECK (payload_size_bytes >= 0)
+    CONSTRAINT ck_oa_object_size CHECK (size_bytes >= 0)
 );
 
 CREATE TABLE oa_import (
     import_id VARCHAR2(36 CHAR) NOT NULL,
     source_type VARCHAR2(40 CHAR) NOT NULL,
     import_status VARCHAR2(32 CHAR) NOT NULL,
-    payload_id VARCHAR2(36 CHAR) NOT NULL,
+    payload_object_id VARCHAR2(36 CHAR) NOT NULL,
     source_filename VARCHAR2(1024 CHAR),
     source_content_hash VARCHAR2(64 CHAR) NOT NULL,
     conversation_count_detected NUMBER(10) DEFAULT 0 NOT NULL,
@@ -32,8 +29,8 @@ CREATE TABLE oa_import (
     completed_at TIMESTAMP WITH TIME ZONE,
     error_message CLOB,
     CONSTRAINT pk_oa_import PRIMARY KEY (import_id),
-    CONSTRAINT fk_oa_import_payload FOREIGN KEY (payload_id)
-        REFERENCES oa_import_payload (payload_id),
+    CONSTRAINT fk_oa_import_payload_object FOREIGN KEY (payload_object_id)
+        REFERENCES oa_object_ref (object_id),
     CONSTRAINT ck_oa_import_source_type CHECK (
         source_type IN ('chatgpt_export')
     ),

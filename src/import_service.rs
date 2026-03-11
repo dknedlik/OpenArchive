@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::domain::SourceTimestamp;
 use crate::error::OpenArchiveError;
+use crate::object_store::{NewObject, ObjectStore, StoredObject};
 use crate::parser::{
     self, ParsedConversation, ParsedMessage, CHATGPT_CONTENT_FACETS, CHATGPT_CONTENT_HASH_VERSION,
     CHATGPT_NORMALIZATION_VERSION,
@@ -14,7 +15,7 @@ use crate::parser::{
 use crate::storage::{
     ArtifactClass, ArtifactStatus, ConversationEnrichmentPayload, EnrichmentStatus, ImportStatus,
     ImportWriteStore, JobStatus, JobType, NewArtifact, NewEnrichmentJob, NewImport,
-    NewImportPayload, NewParticipant, NewSegment, PayloadFormat, SegmentType, SourceType,
+    NewImportObjectRef, NewParticipant, NewSegment, PayloadFormat, SegmentType, SourceType,
     VisibilityStatus, WriteArtifactSet, WriteImportSet,
 };
 
@@ -34,15 +35,17 @@ pub struct ImportResponse {
     pub artifacts: Vec<ImportArtifactStatus>,
 }
 
-pub fn import_chatgpt_payload<S>(
+pub fn import_chatgpt_payload<S, O>(
     store: &S,
+    object_store: &O,
     payload_bytes: &[u8],
 ) -> Result<ImportResponse, OpenArchiveError>
 where
     S: ImportWriteStore + ?Sized,
+    O: ObjectStore + ?Sized,
 {
     let parsed = parser::chatgpt::parse_conversations(payload_bytes)?;
-    let import_set = build_import_set(payload_bytes, parsed)?;
+    let import_set = build_import_set(payload_bytes, parsed, object_store)?;
     let result = store.write_import(import_set)?;
 
     Ok(ImportResponse {
@@ -63,10 +66,17 @@ where
 fn build_import_set(
     payload_bytes: &[u8],
     conversations: Vec<ParsedConversation>,
+    object_store: &(impl ObjectStore + ?Sized),
 ) -> Result<WriteImportSet, OpenArchiveError> {
     let payload_sha256 = sha256_hex(payload_bytes);
-    let payload_id = new_id("payload");
+    let payload_object_id = new_id("payload");
     let import_id = new_id("import");
+    let payload_object = persist_raw_payload(
+        object_store,
+        &payload_object_id,
+        payload_bytes,
+        &payload_sha256,
+    )?;
     let content_facets_json = serde_json::to_string(CHATGPT_CONTENT_FACETS).map_err(|err| {
         OpenArchiveError::Invariant(format!("failed to serialize content facets: {err}"))
     })?;
@@ -77,25 +87,41 @@ fn build_import_set(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(WriteImportSet {
-        payload: NewImportPayload {
-            payload_id: payload_id.clone(),
+        payload_object: NewImportObjectRef {
+            object_id: payload_object_id.clone(),
             payload_format: PayloadFormat::ChatGptExportJson,
-            payload_mime_type: "application/json".to_string(),
-            payload_bytes: payload_bytes.to_vec(),
-            payload_size_bytes: payload_bytes.len() as i64,
-            payload_sha256: payload_sha256.clone(),
+            mime_type: "application/json".to_string(),
+            copied_bytes: payload_bytes.to_vec(),
+            size_bytes: payload_bytes.len() as i64,
+            sha256: payload_sha256.clone(),
+            stored_object: payload_object,
         },
         import: NewImport {
             import_id,
             source_type: SourceType::ChatGptExport,
             import_status: ImportStatus::Pending,
-            payload_id,
+            payload_object_id,
             source_filename: None,
             source_content_hash: payload_sha256,
             conversation_count_detected: artifact_sets.len() as i64,
         },
         artifact_sets,
     })
+}
+
+fn persist_raw_payload(
+    object_store: &(impl ObjectStore + ?Sized),
+    object_id: &str,
+    payload_bytes: &[u8],
+    payload_sha256: &str,
+) -> Result<StoredObject, OpenArchiveError> {
+    object_store.put_object(NewObject {
+        object_id: object_id.to_string(),
+        namespace: "import-payloads".to_string(),
+        mime_type: "application/json".to_string(),
+        bytes: payload_bytes.to_vec(),
+        sha256: payload_sha256.to_string(),
+    }).map_err(OpenArchiveError::from)
 }
 
 fn build_artifact_set(
@@ -249,6 +275,7 @@ fn sha256_hex(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object_store::{NewObject, ObjectStore, StoredObject};
     use crate::storage::{
         ArtifactIngestResult, EnrichmentStatus, ImportWriteResult, ImportedArtifact, WriteImportSet,
     };
@@ -294,11 +321,47 @@ mod tests {
         }
     }
 
+    struct MockObjectStore {
+        puts: Mutex<Vec<NewObject>>,
+    }
+
+    impl MockObjectStore {
+        fn new() -> Self {
+            Self {
+                puts: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ObjectStore for MockObjectStore {
+        fn put_object(&self, object: NewObject) -> crate::error::ObjectStoreResult<StoredObject> {
+            let stored = StoredObject {
+                object_id: object.object_id.clone(),
+                provider: "mock".to_string(),
+                storage_key: format!("{}/{}", object.namespace, object.object_id),
+                mime_type: object.mime_type.clone(),
+                size_bytes: object.bytes.len() as i64,
+                sha256: object.sha256.clone(),
+            };
+            self.puts.lock().unwrap().push(object);
+            Ok(stored)
+        }
+
+        fn get_object_bytes(
+            &self,
+            object: &StoredObject,
+        ) -> crate::error::ObjectStoreResult<Vec<u8>> {
+            Ok(object.storage_key.as_bytes().to_vec())
+        }
+    }
+
     #[test]
     fn import_chatgpt_payload_returns_compact_response() {
         let store = MockStore::new();
+        let object_store = MockObjectStore::new();
         let response =
-            import_chatgpt_payload(&store, single_conversation_export().as_bytes()).unwrap();
+            import_chatgpt_payload(&store, &object_store, single_conversation_export().as_bytes())
+                .unwrap();
 
         assert_eq!(response.import_id, "import-test");
         assert_eq!(response.import_status, "completed");
@@ -310,12 +373,15 @@ mod tests {
     #[test]
     fn import_chatgpt_payload_builds_multi_conversation_write_set() {
         let store = MockStore::new();
-        import_chatgpt_payload(&store, multi_conversation_export().as_bytes()).unwrap();
+        let object_store = MockObjectStore::new();
+        import_chatgpt_payload(&store, &object_store, multi_conversation_export().as_bytes())
+            .unwrap();
 
         let captured = store.captured.lock().unwrap();
         let import_set = captured.first().unwrap();
         assert_eq!(import_set.import.conversation_count_detected, 2);
         assert_eq!(import_set.artifact_sets.len(), 2);
+        assert_eq!(import_set.import.payload_object_id, import_set.payload_object.object_id);
         assert_eq!(
             import_set.artifact_sets[0].job.job_status,
             JobStatus::Pending
@@ -435,7 +501,8 @@ mod tests {
     #[test]
     fn import_chatgpt_payload_rejects_malformed_json() {
         let store = MockStore::new();
-        let err = import_chatgpt_payload(&store, br#"{"bad":true}"#).unwrap_err();
+        let object_store = MockObjectStore::new();
+        let err = import_chatgpt_payload(&store, &object_store, br#"{"bad":true}"#).unwrap_err();
         assert!(matches!(err, OpenArchiveError::Parser(_)));
         assert!(
             store.captured.lock().unwrap().is_empty(),
@@ -446,9 +513,11 @@ mod tests {
     #[test]
     fn import_chatgpt_payload_parser_failure_does_not_mutate_prior_store_state() {
         let store = MockStore::new();
-        import_chatgpt_payload(&store, single_conversation_export().as_bytes()).unwrap();
+        let object_store = MockObjectStore::new();
+        import_chatgpt_payload(&store, &object_store, single_conversation_export().as_bytes())
+            .unwrap();
 
-        let err = import_chatgpt_payload(&store, br#"{"bad":true}"#).unwrap_err();
+        let err = import_chatgpt_payload(&store, &object_store, br#"{"bad":true}"#).unwrap_err();
         assert!(matches!(err, OpenArchiveError::Parser(_)));
 
         let captured = store.captured.lock().unwrap();

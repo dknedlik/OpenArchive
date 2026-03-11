@@ -1,12 +1,13 @@
 use open_archive::config::DbConfig;
 use open_archive::migrations;
+use open_archive::object_store::StoredObject;
 use open_archive::storage::{
     ArtifactClass, ArtifactStatus, EnrichmentStatus, JobStatus, JobType, ParticipantRole,
     PayloadFormat, SegmentType, SourceType, VisibilityStatus,
 };
 use open_archive::storage::{
     ArtifactIngestResult, ImportStatus, ImportWriteStore, NewArtifact, NewEnrichmentJob, NewImport,
-    NewImportPayload, NewParticipant, NewSegment, OracleImportWriteStore,
+    NewImportObjectRef, NewParticipant, NewSegment, OracleImportWriteStore,
 };
 use open_archive::storage::{WriteArtifactSet, WriteImportSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -66,8 +67,8 @@ fn ensure_test_harness() -> Option<DbConfig> {
             ));
         }
 
-        migrations::reset(&config)
-            .and_then(|_| migrations::migrate(&config))
+        migrations::oracle::reset(&config)
+            .and_then(|_| migrations::oracle::migrate(&config))
             .map_err(|err| format!("{err:#}"))?;
 
         Ok(config.clone())
@@ -110,7 +111,7 @@ fn make_test_import_set(suffix: &str) -> WriteImportSet {
     };
     let payload_size = payload_bytes.len() as i64;
 
-    let payload_id = format!("payload-{suffix}");
+    let payload_object_id = format!("payload-{suffix}");
     let import_id = format!("import-{suffix}");
     let artifact_id = format!("artifact-{suffix}");
     let participant_id_user = format!("part-user-{suffix}");
@@ -126,19 +127,27 @@ fn make_test_import_set(suffix: &str) -> WriteImportSet {
     };
 
     WriteImportSet {
-        payload: NewImportPayload {
-            payload_id: payload_id.clone(),
+        payload_object: NewImportObjectRef {
+            object_id: payload_object_id.clone(),
             payload_format: PayloadFormat::ChatGptExportJson,
-            payload_mime_type: "application/json".to_string(),
-            payload_bytes,
-            payload_size_bytes: payload_size,
-            payload_sha256,
+            mime_type: "application/json".to_string(),
+            copied_bytes: payload_bytes,
+            size_bytes: payload_size,
+            sha256: payload_sha256,
+            stored_object: StoredObject {
+                object_id: payload_object_id.clone(),
+                provider: "test".to_string(),
+                storage_key: format!("test/{payload_object_id}"),
+                mime_type: "application/json".to_string(),
+                size_bytes: payload_size,
+                sha256: sha256_hex(&format!("payload-{suffix}")),
+            },
         },
         import: NewImport {
             import_id: import_id.clone(),
             source_type: SourceType::ChatGptExport,
             import_status: ImportStatus::Pending,
-            payload_id,
+            payload_object_id,
             source_filename: Some(format!("export-{suffix}.json")),
             source_content_hash: conv_hash.clone(),
             conversation_count_detected: 1,
@@ -252,38 +261,38 @@ fn sha256_hex(input: &str) -> String {
 }
 
 fn seed_existing_artifact(conn: &oracle::Connection, import_set: &WriteImportSet) {
-    let payload = &import_set.payload;
+    let payload = &import_set.payload_object;
     let import = &import_set.import;
     let artifact = &import_set.artifact_sets[0].artifact;
 
-    let payload_format = payload.payload_format.as_str();
     conn.execute(
-        "INSERT INTO oa_import_payload \
-         (payload_id, payload_format, payload_mime_type, payload_bytes, payload_size_bytes, payload_sha256) \
+        "INSERT INTO oa_object_ref \
+         (object_id, object_kind, storage_provider, storage_key, mime_type, size_bytes, sha256) \
          VALUES (:1, :2, :3, :4, :5, :6)",
         &[
-            &payload.payload_id,
-            &payload_format,
-            &payload.payload_mime_type,
-            &payload.payload_bytes,
-            &payload.payload_size_bytes,
-            &payload.payload_sha256,
+            &payload.object_id,
+            &"import_payload",
+            &payload.stored_object.provider,
+            &payload.stored_object.storage_key,
+            &payload.stored_object.mime_type,
+            &payload.stored_object.size_bytes,
+            &payload.stored_object.sha256,
         ],
     )
-    .expect("seed payload");
+    .expect("seed payload object");
 
     let source_type = import.source_type.as_str();
     let import_status = ImportStatus::Completed.as_str();
     conn.execute(
         "INSERT INTO oa_import \
-         (import_id, source_type, import_status, payload_id, source_filename, source_content_hash, \
+         (import_id, source_type, import_status, payload_object_id, source_filename, source_content_hash, \
           conversation_count_detected, conversation_count_imported, conversation_count_failed, completed_at) \
          VALUES (:1, :2, :3, :4, :5, :6, :7, 1, 0, SYSTIMESTAMP)",
         &[
             &import.import_id,
             &source_type,
             &import_status,
-            &import.payload_id,
+            &import.payload_object_id,
             &import.source_filename,
             &import.source_content_hash,
             &import.conversation_count_detected,
@@ -429,10 +438,12 @@ fn test_write_import_rollback_on_duplicate_payload() {
         // Build a second import with a different import_id but reuse the same payload sha256
         let mut import_set_2 = make_test_import_set(&suffix); // same suffix => same sha256
         import_set_2.import.import_id = format!("import-{suffix}-2nd");
-        import_set_2.payload.payload_id = format!("payload-{suffix}-2nd"); // different payload_id but same sha256
+        import_set_2.payload_object.object_id = format!("payload-{suffix}-2nd");
+        import_set_2.payload_object.stored_object.object_id = import_set_2.payload_object.object_id.clone();
+        import_set_2.payload_object.stored_object.storage_key = format!("test/{}", import_set_2.payload_object.object_id);
 
         let import_id_2 = import_set_2.import.import_id.clone();
-        let payload_sha256 = import_set_2.payload.payload_sha256.clone();
+        let payload_sha256 = import_set_2.payload_object.sha256.clone();
         let duplicate_hash = import_set_2.artifact_sets[0]
             .artifact
             .source_conversation_hash
@@ -451,9 +462,9 @@ fn test_write_import_rollback_on_duplicate_payload() {
 
         // A second import row should exist and point at the previously stored payload.
         let verify_conn = open_archive::db::connect(&config).expect("connect");
-        let (payload_id, status): (String, String) = verify_conn
+        let (payload_object_id, status): (String, String) = verify_conn
             .query_row_as::<(String, String)>(
-                "SELECT payload_id, import_status FROM oa_import WHERE import_id = :1",
+                "SELECT payload_object_id, import_status FROM oa_import WHERE import_id = :1",
                 &[&import_id_2],
             )
             .expect("import row should exist");
@@ -461,12 +472,12 @@ fn test_write_import_rollback_on_duplicate_payload() {
 
         let (payload_count,): (i64,) = verify_conn
             .query_row_as::<(i64,)>(
-                "SELECT COUNT(*) FROM oa_import_payload WHERE payload_sha256 = :1",
+                "SELECT COUNT(*) FROM oa_object_ref WHERE sha256 = :1 AND object_kind = 'import_payload'",
                 &[&payload_sha256],
             )
-            .expect("payload count query");
+            .expect("payload object count query");
         assert_eq!(payload_count, 1);
-        assert_eq!(payload_id, format!("payload-{suffix}"));
+        assert_eq!(payload_object_id, format!("payload-{suffix}"));
 
         assert_eq!(
             count_rows(

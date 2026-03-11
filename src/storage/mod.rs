@@ -42,9 +42,9 @@ pub use types::{
     ArtifactClass, ArtifactIngestResult, ArtifactListItem, ArtifactStatus, ClaimedJob,
     ClassificationObjectJson, ConversationEnrichmentPayload, DerivationRunStatus,
     DerivationRunType, DerivedObjectPayload, DerivedObjectType, EnrichmentStatus, EvidenceRole,
-    ImportStatus, InputScopeType, JobStatus, JobType, MemoryObjectJson, NewArtifact,
-    NewDerivationRun, NewDerivedObject, NewEnrichmentJob, NewEvidenceLink, NewImport,
-    NewImportPayload, NewParticipant, NewSegment, ObjectStatus, OriginKind, PayloadFormat,
+    ImportStatus, InputScopeType, JobStatus, JobType, MemoryObjectJson, NewArtifact, NewDerivationRun,
+    NewDerivedObject, NewEnrichmentJob, NewEvidenceLink, NewImport, NewImportObjectRef,
+    NewParticipant, NewSegment, ObjectStatus, OriginKind, PayloadFormat,
     RetryOutcome, ScopeType, SegmentType, SourceType, SummaryObjectJson, SupportStrength,
 };
 
@@ -80,7 +80,7 @@ pub struct WriteArtifactSet {
 /// This is the unit passed to `ImportWriteStore::write_import`. All fields
 /// must be fully populated before the call.
 pub struct WriteImportSet {
-    pub payload: NewImportPayload,
+    pub payload_object: NewImportObjectRef,
     pub import: NewImport,
     pub artifact_sets: Vec<WriteArtifactSet>,
 }

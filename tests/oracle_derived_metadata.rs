@@ -1,11 +1,12 @@
 use open_archive::config::DbConfig;
 use open_archive::migrations;
+use open_archive::object_store::StoredObject;
 use open_archive::storage::{
     ArtifactClass, ArtifactStatus, ClassificationObjectJson, ConversationEnrichmentPayload,
     DerivationRunStatus, DerivationRunType, DerivedMetadataWriteStore, DerivedObjectPayload,
     EnrichmentStatus, EvidenceRole, ImportStatus, ImportWriteStore, InputScopeType, JobStatus,
     JobType, MemoryObjectJson, NewArtifact, NewDerivationRun, NewDerivedObject, NewEnrichmentJob,
-    NewEvidenceLink, NewImport, NewImportPayload, NewParticipant, NewSegment, ObjectStatus,
+    NewEvidenceLink, NewImport, NewImportObjectRef, NewParticipant, NewSegment, ObjectStatus,
     OracleDerivedMetadataStore, OracleImportWriteStore, OriginKind, ParticipantRole, PayloadFormat,
     ScopeType, SegmentType, SourceType, SummaryObjectJson, SupportStrength, VisibilityStatus,
     WriteArtifactSet, WriteDerivationAttempt, WriteDerivedObject, WriteImportSet,
@@ -65,8 +66,8 @@ fn ensure_test_harness() -> Option<DbConfig> {
             ));
         }
 
-        migrations::reset(&config)
-            .and_then(|_| migrations::migrate(&config))
+        migrations::oracle::reset(&config)
+            .and_then(|_| migrations::oracle::migrate(&config))
             .map_err(|err| format!("{err:#}"))?;
 
         Ok(config.clone())
@@ -117,7 +118,7 @@ fn make_test_import_set(suffix: &str) -> SeededArtifact {
         format!("{:x}", h.finalize())
     };
 
-    let payload_id = format!("payload-{suffix}");
+    let payload_object_id = format!("payload-{suffix}");
     let import_id = format!("import-{suffix}");
     let artifact_id = format!("artifact-{suffix}");
     let participant_id_user = format!("part-user-{suffix}");
@@ -130,19 +131,27 @@ fn make_test_import_set(suffix: &str) -> SeededArtifact {
         ConversationEnrichmentPayload::new_v1(&artifact_id, &import_id, SourceType::ChatGptExport);
 
     let import_set = WriteImportSet {
-        payload: NewImportPayload {
-            payload_id: payload_id.clone(),
+        payload_object: NewImportObjectRef {
+            object_id: payload_object_id.clone(),
             payload_format: PayloadFormat::ChatGptExportJson,
-            payload_mime_type: "application/json".to_string(),
-            payload_bytes: payload_bytes.clone(),
-            payload_size_bytes: payload_bytes.len() as i64,
-            payload_sha256,
+            mime_type: "application/json".to_string(),
+            copied_bytes: payload_bytes.clone(),
+            size_bytes: payload_bytes.len() as i64,
+            sha256: payload_sha256,
+            stored_object: StoredObject {
+                object_id: payload_object_id.clone(),
+                provider: "test".to_string(),
+                storage_key: format!("test/{payload_object_id}"),
+                mime_type: "application/json".to_string(),
+                size_bytes: payload_bytes.len() as i64,
+                sha256: sha256_hex(&format!("payload-{suffix}")),
+            },
         },
         import: NewImport {
             import_id: import_id.clone(),
             source_type: SourceType::ChatGptExport,
             import_status: ImportStatus::Pending,
-            payload_id,
+            payload_object_id,
             source_filename: Some(format!("export-{suffix}.json")),
             source_content_hash: conv_hash.clone(),
             conversation_count_detected: 1,
@@ -264,19 +273,20 @@ fn seed_artifact(config: &DbConfig, seeded: &SeededArtifact) {
 
 fn make_import_clone(seeded: &SeededArtifact) -> WriteImportSet {
     WriteImportSet {
-        payload: NewImportPayload {
-            payload_id: seeded.import_set.payload.payload_id.clone(),
-            payload_format: seeded.import_set.payload.payload_format,
-            payload_mime_type: seeded.import_set.payload.payload_mime_type.clone(),
-            payload_bytes: seeded.import_set.payload.payload_bytes.clone(),
-            payload_size_bytes: seeded.import_set.payload.payload_size_bytes,
-            payload_sha256: seeded.import_set.payload.payload_sha256.clone(),
+        payload_object: NewImportObjectRef {
+            object_id: seeded.import_set.payload_object.object_id.clone(),
+            payload_format: seeded.import_set.payload_object.payload_format,
+            mime_type: seeded.import_set.payload_object.mime_type.clone(),
+            copied_bytes: seeded.import_set.payload_object.copied_bytes.clone(),
+            size_bytes: seeded.import_set.payload_object.size_bytes,
+            sha256: seeded.import_set.payload_object.sha256.clone(),
+            stored_object: seeded.import_set.payload_object.stored_object.clone(),
         },
         import: NewImport {
             import_id: seeded.import_set.import.import_id.clone(),
             source_type: seeded.import_set.import.source_type,
             import_status: seeded.import_set.import.import_status,
-            payload_id: seeded.import_set.import.payload_id.clone(),
+            payload_object_id: seeded.import_set.import.payload_object_id.clone(),
             source_filename: seeded.import_set.import.source_filename.clone(),
             source_content_hash: seeded.import_set.import.source_content_hash.clone(),
             conversation_count_detected: seeded.import_set.import.conversation_count_detected,

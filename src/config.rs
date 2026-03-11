@@ -51,21 +51,39 @@ impl RelationalStoreConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectStoreConfig {
-    // Placeholder until the first real object-store provider lands.
-    Disabled,
+    LocalFs(LocalFsObjectStoreConfig),
 }
 
 impl ObjectStoreConfig {
     pub fn from_env() -> ConfigResult<Self> {
-        let provider = env::var("OA_OBJECT_STORE").unwrap_or_else(|_| "disabled".to_string());
+        let provider = env::var("OA_OBJECT_STORE").unwrap_or_else(|_| "local_fs".to_string());
         match provider.as_str() {
-            "disabled" => Ok(Self::Disabled),
+            "local_fs" => Ok(Self::LocalFs(LocalFsObjectStoreConfig::from_env()?)),
             _ => Err(ConfigError::InvalidEnumEnv {
                 key: "OA_OBJECT_STORE",
                 value: provider,
-                expected: "disabled",
+                expected: "local_fs",
             }),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalFsObjectStoreConfig {
+    pub root: PathBuf,
+}
+
+impl LocalFsObjectStoreConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        let root = if let Ok(value) = env::var("OA_OBJECT_STORE_ROOT") {
+            PathBuf::from(value)
+        } else {
+            let home = env::var("HOME")
+                .map_err(|_| ConfigError::MissingEnvWithDependency { key: "HOME" })?;
+            PathBuf::from(home).join(".open_archive").join("objects")
+        };
+
+        Ok(Self { root })
     }
 }
 
@@ -248,7 +266,10 @@ mod tests {
             config.relational_store,
             RelationalStoreConfig::Oracle(_)
         ));
-        assert_eq!(config.object_store, ObjectStoreConfig::Disabled);
+        assert!(matches!(
+            config.object_store,
+            ObjectStoreConfig::LocalFs(_)
+        ));
         assert_eq!(config.inference, InferenceConfig::Stub);
     }
 
