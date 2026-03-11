@@ -1,0 +1,35 @@
+id: "19"
+title: Remove silent fallback for unknown enrichment job types
+assignee: david
+status: done
+type: bug
+priority: medium
+planned_order: 19
+milestone: M1.first_vertical_slice
+labels: [flash-candidate, jobs, oracle, safety]
+depends_on: ["06"]
+description: |
+  Oracle job loading currently maps unknown `job_type` values to
+  `JobType::ConversationEnrichment` with no logging or error. That hides schema
+  drift or bad data and can cause the worker to process the wrong job shape.
+acceptance_criteria:
+  - Loading a row with an unknown `job_type` no longer silently coerces it to `conversation_enrichment`.
+  - The code either returns a `StorageError` or otherwise fails loudly with a clear message.
+  - The success path for known job types remains unchanged.
+  - Tests cover at least one unknown job type case if there is already test coverage in this area.
+files_touched:
+  - src/storage/oracle/job.rs
+  - src/error.rs
+  - tests/oracle_enrichment_job.rs
+implementation_plan: |
+  - Replace `unwrap_or(JobType::ConversationEnrichment)` in `claim_next_job` with explicit handling for `None`.
+  - Prefer returning a typed `StorageError` rather than logging and continuing.
+  - Keep the fix narrow: this task is about read-path validation, not redesigning job-type extensibility.
+test_plan: |
+  - Run the enrichment job lifecycle tests if present.
+  - Add or update a test that exercises an invalid `job_type` value and asserts a non-success outcome.
+  - Run `cargo test --test oracle_enrichment_job` if that target is available, otherwise run a narrower equivalent plus `cargo check`.
+risks: |
+  - Returning a new error variant may require small plumbing changes in existing callers; keep them minimal and explicit.
+notes: |
+  - Primary code location: `src/storage/oracle/job.rs` around job row decoding.

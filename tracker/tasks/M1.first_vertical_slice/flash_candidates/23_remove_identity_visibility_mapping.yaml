@@ -1,0 +1,30 @@
+id: "23"
+title: Remove identity visibility mapping from import service
+assignee: david
+status: todo
+type: chore
+priority: low
+planned_order: 23
+milestone: M1.first_vertical_slice
+labels: [flash-candidate, cleanup, importer]
+depends_on: []
+description: |
+  `map_visibility()` in the import service maps each `VisibilityStatus`
+  variant to itself. It adds noise without providing any transformation or
+  isolation value.
+acceptance_criteria:
+  - `map_visibility()` is removed.
+  - The import service uses `message.visibility` directly where appropriate.
+  - The module compiles cleanly with no behavior change.
+files_touched:
+  - src/import_service.rs
+implementation_plan: |
+  - Remove the helper function and inline the value assignment at the call site.
+  - Keep the diff minimal; this is a dead-code cleanup only.
+test_plan: |
+  - Run `cargo check`.
+  - Run any existing import-service tests if quick to execute.
+risks: |
+  - None if kept minimal.
+notes: |
+  - This task should stay tiny. Do not bundle unrelated import-service cleanup into the same change.

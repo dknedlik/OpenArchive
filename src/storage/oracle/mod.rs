@@ -1,4 +1,5 @@
 pub mod artifact;
+pub mod derivation;
 pub mod import;
 pub mod job;
 pub mod segment;
@@ -6,6 +7,9 @@ pub mod segment;
 use crate::config::DbConfig;
 use crate::db;
 use crate::error::{StorageError, StorageResult};
+use crate::storage::derivation_store::{
+    DerivationWriteResult, DerivedMetadataWriteStore, WriteDerivationAttempt,
+};
 use crate::storage::types::ImportStatus;
 use crate::storage::{
     ArtifactIngestResult, ArtifactReadStore, ImportWriteResult, ImportWriteStore, ImportedArtifact,
@@ -243,6 +247,69 @@ impl EnrichmentJobLifecycleStore for OracleEnrichmentJobStore {
     ) -> StorageResult<RetryOutcome> {
         let conn = db::connect(&self.config)?;
         job::mark_job_retryable(&conn, worker_id, job_id, error_message, retry_after_seconds)
+    }
+}
+
+pub struct OracleDerivedMetadataStore {
+    config: DbConfig,
+}
+
+impl OracleDerivedMetadataStore {
+    pub fn new(config: DbConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl DerivedMetadataWriteStore for OracleDerivedMetadataStore {
+    fn write_derivation_attempt(
+        &self,
+        attempt: WriteDerivationAttempt,
+    ) -> StorageResult<DerivationWriteResult> {
+        let conn = db::connect(&self.config)?;
+        let mut tx = OracleStorageTx { conn };
+
+        derivation::validate_derivation_attempt(&tx.conn, &attempt)?;
+
+        let result = (|| {
+            derivation::insert_derivation_run(&tx.conn, &attempt.run)?;
+
+            let mut derived_object_ids = Vec::with_capacity(attempt.objects.len());
+            let mut evidence_links_written = 0usize;
+            for object_write in &attempt.objects {
+                derivation::insert_derived_object(&tx.conn, &object_write.object)?;
+                derived_object_ids.push(object_write.object.derived_object_id.clone());
+
+                for link in &object_write.evidence_links {
+                    derivation::insert_evidence_link(&tx.conn, link)?;
+                    evidence_links_written += 1;
+                }
+            }
+
+            Ok(DerivationWriteResult {
+                derivation_run_id: attempt.run.derivation_run_id.clone(),
+                derived_object_ids,
+                evidence_links_written,
+            })
+        })();
+
+        match result {
+            Ok(result) => {
+                tx.commit()?;
+                Ok(result)
+            }
+            Err(error) => {
+                tx.conn
+                    .rollback()
+                    .map_err(|source| StorageError::Rollback {
+                        operation: format!(
+                            "failed derivation attempt {}",
+                            attempt.run.derivation_run_id
+                        ),
+                        source,
+                    })?;
+                Err(error)
+            }
+        }
     }
 }
 

@@ -795,3 +795,76 @@ fn test_non_claiming_worker_cannot_complete_job() {
         assert_eq!(claimed_by.as_deref(), Some("worker-owner"));
     }
 }
+
+#[test]
+#[ignore = "requires ADB; set OA_INTEGRATION_TESTS=1 and DB env vars"]
+fn test_claim_fails_on_unknown_job_type() {
+    let config = match ensure_test_harness() {
+        Some(c) => c,
+        None => return,
+    };
+
+    let job_id = format!("job-invalid-{}", unique_suffix("inv"));
+    let artifact_id = format!("artifact-invalid-{}", unique_suffix("inv"));
+    let invalid_job_type = "completely_unknown_type";
+    let payload_json = r#"{"test": "payload"}"#;
+
+    {
+        let _test_lock = lock_live_test();
+
+        // Directly insert a job row with an invalid job_type to simulate data corruption
+        let conn = open_archive::db::connect(&config).expect("connect");
+        conn.execute(
+            &format!(
+                "INSERT INTO oa_enrichment_job \
+                 (job_id, artifact_id, job_type, job_status, max_attempts, priority_no, payload_json, attempt_count) \
+                 VALUES (:1, :2, :3, 'pending', 3, 100, :4, 0)"
+            ),
+            &[&job_id, &artifact_id, &invalid_job_type, &payload_json],
+        )
+        .expect("insert invalid job_type row");
+
+        let lifecycle_store = OracleEnrichmentJobStore::new(config.clone());
+
+        // Attempt to claim the job should fail with InvalidJobType error
+        let err = lifecycle_store
+            .claim_next_job("worker-invalid")
+            .expect_err("claiming job with invalid job_type must fail");
+
+        assert!(
+            err.to_string().contains("invalid job_type"),
+            "error should indicate invalid job_type: {err}"
+        );
+        assert!(
+            err.to_string().contains(&invalid_job_type),
+            "error should include the invalid job_type value: {err}"
+        );
+        assert!(
+            err.to_string().contains(&job_id),
+            "error should include the job_id: {err}"
+        );
+
+        // Verify the row is unchanged: still pending, no claimed_by, attempt_count unchanged
+        let verify_conn = open_archive::db::connect(&config).expect("verify connect");
+        let (status, attempt_count, claimed_by): (String, i32, Option<String>) = verify_conn
+            .query_row_as::<(String, i32, Option<String>)>(
+                "SELECT job_status, attempt_count, claimed_by \
+                 FROM oa_enrichment_job WHERE job_id = :1",
+                &[&job_id],
+            )
+            .expect("job row should exist");
+
+        assert_eq!(
+            status, "pending",
+            "job must remain in pending state after failed claim"
+        );
+        assert_eq!(
+            attempt_count, 0,
+            "attempt_count must not be incremented after failed claim"
+        );
+        assert!(
+            claimed_by.is_none(),
+            "claimed_by must remain NULL after failed claim"
+        );
+    }
+}

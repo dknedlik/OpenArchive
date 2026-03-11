@@ -1,0 +1,40 @@
+id: "18"
+title: Fix enrichment job payload schema mismatch in import path
+assignee: david
+status: done
+type: bug
+priority: high
+planned_order: 18
+milestone: M1.first_vertical_slice
+labels: [flash-candidate, jobs, enrichment, importer]
+depends_on: ["06", "09"]
+description: |
+  The import path currently constructs `oa_enrichment_job.payload_json` manually
+  with a shape that does not match the documented
+  `ConversationEnrichmentPayload` contract. The worker deserializes into the
+  documented struct, so imported jobs fail at runtime before any enrichment
+  work can start.
+acceptance_criteria:
+  - New enrichment jobs created during import serialize the exact slice-one `ConversationEnrichmentPayload` shape.
+  - `payload_json` includes `schema_version`, `artifact_id`, `import_id`, and `source_type`.
+  - `payload_json` no longer includes the extra `job_type` field.
+  - The import code uses `ConversationEnrichmentPayload::new_v1(...).to_json()` instead of hand-rolled JSON.
+  - Existing tests continue to pass, and at least one test asserts the written payload matches the documented contract.
+files_touched:
+  - src/import_service.rs
+  - src/storage/types.rs
+implementation_plan: |
+  - Replace the manual `serde_json::json!` payload construction in `build_artifact_set` with `ConversationEnrichmentPayload::new_v1(&artifact_id, import_id, SourceType::ChatGptExport).to_json()`.
+  - Keep the change local to the import path; do not redesign the payload contract in this task.
+  - If an existing import-service test already captures the job payload, tighten that assertion instead of adding broad new test scaffolding.
+test_plan: |
+  - Run targeted tests for import-service behavior.
+  - Verify a captured `NewEnrichmentJob.payload_json` deserializes successfully through `ConversationEnrichmentPayload::from_json`.
+  - Run `cargo test` for the affected unit tests or `cargo check` if no focused test target exists yet.
+risks: |
+  - A partial fix that only adds `schema_version` but keeps the wrong field set will still leave contract drift in place.
+notes: |
+  - Primary code locations:
+    - `src/import_service.rs` payload construction
+    - `src/storage/types.rs` `ConversationEnrichmentPayload`
+    - `src/enrichment_worker.rs` payload deserialization

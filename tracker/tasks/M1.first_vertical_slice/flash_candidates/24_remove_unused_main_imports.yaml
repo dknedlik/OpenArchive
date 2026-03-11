@@ -1,0 +1,28 @@
+id: "24"
+title: Remove unused imports from main binary
+assignee: david
+status: todo
+type: chore
+priority: low
+planned_order: 24
+milestone: M1.first_vertical_slice
+labels: [flash-candidate, cleanup, warnings]
+depends_on: []
+description: |
+  `src/main.rs` currently imports several items that are not used. `cargo
+  check` reports the warnings already. This is a pure cleanup task.
+acceptance_criteria:
+  - Unused imports are removed from `src/main.rs`.
+  - `cargo check` no longer reports the current unused-import warnings for `open_archive` binary code.
+  - No behavior changes are introduced.
+files_touched:
+  - src/main.rs
+implementation_plan: |
+  - Remove the imports currently flagged by `cargo check`.
+  - Do not make unrelated formatting or refactor changes.
+test_plan: |
+  - Run `cargo check` and confirm the `unused_imports` warnings from `src/main.rs` are gone.
+risks: |
+  - Low, but avoid removing imports that are only used under test cfgs without checking the surrounding module.
+notes: |
+  - At the time of task creation, `cargo check` reported unused imports including `ArtifactListItem`, `ImportStatus`, `ImportWriteResult`, `WriteImportSet`, `VecDeque`, `Mutex`, and `Instant`.

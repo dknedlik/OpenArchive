@@ -1,0 +1,33 @@
+id: "21"
+title: Harden artifact enrichment status decoding against invalid DB values
+assignee: david
+status: todo
+type: bug
+priority: medium
+planned_order: 21
+milestone: M1.first_vertical_slice
+labels: [flash-candidate, oracle, artifacts, safety]
+depends_on: ["07"]
+description: |
+  Artifact listing currently uses `expect()` when decoding
+  `oa_artifact.enrichment_status`. An unexpected DB value will panic the
+  process instead of returning an application error.
+acceptance_criteria:
+  - Invalid `enrichment_status` values no longer panic the process during artifact listing.
+  - The code converts unknown values into a storage-layer error with enough context to diagnose the bad row or value.
+  - Valid status values continue to decode exactly as before.
+files_touched:
+  - src/storage/oracle/artifact.rs
+  - src/error.rs
+implementation_plan: |
+  - Replace the `expect()` call with explicit `Option` handling.
+  - Introduce or reuse a `StorageError` variant that can report invalid enum-like data read from Oracle.
+  - Keep the change local to the artifact listing read path.
+test_plan: |
+  - Run artifact read tests if they exist.
+  - Run `cargo check` after adding the new error mapping.
+  - If a focused test can be added cheaply, cover the invalid value branch; otherwise keep the code path simple and reviewable.
+risks: |
+  - Overgeneralizing a new error type can add unnecessary abstraction. Prefer a small, direct error variant.
+notes: |
+  - Primary code location: `src/storage/oracle/artifact.rs` in `list_artifacts`.

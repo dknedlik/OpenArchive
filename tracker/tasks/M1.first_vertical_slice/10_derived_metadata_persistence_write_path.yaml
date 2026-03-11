@@ -13,23 +13,35 @@ description: |
   `oa_derived_object`, and `oa_evidence_link` so slice-one enrichment can
   persist provenance-bearing summary, classification, and memory outputs.
 acceptance_criteria:
-  - Storage interfaces exist for writing one derivation run with one or more derived objects and their evidence links.
+  - Storage interfaces exist for writing one derivation attempt atomically as one derivation run with zero or more derived objects and their evidence links.
   - The write path uses the live `V001` schema without introducing new tables or columns.
   - Persisted derived objects support at least `summary`, `classification`, and `memory`.
   - Every persisted derived object references a derivation run.
-  - Every persisted derived object can be linked to one or more supporting segments through `oa_evidence_link`.
+  - Every persisted active derived object has one or more supporting segment evidence links through `oa_evidence_link`.
+  - The write contract rejects mixed-artifact writes: every derived object and evidence-linked segment in one write belongs to the same `artifact_id` as the derivation run.
+  - Slice-one writes use separate derivation runs for `summary_extraction`, `classification_extraction`, and `memory_extraction` rather than one combined enrichment run.
   - Integration tests cover successful writes and rollback on invalid evidence/object relationships.
 files_touched:
   - src/
   - tests/
 implementation_plan: |
   - Extend the storage boundary with domain-shaped types for derivation runs, derived objects, and evidence links.
+  - Define one composite write API for a single derivation attempt so workers can persist one run and all emitted objects/evidence in a single transaction.
   - Add Oracle insert operations against the provenance and metadata tables.
+  - Enforce application-level ownership validation so derived objects and evidence links cannot cross artifact boundaries even if foreign keys would allow it.
+  - Keep the storage contract typed by derived-object kind rather than passing fully generic blobs through worker code.
   - Keep the write contract narrow enough that a worker can persist one enrichment attempt atomically.
 test_plan: |
   - Add integration tests proving one summary, one classification, and one memory can be written with evidence.
+  - Verify the write path rejects evidence links to segments outside the target artifact and rolls the whole derivation attempt back.
   - Verify invalid segment references or partial writes do not leave orphaned provenance rows behind.
 risks: |
   - If provenance persistence is bolted on after enrichment logic exists, the worker will become the accidental schema contract.
+  - If object payload expectations remain implicit, task 12 will bake unstable summary/classification/memory shapes into the first processor implementation.
 notes: |
   - This task is the persistence floor for the actual "brain" part of slice one.
+  - For slice one, the minimum typed payload expectations are:
+    - `summary`: `body_text` required; `title` and `object_json` optional.
+    - `classification`: `object_json.classification_type` and `object_json.classification_value` required.
+    - `memory`: `body_text`, `object_json.memory_type`, `object_json.memory_scope`, and `object_json.memory_scope_value` required.
+  - Supersession/versioning behavior is explicitly deferred; slice one should write active objects without introducing replacement rules yet.

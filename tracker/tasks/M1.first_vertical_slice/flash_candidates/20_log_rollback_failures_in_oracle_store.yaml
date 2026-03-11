@@ -1,0 +1,32 @@
+id: "20"
+title: Log rollback failures in Oracle storage error paths
+assignee: david
+status: todo
+type: bug
+priority: medium
+planned_order: 20
+milestone: M1.first_vertical_slice
+labels: [flash-candidate, oracle, transactions, observability]
+depends_on: ["03"]
+description: |
+  Several Oracle storage error paths call `rollback()` and discard any rollback
+  failure. That drops useful operational signals when the connection or
+  transaction state is already unhealthy.
+acceptance_criteria:
+  - Rollback failures in the identified error paths are no longer ignored silently.
+  - The code logs rollback failure details at `error!` level or stronger.
+  - Existing control flow is preserved: this task should not redesign transaction recovery semantics.
+  - Successful rollback behavior remains unchanged.
+files_touched:
+  - src/storage/oracle/mod.rs
+implementation_plan: |
+  - Update the `let _ = tx.conn.rollback();` sites to capture `Err` and emit a structured `log::error!` message with the operation context.
+  - Keep the original primary error handling intact; this task is about observability, not changing which error is returned.
+test_plan: |
+  - Run storage-related tests that compile and exercise this module.
+  - Run `cargo check` to verify logging additions and imports compile cleanly.
+  - If there is an existing pattern for asserting logs in tests, use it; otherwise do not add heavy log-capture scaffolding just for this change.
+risks: |
+  - Accidentally replacing the original application error with the rollback error would change behavior; avoid that in this task.
+notes: |
+  - Current silent rollback sites are in the phase-1 and phase-3 error paths of `OracleImportWriteStore::write_import`.

@@ -12,10 +12,10 @@ use crate::parser::{
     CHATGPT_NORMALIZATION_VERSION,
 };
 use crate::storage::{
-    ArtifactClass, ArtifactStatus, EnrichmentStatus, ImportStatus, ImportWriteStore, JobStatus,
-    JobType, NewArtifact, NewEnrichmentJob, NewImport, NewImportPayload, NewParticipant,
-    NewSegment, PayloadFormat, SegmentType, SourceType, VisibilityStatus, WriteArtifactSet,
-    WriteImportSet,
+    ArtifactClass, ArtifactStatus, ConversationEnrichmentPayload, EnrichmentStatus, ImportStatus,
+    ImportWriteStore, JobStatus, JobType, NewArtifact, NewEnrichmentJob, NewImport,
+    NewImportPayload, NewParticipant, NewSegment, PayloadFormat, SegmentType, SourceType,
+    VisibilityStatus, WriteArtifactSet, WriteImportSet,
 };
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -165,13 +165,12 @@ fn build_artifact_set(
             job_status: JobStatus::Pending,
             max_attempts: 3,
             priority_no: 100,
-            payload_json: serde_json::json!({
-                "job_type": JobType::ConversationEnrichment.as_str(),
-                "import_id": import_id,
-                "artifact_id": artifact_id,
-                "source_type": SourceType::ChatGptExport.as_str()
-            })
-            .to_string(),
+            payload_json: ConversationEnrichmentPayload::new_v1(
+                &artifact_id,
+                import_id,
+                SourceType::ChatGptExport,
+            )
+            .to_json(),
         },
     })
 }
@@ -325,6 +324,18 @@ mod tests {
             import_set.artifact_sets[1].artifact.enrichment_status,
             EnrichmentStatus::Pending
         );
+
+        // Verify job payload matches ConversationEnrichmentPayload v1 contract
+        for artifact_set in &import_set.artifact_sets {
+            let payload =
+                super::ConversationEnrichmentPayload::from_json(&artifact_set.job.payload_json)
+                    .expect("payload must deserialize to ConversationEnrichmentPayload");
+            assert_eq!(payload.schema_version, "1");
+            assert_eq!(
+                payload.source_type,
+                super::SourceType::ChatGptExport.as_str()
+            );
+        }
     }
 
     fn single_conversation_export() -> &'static str {

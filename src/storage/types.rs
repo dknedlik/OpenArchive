@@ -230,6 +230,168 @@ impl JobStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DerivationRunType {
+    SummaryExtraction,
+    ClassificationExtraction,
+    MemoryExtraction,
+    SummaryReduction,
+    MemoryReduction,
+    ContextPackAssembly,
+}
+
+impl DerivationRunType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DerivationRunType::SummaryExtraction => "summary_extraction",
+            DerivationRunType::ClassificationExtraction => "classification_extraction",
+            DerivationRunType::MemoryExtraction => "memory_extraction",
+            DerivationRunType::SummaryReduction => "summary_reduction",
+            DerivationRunType::MemoryReduction => "memory_reduction",
+            DerivationRunType::ContextPackAssembly => "context_pack_assembly",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DerivationRunStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+impl DerivationRunStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DerivationRunStatus::Running => "running",
+            DerivationRunStatus::Completed => "completed",
+            DerivationRunStatus::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputScopeType {
+    Artifact,
+    SegmentWindow,
+    ArtifactReduce,
+}
+
+impl InputScopeType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InputScopeType::Artifact => "artifact",
+            InputScopeType::SegmentWindow => "segment_window",
+            InputScopeType::ArtifactReduce => "artifact_reduce",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DerivedObjectType {
+    Summary,
+    Classification,
+    Memory,
+}
+
+impl DerivedObjectType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DerivedObjectType::Summary => "summary",
+            DerivedObjectType::Classification => "classification",
+            DerivedObjectType::Memory => "memory",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OriginKind {
+    Explicit,
+    Deterministic,
+    Inferred,
+    UserConfirmed,
+}
+
+impl OriginKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OriginKind::Explicit => "explicit",
+            OriginKind::Deterministic => "deterministic",
+            OriginKind::Inferred => "inferred",
+            OriginKind::UserConfirmed => "user_confirmed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectStatus {
+    Active,
+    Superseded,
+    Failed,
+}
+
+impl ObjectStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ObjectStatus::Active => "active",
+            ObjectStatus::Superseded => "superseded",
+            ObjectStatus::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeType {
+    Artifact,
+    Segment,
+}
+
+impl ScopeType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ScopeType::Artifact => "artifact",
+            ScopeType::Segment => "segment",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceRole {
+    PrimarySupport,
+    SecondarySupport,
+    ReductionInput,
+}
+
+impl EvidenceRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EvidenceRole::PrimarySupport => "primary_support",
+            EvidenceRole::SecondarySupport => "secondary_support",
+            EvidenceRole::ReductionInput => "reduction_input",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupportStrength {
+    Strong,
+    Medium,
+    Weak,
+}
+
+impl SupportStrength {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SupportStrength::Strong => "strong",
+            SupportStrength::Medium => "medium",
+            SupportStrength::Weak => "weak",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // "New" structs — data needed to create one row, minus server-set fields
 // ---------------------------------------------------------------------------
@@ -350,6 +512,130 @@ pub struct NewEnrichmentJob {
     pub priority_no: i32,
     /// Self-contained JSON payload for future out-of-process execution. NOT NULL in DDL.
     pub payload_json: String,
+}
+
+/// Data required to create one oa_derivation_run row.
+#[derive(Debug)]
+pub struct NewDerivationRun {
+    pub derivation_run_id: String,
+    pub artifact_id: String,
+    pub job_id: Option<String>,
+    pub run_type: DerivationRunType,
+    pub pipeline_name: String,
+    pub pipeline_version: String,
+    pub provider_name: Option<String>,
+    pub model_name: Option<String>,
+    pub prompt_version: Option<String>,
+    pub run_status: DerivationRunStatus,
+    pub input_scope_type: InputScopeType,
+    pub input_scope_json: String,
+    pub completed_at: Option<SourceTimestamp>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SummaryObjectJson {
+    pub summary_kind: Option<String>,
+    pub summary_version: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ClassificationObjectJson {
+    pub classification_type: String,
+    pub classification_value: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct MemoryObjectJson {
+    pub memory_type: String,
+    pub memory_scope: ScopeType,
+    pub memory_scope_value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DerivedObjectPayload {
+    Summary {
+        title: Option<String>,
+        body_text: String,
+        object_json: Option<SummaryObjectJson>,
+    },
+    Classification {
+        title: Option<String>,
+        body_text: Option<String>,
+        object_json: ClassificationObjectJson,
+    },
+    Memory {
+        title: Option<String>,
+        body_text: String,
+        object_json: MemoryObjectJson,
+    },
+}
+
+impl DerivedObjectPayload {
+    pub fn derived_object_type(&self) -> DerivedObjectType {
+        match self {
+            DerivedObjectPayload::Summary { .. } => DerivedObjectType::Summary,
+            DerivedObjectPayload::Classification { .. } => DerivedObjectType::Classification,
+            DerivedObjectPayload::Memory { .. } => DerivedObjectType::Memory,
+        }
+    }
+
+    pub fn title(&self) -> Option<&str> {
+        match self {
+            DerivedObjectPayload::Summary { title, .. }
+            | DerivedObjectPayload::Classification { title, .. }
+            | DerivedObjectPayload::Memory { title, .. } => title.as_deref(),
+        }
+    }
+
+    pub fn body_text(&self) -> Option<&str> {
+        match self {
+            DerivedObjectPayload::Summary { body_text, .. }
+            | DerivedObjectPayload::Memory { body_text, .. } => Some(body_text.as_str()),
+            DerivedObjectPayload::Classification { body_text, .. } => body_text.as_deref(),
+        }
+    }
+
+    pub fn object_json(&self) -> Option<String> {
+        match self {
+            DerivedObjectPayload::Summary { object_json, .. } => object_json
+                .as_ref()
+                .map(|value| serde_json::to_string(value).expect("summary payload serializable")),
+            DerivedObjectPayload::Classification { object_json, .. } => Some(
+                serde_json::to_string(object_json).expect("classification payload serializable"),
+            ),
+            DerivedObjectPayload::Memory { object_json, .. } => {
+                Some(serde_json::to_string(object_json).expect("memory payload serializable"))
+            }
+        }
+    }
+}
+
+/// Data required to create one oa_derived_object row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewDerivedObject {
+    pub derived_object_id: String,
+    pub artifact_id: String,
+    pub derivation_run_id: String,
+    pub origin_kind: OriginKind,
+    pub object_status: ObjectStatus,
+    pub confidence_score: Option<f64>,
+    pub confidence_label: Option<String>,
+    pub scope_type: ScopeType,
+    pub scope_id: String,
+    pub supersedes_derived_object_id: Option<String>,
+    pub payload: DerivedObjectPayload,
+}
+
+/// Data required to create one oa_evidence_link row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewEvidenceLink {
+    pub evidence_link_id: String,
+    pub derived_object_id: String,
+    pub segment_id: String,
+    pub evidence_role: EvidenceRole,
+    pub evidence_rank: i64,
+    pub support_strength: SupportStrength,
 }
 
 // ---------------------------------------------------------------------------

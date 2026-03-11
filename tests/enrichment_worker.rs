@@ -3,6 +3,7 @@ use open_archive::enrichment_worker::{
     format_worker_id, start_enrichment_workers, start_enrichment_workers_with_executor,
 };
 use open_archive::error::StorageResult;
+use open_archive::shutdown::ShutdownToken;
 use open_archive::storage::types::{
     ClaimedJob, ConversationEnrichmentPayload, JobType, RetryOutcome, SourceType,
 };
@@ -30,9 +31,10 @@ fn test_disabled_workers_start() {
     };
 
     let store = Arc::new(MockStore::new());
-    let result = start_enrichment_workers(&config, store);
+    let shutdown = ShutdownToken::new();
+    let result = start_enrichment_workers(&config, store, shutdown);
     assert!(result.is_ok());
-    let (workers, _) = result.unwrap();
+    let workers = result.unwrap();
     assert!(workers.is_empty());
 }
 
@@ -46,9 +48,10 @@ fn test_enabled_workers_start() {
     };
 
     let store = Arc::new(MockStore::new());
-    let result = start_enrichment_workers(&config, store);
+    let shutdown = ShutdownToken::new();
+    let result = start_enrichment_workers(&config, store, shutdown.clone());
     assert!(result.is_ok());
-    let (workers, shutdown) = result.unwrap();
+    let workers = result.unwrap();
     assert_eq!(workers.len(), 2);
 
     for worker in &workers {
@@ -57,7 +60,7 @@ fn test_enabled_workers_start() {
     }
 
     // Clean shutdown
-    shutdown.store(true, Ordering::SeqCst);
+    shutdown.signal();
     for worker in workers {
         worker.join().expect("Worker should join cleanly");
     }
@@ -73,9 +76,10 @@ fn test_empty_queue_handling() {
     };
 
     let store = Arc::new(EmptyQueueMockStore::new());
-    let result = start_enrichment_workers(&config, store.clone());
+    let shutdown = ShutdownToken::new();
+    let result = start_enrichment_workers(&config, store.clone(), shutdown.clone());
     assert!(result.is_ok());
-    let (workers, shutdown) = result.unwrap();
+    let workers = result.unwrap();
 
     // Give worker time to poll at least once
     std::thread::sleep(Duration::from_millis(50));
@@ -84,7 +88,7 @@ fn test_empty_queue_handling() {
     assert!(claim_count > 0, "Worker should poll even with empty queue");
 
     // Clean shutdown
-    shutdown.store(true, Ordering::SeqCst);
+    shutdown.signal();
     for worker in workers {
         worker.join().expect("Worker should join cleanly");
     }
@@ -100,9 +104,10 @@ fn test_worker_calls_complete_on_success() {
     };
 
     let store = Arc::new(MockStore::new());
-    let result = start_enrichment_workers(&config, store.clone());
+    let shutdown = ShutdownToken::new();
+    let result = start_enrichment_workers(&config, store.clone(), shutdown.clone());
     assert!(result.is_ok());
-    let (workers, shutdown) = result.unwrap();
+    let workers = result.unwrap();
 
     // Wait for at least one job to be processed
     std::thread::sleep(Duration::from_millis(50));
@@ -117,7 +122,7 @@ fn test_worker_calls_complete_on_success() {
     );
 
     // Clean shutdown
-    shutdown.store(true, Ordering::SeqCst);
+    shutdown.signal();
     for worker in workers {
         worker.join().expect("Worker should join cleanly");
     }
@@ -133,9 +138,10 @@ fn test_worker_calls_fail_on_payload_parse_error() {
     };
 
     let store = Arc::new(InvalidPayloadMockStore::new());
-    let result = start_enrichment_workers(&config, store.clone());
+    let shutdown = ShutdownToken::new();
+    let result = start_enrichment_workers(&config, store.clone(), shutdown.clone());
     assert!(result.is_ok());
-    let (workers, shutdown) = result.unwrap();
+    let workers = result.unwrap();
 
     // Wait for worker to process the job
     std::thread::sleep(Duration::from_millis(50));
@@ -150,7 +156,7 @@ fn test_worker_calls_fail_on_payload_parse_error() {
     );
 
     // Clean shutdown
-    shutdown.store(true, Ordering::SeqCst);
+    shutdown.signal();
     for worker in workers {
         worker.join().expect("Worker should join cleanly");
     }
@@ -166,9 +172,10 @@ fn test_worker_logs_error_on_store_failure() {
     };
 
     let store = Arc::new(FailingCompleteMockStore::new());
-    let result = start_enrichment_workers(&config, store.clone());
+    let shutdown = ShutdownToken::new();
+    let result = start_enrichment_workers(&config, store.clone(), shutdown.clone());
     assert!(result.is_ok());
-    let (workers, shutdown) = result.unwrap();
+    let workers = result.unwrap();
 
     // Wait for worker to process the job
     std::thread::sleep(Duration::from_millis(50));
@@ -180,7 +187,7 @@ fn test_worker_logs_error_on_store_failure() {
     // not crash when store operations fail
 
     // Clean shutdown
-    shutdown.store(true, Ordering::SeqCst);
+    shutdown.signal();
     for worker in workers {
         worker.join().expect("Worker should join cleanly");
     }
@@ -485,11 +492,15 @@ fn test_worker_calls_fail_on_executor_error() {
     };
 
     let store = Arc::new(FailingExecutorMockStore::new());
-    let result = start_enrichment_workers_with_executor(&config, store.clone(), |_payload| {
-        Err("test executor failure".to_string())
-    });
+    let shutdown = ShutdownToken::new();
+    let result = start_enrichment_workers_with_executor(
+        &config,
+        store.clone(),
+        shutdown.clone(),
+        |_payload| Err("test executor failure".to_string()),
+    );
     assert!(result.is_ok());
-    let (workers, shutdown) = result.unwrap();
+    let workers = result.unwrap();
 
     // Wait for worker to process the job
     std::thread::sleep(Duration::from_millis(50));
@@ -504,7 +515,41 @@ fn test_worker_calls_fail_on_executor_error() {
     );
 
     // Clean shutdown
-    shutdown.store(true, Ordering::SeqCst);
+    shutdown.signal();
+    for worker in workers {
+        worker.join().expect("Worker should join cleanly");
+    }
+}
+
+#[test]
+fn test_shutdown_token() {
+    let token = ShutdownToken::new();
+    assert!(!token.is_shutdown());
+    token.signal();
+    assert!(token.is_shutdown());
+
+    let token2 = token.clone();
+    assert!(token2.is_shutdown());
+}
+
+#[test]
+fn test_worker_exit_on_shutdown() {
+    let config = HttpConfig {
+        bind_addr: "127.0.0.1:3000".to_string(),
+        request_worker_count: 1,
+        enrichment_worker_count: 1,
+        enrichment_poll_interval_ms: 10,
+    };
+
+    let store = Arc::new(EmptyQueueMockStore::new());
+    let shutdown = ShutdownToken::new();
+    let result = start_enrichment_workers(&config, store.clone(), shutdown.clone());
+    let workers = result.unwrap();
+
+    // Signal shutdown
+    shutdown.signal();
+
+    // Workers should join
     for worker in workers {
         worker.join().expect("Worker should join cleanly");
     }

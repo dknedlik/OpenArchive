@@ -1,7 +1,7 @@
+use crate::shutdown::ShutdownToken;
 use crate::storage::{types, EnrichmentJobLifecycleStore};
 use anyhow::Result;
 use log::{debug, error, info};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -33,14 +33,14 @@ fn enrichment_worker(
     worker_id: String,
     store: Arc<dyn EnrichmentJobLifecycleStore>,
     poll_interval: Duration,
-    shutdown: Arc<AtomicBool>,
+    shutdown: ShutdownToken,
     executor: fn(&types::ConversationEnrichmentPayload) -> Result<(), String>,
 ) {
     info!("Enrichment worker {} starting", worker_id);
 
     loop {
         // Check shutdown flag
-        if shutdown.load(Ordering::SeqCst) {
+        if shutdown.is_shutdown() {
             info!("Enrichment worker {} shutting down", worker_id);
             break;
         }
@@ -118,30 +118,31 @@ fn enrichment_worker(
 
 /// Start enrichment worker pool with shutdown capability
 ///
-/// Returns both the worker thread handles and the shutdown flag.
-/// Tests can set the shutdown flag to true to gracefully stop workers.
+/// Returns the worker thread handles.
+/// Tests can signal shutdown via the shared ShutdownToken to gracefully stop workers.
 pub fn start_enrichment_workers(
     config: &crate::config::HttpConfig,
     store: Arc<dyn EnrichmentJobLifecycleStore>,
-) -> Result<(Vec<thread::JoinHandle<()>>, Arc<AtomicBool>), anyhow::Error> {
-    start_enrichment_workers_with_executor(config, store, placeholder_enrichment_executor)
+    shutdown: ShutdownToken,
+) -> Result<Vec<thread::JoinHandle<()>>, anyhow::Error> {
+    start_enrichment_workers_with_executor(config, store, shutdown, placeholder_enrichment_executor)
 }
 
 #[doc(hidden)]
 pub fn start_enrichment_workers_with_executor(
     config: &crate::config::HttpConfig,
     store: Arc<dyn EnrichmentJobLifecycleStore>,
+    shutdown: ShutdownToken,
     executor: fn(&types::ConversationEnrichmentPayload) -> Result<(), String>,
-) -> Result<(Vec<thread::JoinHandle<()>>, Arc<AtomicBool>), anyhow::Error> {
+) -> Result<Vec<thread::JoinHandle<()>>, anyhow::Error> {
     let pid = std::process::id();
     let poll_interval = Duration::from_millis(config.enrichment_poll_interval_ms);
-    let shutdown = Arc::new(AtomicBool::new(false));
 
     let workers: Vec<_> = (0..config.enrichment_worker_count)
         .map(|worker_index| {
             let worker_id = format_worker_id(pid, worker_index);
             let store = Arc::clone(&store);
-            let shutdown = Arc::clone(&shutdown);
+            let shutdown = shutdown.clone();
 
             thread::Builder::new()
                 .name(format!("enrichment-worker-{}", worker_index))
@@ -152,5 +153,5 @@ pub fn start_enrichment_workers_with_executor(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok((workers, shutdown))
+    Ok(workers)
 }

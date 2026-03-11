@@ -259,6 +259,49 @@ pub enum StorageError {
         source: oracle::Error,
     },
 
+    #[error("failed to insert derivation run {derivation_run_id} for artifact {artifact_id}")]
+    InsertDerivationRun {
+        derivation_run_id: String,
+        artifact_id: String,
+        #[source]
+        source: oracle::Error,
+    },
+
+    #[error("failed to insert derived object {derived_object_id} for artifact {artifact_id}")]
+    InsertDerivedObject {
+        derived_object_id: String,
+        artifact_id: String,
+        #[source]
+        source: oracle::Error,
+    },
+
+    #[error(
+        "failed to insert evidence link {evidence_link_id} for derived object {derived_object_id}"
+    )]
+    InsertEvidenceLink {
+        evidence_link_id: String,
+        derived_object_id: String,
+        #[source]
+        source: oracle::Error,
+    },
+
+    #[error("invalid derivation write: {detail}")]
+    InvalidDerivationWrite { detail: String },
+
+    #[error("failed to validate artifact ownership for {artifact_id}")]
+    ValidateArtifactOwnership {
+        artifact_id: String,
+        #[source]
+        source: oracle::Error,
+    },
+
+    #[error("failed to validate segment ownership for {segment_id}")]
+    ValidateSegmentOwnership {
+        segment_id: String,
+        #[source]
+        source: oracle::Error,
+    },
+
     #[error("failed to insert enrichment job {job_id} for artifact {artifact_id}")]
     InsertJob {
         job_id: String,
@@ -279,6 +322,9 @@ pub enum StorageError {
         #[source]
         source: oracle::Error,
     },
+
+    #[error("invalid job_type '{job_type}' for job {job_id}")]
+    InvalidJobType { job_id: String, job_type: String },
 
     #[error("failed to commit {operation}")]
     Commit {

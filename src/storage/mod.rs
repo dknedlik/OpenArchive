@@ -21,6 +21,7 @@
 //! Granular trait methods never call `commit()` themselves.
 
 pub mod artifact_store;
+pub mod derivation_store;
 pub mod import_store;
 pub mod job_store;
 pub mod oracle;
@@ -29,15 +30,22 @@ pub mod types;
 
 pub use crate::domain::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 pub use artifact_store::{ArtifactReadStore, ArtifactStore};
+pub use derivation_store::{
+    DerivationStore, DerivationWriteResult, DerivedMetadataWriteStore, WriteDerivationAttempt,
+    WriteDerivedObject,
+};
 pub use import_store::{ImportPayloadStore, ImportStore};
 pub use job_store::{EnrichmentJobLifecycleStore, EnrichmentJobStore};
-pub use oracle::{OracleEnrichmentJobStore, OracleImportWriteStore};
+pub use oracle::{OracleDerivedMetadataStore, OracleEnrichmentJobStore, OracleImportWriteStore};
 pub use segment_store::SegmentStore;
 pub use types::{
     ArtifactClass, ArtifactIngestResult, ArtifactListItem, ArtifactStatus, ClaimedJob,
-    ConversationEnrichmentPayload, EnrichmentStatus, ImportStatus, JobStatus, JobType, NewArtifact,
-    NewEnrichmentJob, NewImport, NewImportPayload, NewParticipant, NewSegment, PayloadFormat,
-    RetryOutcome, SegmentType, SourceType,
+    ClassificationObjectJson, ConversationEnrichmentPayload, DerivationRunStatus,
+    DerivationRunType, DerivedObjectPayload, DerivedObjectType, EnrichmentStatus, EvidenceRole,
+    ImportStatus, InputScopeType, JobStatus, JobType, MemoryObjectJson, NewArtifact,
+    NewDerivationRun, NewDerivedObject, NewEnrichmentJob, NewEvidenceLink, NewImport,
+    NewImportPayload, NewParticipant, NewSegment, ObjectStatus, OriginKind, PayloadFormat,
+    RetryOutcome, ScopeType, SegmentType, SourceType, SummaryObjectJson, SupportStrength,
 };
 
 use crate::error::StorageResult;

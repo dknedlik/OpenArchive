@@ -318,11 +318,7 @@ fn seed_existing_artifact(conn: &oracle::Connection, import_set: &WriteImportSet
     conn.commit().expect("commit seed artifact");
 }
 
-fn count_rows(
-    conn: &oracle::Connection,
-    sql: &str,
-    bind: &dyn oracle::sql_type::ToSql,
-) -> i64 {
+fn count_rows(conn: &oracle::Connection, sql: &str, bind: &dyn oracle::sql_type::ToSql) -> i64 {
     conn.query_row_as::<(i64,)>(sql, &[bind])
         .expect("count query")
         .0

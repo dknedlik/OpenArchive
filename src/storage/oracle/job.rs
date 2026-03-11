@@ -68,6 +68,13 @@ pub fn claim_next_job(conn: &Connection, worker_id: &str) -> StorageResult<Optio
         .get_as::<(String, String, String, i32, i32, String)>()
         .map_err(|source| StorageError::ClaimJob { source })?;
 
+    // Validate job_type BEFORE any update to avoid stranding invalid jobs in running state
+    let job_type =
+        JobType::from_str(&job_type_str).ok_or_else(|| StorageError::InvalidJobType {
+            job_id: job_id.clone(),
+            job_type: job_type_str.clone(),
+        })?;
+
     // Step 2: Update the job to running, increment attempt count, set claim fields.
     let running = JobStatus::Running.as_str();
     conn.execute(
@@ -88,8 +95,6 @@ pub fn claim_next_job(conn: &Connection, worker_id: &str) -> StorageResult<Optio
         operation: "claim enrichment job",
         source,
     })?;
-
-    let job_type = JobType::from_str(&job_type_str).unwrap_or(JobType::ConversationEnrichment);
 
     Ok(Some(ClaimedJob {
         job_id,

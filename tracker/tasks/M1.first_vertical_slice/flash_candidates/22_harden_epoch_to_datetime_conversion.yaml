@@ -1,0 +1,33 @@
+id: "22"
+title: Harden ChatGPT epoch-to-datetime conversion for edge-case floats
+assignee: david
+status: todo
+type: bug
+priority: low
+planned_order: 22
+milestone: M1.first_vertical_slice
+labels: [flash-candidate, parser, timestamps, edge-cases]
+depends_on: ["04"]
+description: |
+  The ChatGPT parser converts floating-point epoch seconds into
+  `DateTime<Utc>` without guarding extreme ranges or the nanosecond rounding
+  edge case where rounding can produce `1_000_000_000`.
+acceptance_criteria:
+  - `epoch_to_datetime` returns `None` for non-finite or out-of-range values instead of relying on lossy casts.
+  - The conversion handles nanosecond rounding safely and never passes an invalid nanosecond value to `timestamp_opt`.
+  - Existing normal timestamp behavior remains unchanged.
+  - Tests cover at least one edge case around fractional rounding and one invalid extreme input.
+files_touched:
+  - src/parser/chatgpt.rs
+implementation_plan: |
+  - Keep the existing `Option<DateTime<Utc>>` API.
+  - Add explicit bounds checks before converting to integer seconds.
+  - Normalize the fractional component so a rounded `1_000_000_000` nanoseconds value carries into the seconds component or otherwise returns `None` safely.
+test_plan: |
+  - Run the ChatGPT parser unit tests.
+  - Add focused tests for extreme values and the rounding boundary.
+  - Run `cargo test parser::chatgpt` or the nearest equivalent target.
+risks: |
+  - It is easy to “fix” this by changing behavior for ordinary timestamps. Preserve existing semantics for normal input.
+notes: |
+  - This is correctness hardening, not a known production failure. Keep the implementation small and well tested.

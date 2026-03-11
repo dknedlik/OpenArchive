@@ -7,6 +7,7 @@ pub mod http;
 pub mod import_service;
 pub mod migrations;
 pub mod parser;
+pub mod shutdown;
 pub mod storage;
 
 pub use domain::{ParticipantRole, SourceTimestamp, VisibilityStatus};
