@@ -21,9 +21,19 @@ pub fn find_artifact_by_source_hash(
         )
         .ok();
 
-    Ok(row.and_then(|(artifact_id, enrichment_status)| {
-        EnrichmentStatus::from_str(&enrichment_status).map(|status| (artifact_id, status))
-    }))
+    match row {
+        Some((artifact_id, enrichment_status)) => {
+            let artifact_id_clone = artifact_id.clone();
+            let status = EnrichmentStatus::from_str(&enrichment_status).ok_or_else(|| {
+                StorageError::InvalidEnrichmentStatus {
+                    artifact_id: artifact_id_clone,
+                    value: enrichment_status,
+                }
+            })?;
+            Ok(Some((artifact_id, status)))
+        }
+        None => Ok(None),
+    }
 }
 
 pub fn insert_artifact(conn: &Connection, a: &NewArtifact) -> StorageResult<()> {
@@ -115,14 +125,16 @@ pub fn list_artifacts(conn: &Connection) -> StorageResult<Vec<ArtifactListItem>>
     let mut artifacts = Vec::new();
     for row_result in rows {
         let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
+        let artifact_id: String = row
+            .get(0)
+            .map_err(|source| StorageError::ListArtifacts { source })?;
         let enrichment_status: String = row
             .get(5)
             .map_err(|source| StorageError::ListArtifacts { source })?;
 
+        let artifact_id_clone = artifact_id.clone();
         artifacts.push(ArtifactListItem {
-            artifact_id: row
-                .get(0)
-                .map_err(|source| StorageError::ListArtifacts { source })?,
+            artifact_id,
             title: row
                 .get(1)
                 .map_err(|source| StorageError::ListArtifacts { source })?,
@@ -135,8 +147,12 @@ pub fn list_artifacts(conn: &Connection) -> StorageResult<Vec<ArtifactListItem>>
             captured_at: row
                 .get(4)
                 .map_err(|source| StorageError::ListArtifacts { source })?,
-            enrichment_status: EnrichmentStatus::from_str(&enrichment_status)
-                .expect("oa_artifact.enrichment_status constrained by DDL"),
+            enrichment_status: EnrichmentStatus::from_str(&enrichment_status).ok_or_else(|| {
+                StorageError::InvalidEnrichmentStatus {
+                    artifact_id: artifact_id_clone,
+                    value: enrichment_status.clone(),
+                }
+            })?,
         });
     }
 

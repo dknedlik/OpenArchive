@@ -1,7 +1,7 @@
 id: "21"
 title: Harden artifact enrichment status decoding against invalid DB values
 assignee: david
-status: todo
+status: done
 type: bug
 priority: medium
 planned_order: 21
