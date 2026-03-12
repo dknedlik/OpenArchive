@@ -10,6 +10,7 @@ use crate::storage::{
     NewDerivedObject, NewEvidenceLink, ObjectStatus, OriginKind, ScopeType, SummaryObjectJson,
     SupportStrength, WriteDerivationAttempt, WriteDerivedObject,
 };
+use crate::domain::SourceTimestamp;
 use anyhow::Result;
 use log::{debug, error, info};
 use std::sync::Arc;
@@ -88,11 +89,23 @@ fn process_claimed_job(
             )
         })?;
 
+    let source_type =
+        crate::storage::SourceType::from_str(&payload.source_type).ok_or_else(|| {
+            fail_job_message(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                format!(
+                    "Invalid artifact source_type in enrichment payload: {}",
+                    payload.source_type
+                ),
+            )
+        })?;
+
     let processor_input = ArtifactProcessorInput {
         artifact_id: loaded.artifact.artifact_id.clone(),
         import_id: payload.import_id.clone(),
-        source_type: crate::storage::SourceType::from_str(&payload.source_type)
-            .unwrap_or(loaded.artifact.source_type),
+        source_type,
         title: loaded.artifact.title.clone(),
         participants: loaded.participants,
         segments: loaded.segments,
@@ -147,6 +160,7 @@ fn build_derivation_attempt(
     output: &ArtifactProcessorOutput,
 ) -> WriteDerivationAttempt {
     let derivation_run_id = new_id("drvrun");
+    let completed_at = SourceTimestamp::from(chrono::Utc::now());
     let mut objects = Vec::with_capacity(1 + output.classifications.len() + output.memories.len());
 
     let summary_object_id = new_id("dobj");
@@ -250,7 +264,7 @@ fn build_derivation_attempt(
                 "segment_count": input.segments.len()
             })
             .to_string(),
-            completed_at: None,
+            completed_at: Some(completed_at),
             error_message: None,
         },
         objects,

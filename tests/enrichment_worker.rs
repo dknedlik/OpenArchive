@@ -95,6 +95,8 @@ fn test_worker_persists_stub_outputs_and_completes_job() {
     let attempts = derived_store.attempts.lock().unwrap();
     assert_eq!(attempts.len(), 1);
     assert!(attempts[0].objects.len() >= 3);
+    assert_eq!(attempts[0].run.run_status, open_archive::storage::DerivationRunStatus::Completed);
+    assert!(attempts[0].run.completed_at.is_some());
 }
 
 #[test]
@@ -131,6 +133,95 @@ fn test_worker_fails_job_when_factory_rejects_claimed_tier() {
     assert!(job_store.fail_count.load(Ordering::SeqCst) > 0);
 }
 
+#[test]
+fn test_worker_fails_job_when_artifact_cannot_be_loaded() {
+    let config = test_config(1);
+    let job_store = Arc::new(SingleJobStore::new(valid_claimed_job()));
+    let read_store = Arc::new(FixedReadStore::default());
+    let derived_store = Arc::new(MockDerivedStore::default());
+    let shutdown = ShutdownToken::new();
+    let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
+    let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
+    let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store.clone();
+
+    let workers = start_enrichment_workers(
+        &config,
+        job_store_trait,
+        read_store_trait,
+        derived_store_trait,
+        shutdown.clone(),
+    )
+    .expect("worker should start");
+
+    std::thread::sleep(Duration::from_millis(75));
+    shutdown.signal();
+    for worker in workers {
+        worker.join().expect("worker should join cleanly");
+    }
+
+    assert_eq!(job_store.complete_count.load(Ordering::SeqCst), 0);
+    assert!(job_store.fail_count.load(Ordering::SeqCst) > 0);
+    assert!(
+        job_store
+            .last_fail_message
+            .lock()
+            .unwrap()
+            .as_deref()
+            .unwrap_or_default()
+            .contains("not found for enrichment")
+    );
+    assert!(derived_store.attempts.lock().unwrap().is_empty());
+}
+
+#[test]
+fn test_worker_fails_job_when_payload_source_type_is_invalid() {
+    let config = test_config(1);
+    let mut claimed_job = valid_claimed_job();
+    claimed_job.payload_json = serde_json::json!({
+        "schema_version": "v1",
+        "artifact_id": "artifact-1",
+        "import_id": "import-1",
+        "source_type": "not_a_real_source"
+    })
+    .to_string();
+
+    let job_store = Arc::new(SingleJobStore::new(claimed_job));
+    let read_store = Arc::new(FixedReadStore::with_sample_artifact());
+    let derived_store = Arc::new(MockDerivedStore::default());
+    let shutdown = ShutdownToken::new();
+    let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
+    let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
+    let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store.clone();
+
+    let workers = start_enrichment_workers(
+        &config,
+        job_store_trait,
+        read_store_trait,
+        derived_store_trait,
+        shutdown.clone(),
+    )
+    .expect("worker should start");
+
+    std::thread::sleep(Duration::from_millis(75));
+    shutdown.signal();
+    for worker in workers {
+        worker.join().expect("worker should join cleanly");
+    }
+
+    assert_eq!(job_store.complete_count.load(Ordering::SeqCst), 0);
+    assert!(job_store.fail_count.load(Ordering::SeqCst) > 0);
+    assert!(
+        job_store
+            .last_fail_message
+            .lock()
+            .unwrap()
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Invalid artifact source_type")
+    );
+    assert!(derived_store.attempts.lock().unwrap().is_empty());
+}
+
 fn test_config(enrichment_worker_count: usize) -> HttpConfig {
     HttpConfig {
         bind_addr: "127.0.0.1:3000".to_string(),
@@ -164,6 +255,7 @@ struct SingleJobStore {
     claim_count: AtomicUsize,
     complete_count: AtomicUsize,
     fail_count: AtomicUsize,
+    last_fail_message: Mutex<Option<String>>,
 }
 
 impl SingleJobStore {
@@ -173,6 +265,7 @@ impl SingleJobStore {
             claim_count: AtomicUsize::new(0),
             complete_count: AtomicUsize::new(0),
             fail_count: AtomicUsize::new(0),
+            last_fail_message: Mutex::new(None),
         }
     }
 }
@@ -190,6 +283,7 @@ impl EnrichmentJobLifecycleStore for SingleJobStore {
 
     fn fail_job(&self, _worker_id: &str, _job_id: &str, _error_message: &str) -> StorageResult<()> {
         self.fail_count.fetch_add(1, Ordering::SeqCst);
+        *self.last_fail_message.lock().unwrap() = Some(_error_message.to_string());
         Ok(())
     }
 
