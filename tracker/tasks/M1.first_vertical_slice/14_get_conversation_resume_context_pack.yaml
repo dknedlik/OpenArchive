@@ -9,11 +9,17 @@ milestone: M1.first_vertical_slice
 labels: [api, context-pack, retrieval]
 depends_on: ["07", "12", "13"]
 description: |
-  Add the first context-pack retrieval endpoint so one enriched conversation
+  Add the first context-pack retrieval use case so one enriched conversation
   artifact can be returned as a compact, machine-readable
-  `conversation_resume` pack with supporting evidence and provenance.
+  `conversation_resume` pack with supporting evidence and provenance. The
+  primary external transport is MCP, but the same application-level retrieval
+  should remain available through a secured API surface as well.
 acceptance_criteria:
-  - The service exposes `GET /context-packs/conversation-resume`.
+  - The application exposes one `conversation_resume` retrieval use case that
+    is transport-agnostic.
+  - The first external transport for this retrieval is MCP.
+  - A secured API surface can expose the same retrieval contract without
+    re-implementing business logic.
   - The endpoint accepts a conversation/artifact identifier as input.
   - Successful responses include compact machine-readable summary, memories, classifications, supporting evidence, provenance, and policy fields.
   - Supporting evidence references message segments and short excerpts rather than full transcript dumps.
@@ -23,11 +29,15 @@ files_touched:
 implementation_plan: |
   - Add read-model queries for active summaries, classifications, memories, and their evidence.
   - Assemble the first `conversation_resume` response shape directly from persisted rows.
+  - Keep the application use case transport-agnostic, then expose it through MCP first.
   - Keep the response optimized for machine consumption, not browsing.
 test_plan: |
-  - Add endpoint tests covering a successful response for one enriched artifact.
+  - Add retrieval tests covering a successful response for one enriched artifact.
+  - Add transport-level coverage for the first MCP exposure.
   - Verify the response includes provenance-bearing identifiers and evidence-backed excerpts.
 risks: |
   - If this endpoint grows into a transcript browser, it will lose the compact working-memory shape the slice is meant to prove.
 notes: |
   - This is the main retrieval deliverable for slice one.
+  - MCP is the primary external interface, but the underlying use case should
+    also support a secured API surface cleanly.

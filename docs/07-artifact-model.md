@@ -125,6 +125,15 @@ Behavioral properties:
 - should preserve enough internal structure for machine segmentation and
   extraction
 
+Revision note:
+
+- edited uploads should create new artifacts rather than mutating prior
+  artifact rows in place
+- later versions should be linked through explicit lineage or supersession so
+  retrieval can prefer the current document without losing historical trace
+- source filenames, source paths, and source-system document ids will matter
+  more here than they do for chat imports
+
 ### `note`
 
 Used for user-authored freeform content that is usually smaller and more direct
@@ -143,6 +152,13 @@ Behavioral properties:
 - often created directly in the system
 - may later be promoted into a document or linked to other artifacts
 - should remain easy to capture while still being segmentable later
+
+Revision note:
+
+- edited note uploads should follow the same rule as documents: new artifact,
+  preserved lineage, explicit supersession
+- the system should eventually distinguish logical document identity from exact
+  content hash so multiple revisions of one note can coexist cleanly
 
 ### `capture`
 
@@ -218,6 +234,39 @@ Examples:
 - `screenshot`
 - `voice_memo`
 - `ios_share_sheet`
+
+## Future Revision Model
+
+This is not slice-one scope, but it should guide later file and note import
+work.
+
+Recommended rule:
+
+- an edited file or note upload creates a new artifact
+- the prior artifact is not overwritten in place
+- the new artifact should explicitly supersede the prior artifact when the
+  source system provides enough identity to make that claim safely
+
+Why:
+
+- the archive should preserve history and provenance
+- retrieval should still prefer the latest usable version by default
+- AI workflows should be able to reason about current state without discarding
+  prior state
+
+Important distinction:
+
+- content hash identifies exact bytes
+- lineage identity identifies the same logical document across revisions
+
+Strong revision signals later may include:
+
+- source-system document id
+- stable path within a workspace or repository
+- explicit user instruction
+
+Weaker signals like filename similarity should not be treated as enough on
+their own for automatic supersession.
 
 Design rule:
 

@@ -131,6 +131,8 @@ Rules:
 
 - import counts must never be negative
 - imported plus failed conversations must not exceed detected conversations
+- `source_filename` exists to preserve original source names for file-like
+  importers even though the current ChatGPT slice does not populate it
 
 ## 3. oa_artifact
 
@@ -161,6 +163,15 @@ Rules:
 
 - unique on (`source_type`, `content_hash_version`, `source_conversation_hash`)
 - time range must be consistent when both endpoints exist
+
+Future revision note:
+
+- later document/note importers should create new artifact rows for edited
+  uploads rather than mutating prior artifacts in place
+- a later schema extension should add explicit artifact-level lineage or
+  supersession for those revision chains
+- slice one does not need artifact-level supersession yet because the current
+  import path is chat-oriented rather than file-revision-oriented
 
 ## 4. oa_conversation_participant
 
