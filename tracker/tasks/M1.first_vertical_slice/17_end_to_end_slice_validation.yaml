@@ -11,12 +11,12 @@ depends_on: ["08", "09", "12", "13", "14", "15"]
 description: |
   Add the final slice-one validation coverage that proves the full path from
   ChatGPT import through durable enrichment and `conversation_resume`
-  retrieval against the current local Oracle-backed setup.
+  retrieval against the current local provider-backed setup.
 acceptance_criteria:
   - One end-to-end test or equivalent validation flow covers import, durable job creation, worker execution, derived metadata persistence, and context-pack retrieval.
   - The validation proves provenance-bearing outputs rather than only happy-path HTTP status codes.
   - The slice validation covers not-ready or partial behavior explicitly.
-  - The local ADB-backed development path remains runnable with the current wallet/client setup.
+  - The local Compose-backed development path remains runnable with the current Postgres default and at least one secondary relational provider path.
 files_touched:
   - tests/
   - scripts/

@@ -1,15 +1,15 @@
 id: "10"
 title: Implement derived metadata persistence write path
 assignee: david
-status: todo
+status: done
 type: feature
 priority: high
 planned_order: 9
 milestone: M1.first_vertical_slice
-labels: [storage, provenance, metadata, oracle]
+labels: [storage, provenance, metadata]
 depends_on: ["03", "06"]
 description: |
-  Implement the first Oracle-backed write path for `oa_derivation_run`,
+  Implement the first provider-backed write path for `oa_derivation_run`,
   `oa_derived_object`, and `oa_evidence_link` so slice-one enrichment can
   persist provenance-bearing summary, classification, and memory outputs.
 acceptance_criteria:
@@ -22,17 +22,24 @@ acceptance_criteria:
   - Slice-one writes use separate derivation runs for `summary_extraction`, `classification_extraction`, and `memory_extraction` rather than one combined enrichment run.
   - Integration tests cover successful writes and rollback on invalid evidence/object relationships.
 files_touched:
-  - src/
-  - tests/
+  - src/storage/derivation_store.rs
+  - src/storage/oracle/derivation.rs
+  - src/storage/postgres/derivation.rs
+  - src/storage/oracle/mod.rs
+  - src/storage/postgres/mod.rs
+  - src/storage/mod.rs
+  - tests/oracle_derived_metadata.rs
+  - tests/postgres_derived_metadata.rs
+  - tests/support/mod.rs
 implementation_plan: |
   - Extend the storage boundary with domain-shaped types for derivation runs, derived objects, and evidence links.
   - Define one composite write API for a single derivation attempt so workers can persist one run and all emitted objects/evidence in a single transaction.
-  - Add Oracle insert operations against the provenance and metadata tables.
+  - Add provider-specific insert operations against the provenance and metadata tables.
   - Enforce application-level ownership validation so derived objects and evidence links cannot cross artifact boundaries even if foreign keys would allow it.
   - Keep the storage contract typed by derived-object kind rather than passing fully generic blobs through worker code.
   - Keep the write contract narrow enough that a worker can persist one enrichment attempt atomically.
 test_plan: |
-  - Add integration tests proving one summary, one classification, and one memory can be written with evidence.
+  - Add provider-backed integration tests proving one summary, one classification, and one memory can be written with evidence.
   - Verify the write path rejects evidence links to segments outside the target artifact and rolls the whole derivation attempt back.
   - Verify invalid segment references or partial writes do not leave orphaned provenance rows behind.
 risks: |
@@ -45,3 +52,4 @@ notes: |
     - `classification`: `object_json.classification_type` and `object_json.classification_value` required.
     - `memory`: `body_text`, `object_json.memory_type`, `object_json.memory_scope`, and `object_json.memory_scope_value` required.
   - Supersession/versioning behavior is explicitly deferred; slice one should write active objects without introducing replacement rules yet.
+  - The current repo now exercises the same contract against both Oracle and Postgres providers through shared harness logic.

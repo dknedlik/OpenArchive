@@ -22,15 +22,15 @@ files_touched:
   - tests/
   - src/
 implementation_plan: |
-  - Test parser/service-boundary malformed-input behavior separately from Oracle-backed persistence behavior.
-  - Use the service boundary (`import_chatgpt_payload`) for request-shaped success/failure assertions and Oracle integration tests for durable row-count and idempotency assertions.
+  - Test parser/service-boundary malformed-input behavior separately from provider-backed persistence behavior.
+  - Use the service boundary (`import_chatgpt_payload`) for request-shaped success/failure assertions and provider integration tests for durable row-count and idempotency assertions.
   - Treat duplicate re-import as idempotent success, not as a partial-failure case.
   - Use a deterministic multi-conversation fixture or seeded-DB setup to force one artifact write to succeed and a later artifact write to fail.
 test_plan: |
   - Add a malformed-input test at the service boundary that proves parser failure returns an explicit error and leaves prior persisted data unchanged.
-  - Add an Oracle integration test for duplicate payload re-import that verifies only one payload row exists and duplicate artifacts surface as `already_exists`.
-  - Add an Oracle integration test for duplicate conversation-hash re-import that verifies no duplicate artifact, segment, participant, or job rows are created.
-  - Add an Oracle integration test for deterministic multi-conversation partial success that verifies one conversation is persisted, the failed conversation does not leave partial rows behind, and import counts/status match the slice-one contract.
+  - Add provider-backed integration tests for duplicate payload re-import that verify only one payload row exists and duplicate artifacts surface as `already_exists`.
+  - Add provider-backed integration tests for duplicate conversation-hash re-import that verify no duplicate artifact, segment, participant, or job rows are created.
+  - Add provider-backed integration tests for deterministic multi-conversation partial success that verify one conversation is persisted, the failed conversation does not leave partial rows behind, and import counts/status match the slice-one contract.
   - Verify returned status values as well as database state; do not rely on DB row counts alone.
 risks: |
   - Without these tests, the first import path will look stable until the first real re-import or malformed export arrives.
@@ -38,3 +38,4 @@ notes: |
   - This task should land before substantial enrichment work begins.
   - For this task, `already_exists` is treated as idempotent success rather than as an import failure.
   - Prefer explicit fixture inputs over ad hoc test mutations so the import contract stays reviewable.
+  - The current repo exercises these cases against both Oracle and Postgres providers through shared contract helpers.

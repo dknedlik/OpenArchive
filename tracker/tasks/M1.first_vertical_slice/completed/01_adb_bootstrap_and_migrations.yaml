@@ -1,25 +1,26 @@
 id: "01"
-title: Establish ADB bootstrap and migration foundation
+title: Establish initial Oracle bootstrap and migration foundation
 assignee: david
 status: done
 type: chore
 priority: high
 planned_order: 0
 milestone: M1.first_vertical_slice
-labels: [oracle, adb, migrations, bootstrap]
+labels: [oracle, migrations, bootstrap]
 description: |
   Create the initial Oracle-backed foundation for slice one: schema design,
-  versioned migration layout, Rust migration CLI, Vault-backed schema user bootstrap,
-  and the first live schema in ADB.
+  versioned migration layout, Rust migration CLI, and the first live Oracle
+  schema bootstrap. This task reflects the original Oracle-first phase and is
+  now historical context rather than the current default architecture.
 acceptance_criteria:
   - The first slice schema is documented and converted into a versioned migration.
-  - A dedicated `open_archive_user` schema exists in the current ADB instance.
+  - A dedicated Oracle schema/user bootstrap path exists for the initial deployment target.
   - Rust CLI commands can verify connectivity and apply/check migrations.
-  - `V001` is applied successfully in ADB.
+  - `V001` is applied successfully against the active Oracle target of the time.
 files_touched:
   - docs/12-first-slice-schema.md
   - docs/13-adb-bootstrap.md
-  - sql/migrations/V001__first_slice_schema.sql
+  - sql/oracle/migrations/V001__first_slice_schema.sql
   - sql/admin/bootstrap_open_archive_user.sql
   - sql/admin/reset_open_archive_bootstrap.sql
   - scripts/run_sqlcl_admin.sh
@@ -31,11 +32,12 @@ files_touched:
   - Cargo.toml
 implementation_plan: |
   - Document the slice-one schema.
-  - Create a CLI-first Oracle bootstrap path using OCI CLI, SQLcl, and the existing wallet.
+  - Create a CLI-first Oracle bootstrap path using OCI CLI, SQLcl, and the then-current connection model.
   - Build a small Rust migration runner for Oracle-backed schema changes.
 test_plan: |
-  - Verify `adb-check`, `migrate`, and `migrate-check` against the live ADB schema user.
+  - Verify Oracle connectivity and migration commands against the active Oracle target of the time.
 risks: |
   - Oracle migration ergonomics are thinner than the mainstream Postgres path, so the bootstrap needed to stay minimal and explicit.
 notes: |
-  - This work is complete and now serves as the infrastructure floor for the first real application milestone.
+  - This work is complete and now serves as historical infrastructure context.
+  - The current mainline path uses provider-dispatched migrations with Postgres as the default relational store.
