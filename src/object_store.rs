@@ -4,6 +4,7 @@
 //! dedupe can safely point multiple imports at the same underlying bytes.
 
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -37,9 +38,16 @@ pub struct StoredObject {
     pub sha256: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PutObjectResult {
+    pub stored_object: StoredObject,
+    pub was_created: bool,
+}
+
 pub trait ObjectStore: Send + Sync {
-    fn put_object(&self, object: NewObject) -> ObjectStoreResult<StoredObject>;
+    fn put_object(&self, object: NewObject) -> ObjectStoreResult<PutObjectResult>;
     fn get_object_bytes(&self, object: &StoredObject) -> ObjectStoreResult<Vec<u8>>;
+    fn delete_object(&self, object: &StoredObject) -> ObjectStoreResult<()>;
 }
 
 pub struct LocalFsObjectStore {
@@ -67,24 +75,30 @@ impl LocalFsObjectStore {
 }
 
 impl ObjectStore for LocalFsObjectStore {
-    fn put_object(&self, object: NewObject) -> ObjectStoreResult<StoredObject> {
+    fn put_object(&self, object: NewObject) -> ObjectStoreResult<PutObjectResult> {
         let storage_key = content_addressed_storage_key(&object.namespace, &object.sha256);
         let path = self.object_path(&storage_key);
+        let already_exists = path.exists();
         Self::ensure_parent_dir(&path)?;
 
-        fs::write(&path, &object.bytes).map_err(|source| ObjectStoreError::WriteObject {
-            object_id: object.object_id.clone(),
-            path: path.clone(),
-            source,
-        })?;
+        if !already_exists {
+            fs::write(&path, &object.bytes).map_err(|source| ObjectStoreError::WriteObject {
+                object_id: object.object_id.clone(),
+                path: path.clone(),
+                source,
+            })?;
+        }
 
-        Ok(StoredObject {
-            object_id: object.object_id,
-            provider: "local_fs".to_string(),
-            storage_key,
-            mime_type: object.mime_type,
-            size_bytes: object.bytes.len() as i64,
-            sha256: object.sha256,
+        Ok(PutObjectResult {
+            stored_object: StoredObject {
+                object_id: object.object_id,
+                provider: "local_fs".to_string(),
+                storage_key,
+                mime_type: object.mime_type,
+                size_bytes: object.bytes.len() as i64,
+                sha256: object.sha256,
+            },
+            was_created: !already_exists,
         })
     }
 
@@ -95,6 +109,19 @@ impl ObjectStore for LocalFsObjectStore {
             path,
             source,
         })
+    }
+
+    fn delete_object(&self, object: &StoredObject) -> ObjectStoreResult<()> {
+        let path = self.object_path(&object.storage_key);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(ObjectStoreError::DeleteObject {
+                object_id: object.object_id.clone(),
+                path,
+                source,
+            }),
+        }
     }
 }
 
@@ -155,41 +182,80 @@ impl S3CompatibleObjectStore {
             .get_object(Some(&self.credentials), storage_key)
             .sign(Duration::from_secs(S3_SIGNED_URL_TTL_SECS))
     }
+
+    fn delete_url(&self, storage_key: &str) -> Url {
+        self.bucket
+            .delete_object(Some(&self.credentials), storage_key)
+            .sign(Duration::from_secs(S3_SIGNED_URL_TTL_SECS))
+    }
+
+    fn head_url(&self, storage_key: &str) -> Url {
+        self.bucket
+            .head_object(Some(&self.credentials), storage_key)
+            .sign(Duration::from_secs(S3_SIGNED_URL_TTL_SECS))
+    }
 }
 
 impl ObjectStore for S3CompatibleObjectStore {
-    fn put_object(&self, object: NewObject) -> ObjectStoreResult<StoredObject> {
+    fn put_object(&self, object: NewObject) -> ObjectStoreResult<PutObjectResult> {
         let storage_key = content_addressed_storage_key(&object.namespace, &object.sha256);
         let remote_key = self.prefixed_key(&storage_key);
-        let url = self.upload_url(&remote_key, &object.mime_type);
-        let response = self
+
+        let head_response = self
             .client
-            .put(url)
-            .header(CONTENT_TYPE, object.mime_type.clone())
-            .header(CONTENT_LENGTH, object.bytes.len())
-            .body(object.bytes.clone())
+            .head(self.head_url(&remote_key))
             .send()
             .map_err(|source| ObjectStoreError::SendRequest {
-                operation: "put_object",
+                operation: "head_object",
                 object_id: object.object_id.clone(),
                 source,
             })?;
 
-        if response.status() != StatusCode::OK {
-            return Err(ObjectStoreError::UnexpectedStatus {
-                operation: "put_object",
-                object_id: object.object_id,
-                status: response.status().as_u16(),
-            });
+        let already_exists = match head_response.status() {
+            StatusCode::OK => true,
+            StatusCode::NOT_FOUND => false,
+            status => {
+                return Err(ObjectStoreError::UnexpectedStatus {
+                    operation: "head_object",
+                    object_id: object.object_id.clone(),
+                    status: status.as_u16(),
+                });
+            }
+        };
+
+        if !already_exists {
+            let response = self
+                .client
+                .put(self.upload_url(&remote_key, &object.mime_type))
+                .header(CONTENT_TYPE, object.mime_type.clone())
+                .header(CONTENT_LENGTH, object.bytes.len())
+                .body(object.bytes.clone())
+                .send()
+                .map_err(|source| ObjectStoreError::SendRequest {
+                    operation: "put_object",
+                    object_id: object.object_id.clone(),
+                    source,
+                })?;
+
+            if response.status() != StatusCode::OK {
+                return Err(ObjectStoreError::UnexpectedStatus {
+                    operation: "put_object",
+                    object_id: object.object_id.clone(),
+                    status: response.status().as_u16(),
+                });
+            }
         }
 
-        Ok(StoredObject {
-            object_id: object.object_id,
-            provider: "s3".to_string(),
-            storage_key,
-            mime_type: object.mime_type,
-            size_bytes: object.bytes.len() as i64,
-            sha256: object.sha256,
+        Ok(PutObjectResult {
+            stored_object: StoredObject {
+                object_id: object.object_id,
+                provider: "s3".to_string(),
+                storage_key,
+                mime_type: object.mime_type,
+                size_bytes: object.bytes.len() as i64,
+                sha256: object.sha256,
+            },
+            was_created: !already_exists,
         })
     }
 
@@ -221,6 +287,28 @@ impl ObjectStore for S3CompatibleObjectStore {
                 object_id: object.object_id.clone(),
                 source,
             })
+    }
+
+    fn delete_object(&self, object: &StoredObject) -> ObjectStoreResult<()> {
+        let remote_key = self.prefixed_key(&object.storage_key);
+        let response = self
+            .client
+            .delete(self.delete_url(&remote_key))
+            .send()
+            .map_err(|source| ObjectStoreError::SendRequest {
+                operation: "delete_object",
+                object_id: object.object_id.clone(),
+                source,
+            })?;
+
+        match response.status() {
+            StatusCode::NO_CONTENT | StatusCode::OK | StatusCode::NOT_FOUND => Ok(()),
+            status => Err(ObjectStoreError::UnexpectedStatus {
+                operation: "delete_object",
+                object_id: object.object_id.clone(),
+                status: status.as_u16(),
+            }),
+        }
     }
 }
 
@@ -280,9 +368,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            stored.storage_key,
+            stored.stored_object.storage_key,
             "imports/ab/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789.bin"
         );
+        assert!(stored.was_created);
 
         let _ = fs::remove_dir_all(temp_root);
     }

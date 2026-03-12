@@ -181,7 +181,7 @@ where
 mod tests {
     use super::*;
 
-    use open_archive::object_store::{NewObject, ObjectStore, StoredObject};
+    use open_archive::object_store::{NewObject, ObjectStore, PutObjectResult, StoredObject};
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -238,14 +238,17 @@ mod tests {
         fn put_object(
             &self,
             object: NewObject,
-        ) -> open_archive::error::ObjectStoreResult<StoredObject> {
-            Ok(StoredObject {
-                object_id: object.object_id,
-                provider: "mock".to_string(),
-                storage_key: "mock-key".to_string(),
-                mime_type: object.mime_type,
-                size_bytes: object.bytes.len() as i64,
-                sha256: object.sha256,
+        ) -> open_archive::error::ObjectStoreResult<PutObjectResult> {
+            Ok(PutObjectResult {
+                stored_object: StoredObject {
+                    object_id: object.object_id,
+                    provider: "mock".to_string(),
+                    storage_key: "mock-key".to_string(),
+                    mime_type: object.mime_type,
+                    size_bytes: object.bytes.len() as i64,
+                    sha256: object.sha256,
+                },
+                was_created: true,
             })
         }
 
@@ -254,6 +257,13 @@ mod tests {
             object: &StoredObject,
         ) -> open_archive::error::ObjectStoreResult<Vec<u8>> {
             Ok(object.storage_key.as_bytes().to_vec())
+        }
+
+        fn delete_object(
+            &self,
+            _object: &StoredObject,
+        ) -> open_archive::error::ObjectStoreResult<()> {
+            Ok(())
         }
     }
 

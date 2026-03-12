@@ -31,7 +31,10 @@ pub fn insert_payload_object(client: &mut postgres::Client, p: &NewImportObjectR
                 &p.stored_object.sha256,
             ],
         )
-        .map_err(map_pg_err)?;
+        .map_err(|source| StorageError::InsertPayloadPostgres {
+            payload_id: p.object_id.clone(),
+            source,
+        })?;
     Ok(())
 }
 
@@ -53,7 +56,10 @@ pub fn insert_import(client: &mut postgres::Client, i: &NewImport) -> StorageRes
                 &i.conversation_count_detected,
             ],
         )
-        .map_err(map_pg_err)?;
+        .map_err(|source| StorageError::InsertImportPostgres {
+            import_id: i.import_id.clone(),
+            source,
+        })?;
     Ok(())
 }
 

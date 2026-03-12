@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::domain::SourceTimestamp;
 use crate::error::OpenArchiveError;
-use crate::object_store::{NewObject, ObjectStore, StoredObject};
+use crate::object_store::{NewObject, ObjectStore, PutObjectResult};
 use crate::parser::{
     self, ParsedConversation, ParsedMessage, CHATGPT_CONTENT_FACETS, CHATGPT_CONTENT_HASH_VERSION,
     CHATGPT_NORMALIZATION_VERSION,
@@ -45,8 +45,14 @@ where
     O: ObjectStore + ?Sized,
 {
     let parsed = parser::chatgpt::parse_conversations(payload_bytes)?;
-    let import_set = build_import_set(payload_bytes, parsed, object_store)?;
-    let result = store.write_import(import_set)?;
+    let prepared = build_import_set(payload_bytes, parsed, object_store)?;
+    let result = match store.write_import(prepared.write_set) {
+        Ok(result) => result,
+        Err(err) => {
+            cleanup_unreferenced_payload_object(object_store, &prepared.payload_put, &err);
+            return Err(err.into());
+        }
+    };
 
     Ok(ImportResponse {
         import_id: result.import_id,
@@ -63,15 +69,20 @@ where
     })
 }
 
+struct PreparedImportSet {
+    write_set: WriteImportSet,
+    payload_put: PutObjectResult,
+}
+
 fn build_import_set(
     payload_bytes: &[u8],
     conversations: Vec<ParsedConversation>,
     object_store: &(impl ObjectStore + ?Sized),
-) -> Result<WriteImportSet, OpenArchiveError> {
+) -> Result<PreparedImportSet, OpenArchiveError> {
     let payload_sha256 = sha256_hex(payload_bytes);
     let payload_object_id = new_id("payload");
     let import_id = new_id("import");
-    let payload_object = persist_raw_payload(
+    let payload_put = persist_raw_payload(
         object_store,
         &payload_object_id,
         payload_bytes,
@@ -86,26 +97,29 @@ fn build_import_set(
         .map(|conversation| build_artifact_set(&import_id, &content_facets_json, conversation))
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(WriteImportSet {
-        payload_object: NewImportObjectRef {
-            object_id: payload_object_id.clone(),
-            payload_format: PayloadFormat::ChatGptExportJson,
-            mime_type: "application/json".to_string(),
-            copied_bytes: payload_bytes.to_vec(),
-            size_bytes: payload_bytes.len() as i64,
-            sha256: payload_sha256.clone(),
-            stored_object: payload_object,
+    Ok(PreparedImportSet {
+        write_set: WriteImportSet {
+            payload_object: NewImportObjectRef {
+                object_id: payload_object_id.clone(),
+                payload_format: PayloadFormat::ChatGptExportJson,
+                mime_type: "application/json".to_string(),
+                copied_bytes: payload_bytes.to_vec(),
+                size_bytes: payload_bytes.len() as i64,
+                sha256: payload_sha256.clone(),
+                stored_object: payload_put.stored_object.clone(),
+            },
+            import: NewImport {
+                import_id,
+                source_type: SourceType::ChatGptExport,
+                import_status: ImportStatus::Pending,
+                payload_object_id,
+                source_filename: None,
+                source_content_hash: payload_sha256,
+                conversation_count_detected: artifact_sets.len() as i32,
+            },
+            artifact_sets,
         },
-        import: NewImport {
-            import_id,
-            source_type: SourceType::ChatGptExport,
-            import_status: ImportStatus::Pending,
-            payload_object_id,
-            source_filename: None,
-            source_content_hash: payload_sha256,
-            conversation_count_detected: artifact_sets.len() as i32,
-        },
-        artifact_sets,
+        payload_put,
     })
 }
 
@@ -114,7 +128,7 @@ fn persist_raw_payload(
     object_id: &str,
     payload_bytes: &[u8],
     payload_sha256: &str,
-) -> Result<StoredObject, OpenArchiveError> {
+) -> Result<PutObjectResult, OpenArchiveError> {
     object_store.put_object(NewObject {
         object_id: object_id.to_string(),
         namespace: "import-payloads".to_string(),
@@ -122,6 +136,34 @@ fn persist_raw_payload(
         bytes: payload_bytes.to_vec(),
         sha256: payload_sha256.to_string(),
     }).map_err(OpenArchiveError::from)
+}
+
+fn cleanup_unreferenced_payload_object(
+    object_store: &(impl ObjectStore + ?Sized),
+    payload_put: &PutObjectResult,
+    error: &crate::error::StorageError,
+) {
+    if !payload_put.was_created || !is_safe_precommit_import_failure(error) {
+        return;
+    }
+
+    if let Err(cleanup_err) = object_store.delete_object(&payload_put.stored_object) {
+        log::warn!(
+            "failed to clean up unreferenced payload object {} after import write error: {}",
+            payload_put.stored_object.object_id,
+            cleanup_err
+        );
+    }
+}
+
+fn is_safe_precommit_import_failure(error: &crate::error::StorageError) -> bool {
+    matches!(
+        error,
+        crate::error::StorageError::InsertPayload { .. }
+            | crate::error::StorageError::InsertImport { .. }
+            | crate::error::StorageError::InsertPayloadPostgres { .. }
+            | crate::error::StorageError::InsertImportPostgres { .. }
+    )
 }
 
 fn build_artifact_set(
@@ -275,7 +317,7 @@ fn sha256_hex(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::object_store::{NewObject, ObjectStore, StoredObject};
+    use crate::object_store::{NewObject, ObjectStore, PutObjectResult, StoredObject};
     use crate::storage::{
         ArtifactIngestResult, EnrichmentStatus, ImportWriteResult, ImportedArtifact, WriteImportSet,
     };
@@ -321,30 +363,56 @@ mod tests {
         }
     }
 
+    struct FailingImportStore;
+
+    impl ImportWriteStore for FailingImportStore {
+        fn write_import(
+            &self,
+            import_set: WriteImportSet,
+        ) -> crate::error::StorageResult<ImportWriteResult> {
+            let source = match postgres::Client::connect(
+                "postgres://invalid:invalid@127.0.0.1:1/invalid",
+                postgres::NoTls,
+            ) {
+                Ok(_) => panic!("expected postgres connection failure"),
+                Err(source) => source,
+            };
+            Err(crate::error::StorageError::InsertImportPostgres {
+                import_id: import_set.import.import_id,
+                source,
+            })
+        }
+    }
+
     struct MockObjectStore {
         puts: Mutex<Vec<NewObject>>,
+        deletes: Mutex<Vec<StoredObject>>,
     }
 
     impl MockObjectStore {
         fn new() -> Self {
             Self {
                 puts: Mutex::new(Vec::new()),
+                deletes: Mutex::new(Vec::new()),
             }
         }
     }
 
     impl ObjectStore for MockObjectStore {
-        fn put_object(&self, object: NewObject) -> crate::error::ObjectStoreResult<StoredObject> {
+        fn put_object(&self, object: NewObject) -> crate::error::ObjectStoreResult<PutObjectResult> {
             let stored = StoredObject {
                 object_id: object.object_id.clone(),
                 provider: "mock".to_string(),
-                storage_key: format!("{}/{}", object.namespace, object.object_id),
+                storage_key: format!("{}/{}", object.namespace, object.sha256),
                 mime_type: object.mime_type.clone(),
                 size_bytes: object.bytes.len() as i64,
                 sha256: object.sha256.clone(),
             };
             self.puts.lock().unwrap().push(object);
-            Ok(stored)
+            Ok(PutObjectResult {
+                stored_object: stored,
+                was_created: true,
+            })
         }
 
         fn get_object_bytes(
@@ -352,6 +420,11 @@ mod tests {
             object: &StoredObject,
         ) -> crate::error::ObjectStoreResult<Vec<u8>> {
             Ok(object.storage_key.as_bytes().to_vec())
+        }
+
+        fn delete_object(&self, object: &StoredObject) -> crate::error::ObjectStoreResult<()> {
+            self.deletes.lock().unwrap().push(object.clone());
+            Ok(())
         }
     }
 
@@ -526,5 +599,19 @@ mod tests {
             1,
             "malformed payloads must not enqueue a second write"
         );
+    }
+
+    #[test]
+    fn import_chatgpt_payload_cleans_up_new_object_on_safe_precommit_failure() {
+        let store = FailingImportStore;
+        let object_store = MockObjectStore::new();
+
+        let err =
+            import_chatgpt_payload(&store, &object_store, single_conversation_export().as_bytes())
+                .unwrap_err();
+
+        assert!(matches!(err, OpenArchiveError::Storage(_)));
+        assert_eq!(object_store.puts.lock().unwrap().len(), 1);
+        assert_eq!(object_store.deletes.lock().unwrap().len(), 1);
     }
 }

@@ -63,6 +63,14 @@ pub enum ObjectStoreError {
         source: std::io::Error,
     },
 
+    #[error("failed to delete object {object_id} at {path}")]
+    DeleteObject {
+        object_id: String,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("invalid {key} URL {value:?}")]
     InvalidUrl {
         key: &'static str,
@@ -291,6 +299,20 @@ pub enum StorageError {
         import_id: String,
         #[source]
         source: oracle::Error,
+    },
+
+    #[error("failed to insert import payload {payload_id}")]
+    InsertPayloadPostgres {
+        payload_id: String,
+        #[source]
+        source: postgres::Error,
+    },
+
+    #[error("failed to insert import {import_id}")]
+    InsertImportPostgres {
+        import_id: String,
+        #[source]
+        source: postgres::Error,
     },
 
     #[error("failed to update import counts for {import_id}")]

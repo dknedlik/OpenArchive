@@ -49,7 +49,7 @@ impl ObjectStore for DelegatingArchiveAppService {
     fn put_object(
         &self,
         object: crate::object_store::NewObject,
-    ) -> crate::error::ObjectStoreResult<crate::object_store::StoredObject> {
+    ) -> crate::error::ObjectStoreResult<crate::object_store::PutObjectResult> {
         self.object_store.put_object(object)
     }
 
@@ -58,6 +58,13 @@ impl ObjectStore for DelegatingArchiveAppService {
         object: &crate::object_store::StoredObject,
     ) -> crate::error::ObjectStoreResult<Vec<u8>> {
         self.object_store.get_object_bytes(object)
+    }
+
+    fn delete_object(
+        &self,
+        object: &crate::object_store::StoredObject,
+    ) -> crate::error::ObjectStoreResult<()> {
+        self.object_store.delete_object(object)
     }
 }
 

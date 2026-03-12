@@ -127,7 +127,7 @@ mod tests {
         ArtifactIngestResult, ArtifactListItem, ArtifactReadStore, EnrichmentStatus, ImportStatus,
         ImportWriteResult, ImportedArtifact, WriteImportSet,
     };
-    use crate::object_store::{NewObject, ObjectStore, StoredObject};
+    use crate::object_store::{NewObject, ObjectStore, PutObjectResult, StoredObject};
     use std::io::Read;
     use tiny_http::TestRequest;
 
@@ -165,14 +165,17 @@ mod tests {
     }
 
     impl ObjectStore for MockStore {
-        fn put_object(&self, object: NewObject) -> crate::error::ObjectStoreResult<StoredObject> {
-            Ok(StoredObject {
-                object_id: object.object_id,
-                provider: "mock".to_string(),
-                storage_key: "mock-key".to_string(),
-                mime_type: object.mime_type,
-                size_bytes: object.bytes.len() as i64,
-                sha256: object.sha256,
+        fn put_object(&self, object: NewObject) -> crate::error::ObjectStoreResult<PutObjectResult> {
+            Ok(PutObjectResult {
+                stored_object: StoredObject {
+                    object_id: object.object_id,
+                    provider: "mock".to_string(),
+                    storage_key: "mock-key".to_string(),
+                    mime_type: object.mime_type,
+                    size_bytes: object.bytes.len() as i64,
+                    sha256: object.sha256,
+                },
+                was_created: true,
             })
         }
 
@@ -181,6 +184,10 @@ mod tests {
             object: &StoredObject,
         ) -> crate::error::ObjectStoreResult<Vec<u8>> {
             Ok(object.storage_key.as_bytes().to_vec())
+        }
+
+        fn delete_object(&self, _object: &StoredObject) -> crate::error::ObjectStoreResult<()> {
+            Ok(())
         }
     }
 
