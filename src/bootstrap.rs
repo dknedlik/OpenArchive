@@ -5,9 +5,9 @@
 
 use std::sync::Arc;
 
-use crate::config::{AppConfig, RelationalStoreConfig};
+use crate::config::{AppConfig, ObjectStoreConfig, RelationalStoreConfig};
 use crate::error::{ConfigError, ConfigResult};
-use crate::object_store::{LocalFsObjectStore, ObjectStore};
+use crate::object_store::{LocalFsObjectStore, ObjectStore, S3CompatibleObjectStore};
 use crate::storage::{
     ArtifactReadStore, EnrichmentJobLifecycleStore, ImportWriteStore, OracleEnrichmentJobStore,
     OracleImportWriteStore, PostgresEnrichmentJobStore, PostgresImportWriteStore,
@@ -68,9 +68,12 @@ pub struct ServiceBundle {
 
 pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
     let object_store: Arc<dyn ObjectStore> = match &config.object_store {
-        crate::config::ObjectStoreConfig::LocalFs(local_fs) => {
-            Arc::new(LocalFsObjectStore::new(local_fs.root.clone()))
-        }
+        ObjectStoreConfig::LocalFs(local_fs) => Arc::new(LocalFsObjectStore::new(local_fs.root.clone())),
+        ObjectStoreConfig::S3Compatible(s3) => Arc::new(
+            S3CompatibleObjectStore::new(s3.clone()).map_err(|err| ConfigError::InvalidObjectStoreConfig {
+                message: err.to_string(),
+            })?,
+        ),
     };
 
     match &config.relational_store {

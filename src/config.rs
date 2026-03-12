@@ -71,6 +71,7 @@ impl PostgresConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectStoreConfig {
     LocalFs(LocalFsObjectStoreConfig),
+    S3Compatible(S3CompatibleObjectStoreConfig),
 }
 
 impl ObjectStoreConfig {
@@ -78,10 +79,11 @@ impl ObjectStoreConfig {
         let provider = env::var("OA_OBJECT_STORE").unwrap_or_else(|_| "local_fs".to_string());
         match provider.as_str() {
             "local_fs" => Ok(Self::LocalFs(LocalFsObjectStoreConfig::from_env()?)),
+            "s3" => Ok(Self::S3Compatible(S3CompatibleObjectStoreConfig::from_env()?)),
             _ => Err(ConfigError::InvalidEnumEnv {
                 key: "OA_OBJECT_STORE",
                 value: provider,
-                expected: "local_fs",
+                expected: "local_fs, s3",
             }),
         }
     }
@@ -103,6 +105,52 @@ impl LocalFsObjectStoreConfig {
         };
 
         Ok(Self { root })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S3CompatibleObjectStoreConfig {
+    pub endpoint: String,
+    pub region: String,
+    pub bucket: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub key_prefix: Option<String>,
+    pub url_style: S3UrlStyle,
+}
+
+impl S3CompatibleObjectStoreConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        Ok(Self {
+            endpoint: required_env("OA_S3_ENDPOINT")?,
+            region: required_env("OA_S3_REGION")?,
+            bucket: required_env("OA_S3_BUCKET")?,
+            access_key_id: required_env("OA_S3_ACCESS_KEY_ID")?,
+            secret_access_key: required_env("OA_S3_SECRET_ACCESS_KEY")?,
+            key_prefix: optional_trimmed_env("OA_S3_KEY_PREFIX"),
+            url_style: S3UrlStyle::from_env()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S3UrlStyle {
+    Path,
+    VirtualHost,
+}
+
+impl S3UrlStyle {
+    pub fn from_env() -> ConfigResult<Self> {
+        let value = env::var("OA_S3_URL_STYLE").unwrap_or_else(|_| "path".to_string());
+        match value.as_str() {
+            "path" => Ok(Self::Path),
+            "virtual_host" => Ok(Self::VirtualHost),
+            _ => Err(ConfigError::InvalidEnumEnv {
+                key: "OA_S3_URL_STYLE",
+                value,
+                expected: "path, virtual_host",
+            }),
+        }
     }
 }
 
@@ -229,6 +277,17 @@ fn positive_u32_env(key: &'static str) -> ConfigResult<Option<u32>> {
     }
 }
 
+fn required_env(key: &'static str) -> ConfigResult<String> {
+    env::var(key).map_err(|_| ConfigError::MissingEnv { key })
+}
+
+fn optional_trimmed_env(key: &'static str) -> Option<String> {
+    env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn optional_duration_env_ms(key: &'static str) -> ConfigResult<Option<Duration>> {
     match env::var(key) {
         Ok(raw) => {
@@ -294,6 +353,13 @@ mod tests {
         for key in [
             "OA_RELATIONAL_STORE",
             "OA_OBJECT_STORE",
+            "OA_S3_ENDPOINT",
+            "OA_S3_REGION",
+            "OA_S3_BUCKET",
+            "OA_S3_ACCESS_KEY_ID",
+            "OA_S3_SECRET_ACCESS_KEY",
+            "OA_S3_KEY_PREFIX",
+            "OA_S3_URL_STYLE",
             "OA_INFERENCE_PROVIDER",
             "OA_ORACLE_CONNECT_STRING",
             "OA_ORACLE_USERNAME",
@@ -388,5 +454,30 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn s3_object_store_provider_loads_when_configured() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
+        std::env::set_var("OA_OBJECT_STORE", "s3");
+        std::env::set_var("OA_S3_ENDPOINT", "http://localhost:9000");
+        std::env::set_var("OA_S3_REGION", "us-east-1");
+        std::env::set_var("OA_S3_BUCKET", "openarchive");
+        std::env::set_var("OA_S3_ACCESS_KEY_ID", "openarchive");
+        std::env::set_var("OA_S3_SECRET_ACCESS_KEY", "openarchive-secret");
+        std::env::set_var("OA_S3_KEY_PREFIX", "objects");
+
+        let config = AppConfig::from_env().expect("s3 object-store provider should load");
+        let ObjectStoreConfig::S3Compatible(config) = config.object_store else {
+            panic!("expected s3 object-store config");
+        };
+
+        assert_eq!(config.endpoint, "http://localhost:9000");
+        assert_eq!(config.region, "us-east-1");
+        assert_eq!(config.bucket, "openarchive");
+        assert_eq!(config.key_prefix.as_deref(), Some("objects"));
+        assert_eq!(config.url_style, S3UrlStyle::Path);
     }
 }

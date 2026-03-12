@@ -94,6 +94,9 @@ container, then run the matching `make test-...-integration` target. Both
 providers require `OA_ALLOW_SCHEMA_RESET=1` because the test harness recreates
 its schema/database.
 
+For object storage, `local_fs` is the local development path. The `s3`
+provider is intended for real remote buckets, configured through env vars.
+
 ## Architecture Direction
 
 The current architecture is intentionally opinionated:
@@ -120,7 +123,7 @@ relevant traits, wire config parsing, update the factory, and move on.
 The most interesting open problems are architectural, not cosmetic:
 
 - Postgres-backed repository implementations
-- filesystem-backed object store abstraction
+- object-store abstraction with local filesystem and S3-compatible providers
 - provider/factory assembly from config
 - local MCP server over the application use cases
 - ChatGPT export ingestion hardening

@@ -62,6 +62,46 @@ pub enum ObjectStoreError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("invalid {key} URL {value:?}")]
+    InvalidUrl {
+        key: &'static str,
+        value: String,
+        #[source]
+        source: url::ParseError,
+    },
+
+    #[error("invalid S3 object-store configuration: {message}")]
+    InvalidS3Config { message: String },
+
+    #[error("failed to build object-store HTTP client")]
+    BuildHttpClient {
+        #[source]
+        source: reqwest::Error,
+    },
+
+    #[error("failed to send {operation} request for object {object_id}")]
+    SendRequest {
+        operation: &'static str,
+        object_id: String,
+        #[source]
+        source: reqwest::Error,
+    },
+
+    #[error("{operation} for object {object_id} returned unexpected HTTP status {status}")]
+    UnexpectedStatus {
+        operation: &'static str,
+        object_id: String,
+        status: u16,
+    },
+
+    #[error("failed to read response body for {operation} on object {object_id}")]
+    ReadResponseBody {
+        operation: &'static str,
+        object_id: String,
+        #[source]
+        source: reqwest::Error,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -81,6 +121,9 @@ pub enum ConfigError {
 
     #[error("invalid {key} value {value:?}; expected positive integer")]
     InvalidPositiveIntegerEnv { key: &'static str, value: String },
+
+    #[error("invalid object-store configuration: {message}")]
+    InvalidObjectStoreConfig { message: String },
 
 }
 
