@@ -2,9 +2,8 @@ use crate::error::{StorageError, StorageResult};
 use oracle::Connection;
 
 use crate::storage::types::{
-    ArtifactListItem, EnrichmentStatus, LoadedArtifactForEnrichment,
-    LoadedConversationForEnrichment, LoadedParticipant, LoadedSegment, NewArtifact, NewParticipant,
-    SourceType,
+    ArtifactListItem, EnrichmentStatus, LoadedArtifactForEnrichment, LoadedArtifactRecord,
+    LoadedParticipant, LoadedSegment, NewArtifact, NewParticipant, SourceType,
 };
 use crate::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 
@@ -162,10 +161,10 @@ pub fn list_artifacts(conn: &Connection) -> StorageResult<Vec<ArtifactListItem>>
     Ok(artifacts)
 }
 
-pub fn load_conversation_for_enrichment(
+pub fn load_artifact_for_enrichment(
     conn: &Connection,
     artifact_id: &str,
-) -> StorageResult<Option<LoadedConversationForEnrichment>> {
+) -> StorageResult<Option<LoadedArtifactForEnrichment>> {
     let artifact_row = conn
         .query_row_as::<(String, String, String, Option<String>)>(
             "SELECT artifact_id, import_id, source_type, title \
@@ -187,7 +186,7 @@ pub fn load_conversation_for_enrichment(
             value: source_type_str,
         }
     })?;
-    let artifact = LoadedArtifactForEnrichment {
+    let artifact = LoadedArtifactRecord {
         artifact_id: artifact_id_value,
         import_id,
         source_type,
@@ -277,7 +276,7 @@ pub fn load_conversation_for_enrichment(
         });
     }
 
-    Ok(Some(LoadedConversationForEnrichment {
+    Ok(Some(LoadedArtifactForEnrichment {
         artifact,
         participants,
         segments,

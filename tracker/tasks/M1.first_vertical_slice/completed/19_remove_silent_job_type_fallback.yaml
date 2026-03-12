@@ -10,10 +10,10 @@ labels: [flash-candidate, jobs, oracle, safety]
 depends_on: ["06"]
 description: |
   Oracle job loading currently maps unknown `job_type` values to
-  `JobType::ConversationEnrichment` with no logging or error. That hides schema
+  `JobType::ArtifactEnrichment` with no logging or error. That hides schema
   drift or bad data and can cause the worker to process the wrong job shape.
 acceptance_criteria:
-  - Loading a row with an unknown `job_type` no longer silently coerces it to `conversation_enrichment`.
+  - Loading a row with an unknown `job_type` no longer silently coerces it to `artifact_enrichment`.
   - The code either returns a `StorageError` or otherwise fails loudly with a clear message.
   - The success path for known job types remains unchanged.
   - Tests cover at least one unknown job type case if there is already test coverage in this area.
@@ -22,7 +22,7 @@ files_touched:
   - src/error.rs
   - tests/oracle_enrichment_job.rs
 implementation_plan: |
-  - Replace `unwrap_or(JobType::ConversationEnrichment)` in `claim_next_job` with explicit handling for `None`.
+  - Replace `unwrap_or(JobType::ArtifactEnrichment)` in `claim_next_job` with explicit handling for `None`.
   - Prefer returning a typed `StorageError` rather than logging and continuing.
   - Keep the fix narrow: this task is about read-path validation, not redesigning job-type extensibility.
 test_plan: |

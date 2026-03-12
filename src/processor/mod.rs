@@ -3,7 +3,7 @@ use thiserror::Error;
 use crate::storage::types::{LoadedParticipant, LoadedSegment, ScopeType, SourceType};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConversationProcessorInput {
+pub struct ArtifactProcessorInput {
     pub artifact_id: String,
     pub import_id: String,
     pub source_type: SourceType,
@@ -39,7 +39,7 @@ pub struct MemoryOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConversationProcessorOutput {
+pub struct ArtifactProcessorOutput {
     pub pipeline_name: String,
     pub pipeline_version: String,
     pub summary: SummaryOutput,
@@ -47,21 +47,21 @@ pub struct ConversationProcessorOutput {
     pub memories: Vec<MemoryOutput>,
 }
 
-pub trait ConversationProcessor {
+pub trait ArtifactProcessor {
     fn process(
         &self,
-        input: &ConversationProcessorInput,
-    ) -> Result<ConversationProcessorOutput, ProcessorError>;
+        input: &ArtifactProcessorInput,
+    ) -> Result<ArtifactProcessorOutput, ProcessorError>;
 }
 
 #[derive(Debug, Default)]
 pub struct StubProcessor;
 
-impl ConversationProcessor for StubProcessor {
+impl ArtifactProcessor for StubProcessor {
     fn process(
         &self,
-        input: &ConversationProcessorInput,
-    ) -> Result<ConversationProcessorOutput, ProcessorError> {
+        input: &ArtifactProcessorInput,
+    ) -> Result<ArtifactProcessorOutput, ProcessorError> {
         let first_segment_id = input
             .segments
             .first()
@@ -77,7 +77,7 @@ impl ConversationProcessor for StubProcessor {
             .clone()
             .unwrap_or_else(|| format!("Artifact {}", input.artifact_id));
 
-        Ok(ConversationProcessorOutput {
+        Ok(ArtifactProcessorOutput {
             pipeline_name: "stub_enrichment".to_string(),
             pipeline_version: "v1".to_string(),
             summary: SummaryOutput {
@@ -100,12 +100,12 @@ impl ConversationProcessor for StubProcessor {
                 evidence_segment_ids: evidence_segment_ids.clone(),
             }],
             memories: vec![MemoryOutput {
-                title: Some("Conversation memory".to_string()),
+                title: Some("Artifact memory".to_string()),
                 body_text: format!(
                     "Stub memory for artifact {} derived from {} segments.",
                     input.artifact_id, segment_count
                 ),
-                memory_type: "conversation_fact".to_string(),
+                memory_type: "artifact_fact".to_string(),
                 memory_scope: ScopeType::Artifact,
                 memory_scope_value: input.artifact_id.clone(),
                 evidence_segment_ids,
@@ -114,21 +114,21 @@ impl ConversationProcessor for StubProcessor {
     }
 }
 
-pub trait ConversationProcessorFactory: Send + Sync {
+pub trait ArtifactProcessorFactory: Send + Sync {
     fn build(
         &self,
         tier: crate::storage::types::EnrichmentTier,
-    ) -> Result<Box<dyn ConversationProcessor>, ProcessorError>;
+    ) -> Result<Box<dyn ArtifactProcessor>, ProcessorError>;
 }
 
 #[derive(Debug, Default)]
 pub struct StubProcessorFactory;
 
-impl ConversationProcessorFactory for StubProcessorFactory {
+impl ArtifactProcessorFactory for StubProcessorFactory {
     fn build(
         &self,
         tier: crate::storage::types::EnrichmentTier,
-    ) -> Result<Box<dyn ConversationProcessor>, ProcessorError> {
+    ) -> Result<Box<dyn ArtifactProcessor>, ProcessorError> {
         match tier {
             crate::storage::types::EnrichmentTier::Standard => Ok(Box::new(StubProcessor)),
             unsupported => Err(ProcessorError::UnsupportedTier {

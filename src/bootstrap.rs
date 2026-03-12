@@ -44,11 +44,11 @@ impl ArtifactReadStore for DelegatingArchiveAppService {
         self.archive_store.list_artifacts()
     }
 
-    fn load_conversation_for_enrichment(
+    fn load_artifact_for_enrichment(
         &self,
         artifact_id: &str,
-    ) -> crate::error::StorageResult<Option<crate::storage::LoadedConversationForEnrichment>> {
-        self.archive_store.load_conversation_for_enrichment(artifact_id)
+    ) -> crate::error::StorageResult<Option<crate::storage::LoadedArtifactForEnrichment>> {
+        self.archive_store.load_artifact_for_enrichment(artifact_id)
     }
 }
 

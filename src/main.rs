@@ -236,11 +236,11 @@ mod tests {
             Ok(self.artifacts.clone())
         }
 
-        fn load_conversation_for_enrichment(
+        fn load_artifact_for_enrichment(
             &self,
             _artifact_id: &str,
         ) -> open_archive::error::StorageResult<
-            Option<open_archive::storage::LoadedConversationForEnrichment>,
+            Option<open_archive::storage::LoadedArtifactForEnrichment>,
         > {
             Ok(None)
         }

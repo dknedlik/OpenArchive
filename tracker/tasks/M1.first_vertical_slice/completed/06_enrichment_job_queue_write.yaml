@@ -13,7 +13,7 @@ description: |
   now without coupling execution to the importer, while keeping the same job
   shape usable later by MQ-backed or other out-of-process executors.
 acceptance_criteria:
-  - The `conversation_enrichment` payload schema is documented and self-contained enough for worker execution outside the importer process.
+  - The `artifact_enrichment` payload schema is documented and self-contained enough for worker execution outside the importer process.
   - Storage code exposes worker-facing lifecycle operations for claim, mark-running, complete, fail, and retryable transitions.
   - Claim semantics are safe under concurrent workers and rely on the database as the source of truth.
   - Job lifecycle fields (`attempt_count`, `claimed_by`, `claimed_at`, `available_at`, `last_error_message`) have explicit slice-one semantics.
@@ -31,7 +31,7 @@ files_touched:
   - tests/postgres_enrichment_job.rs
   - tests/support/mod.rs
 implementation_plan: |
-  - Document the minimal `conversation_enrichment` payload schema and keep it independent of in-process worker implementation details.
+  - Document the minimal `artifact_enrichment` payload schema and keep it independent of in-process worker implementation details.
   - Add worker-facing storage operations against `oa_enrichment_job` that model claim and lifecycle updates explicitly.
   - Keep the contract narrow enough that the same payload and lifecycle can later be driven by MQ-delivered work instead of DB polling.
 test_plan: |

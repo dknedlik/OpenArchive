@@ -111,7 +111,7 @@ CREATE INDEX ix_oa_segment_participant_id
 CREATE TABLE oa_enrichment_job (
     job_id TEXT PRIMARY KEY,
     artifact_id TEXT NOT NULL REFERENCES oa_artifact (artifact_id) ON DELETE CASCADE,
-    job_type TEXT NOT NULL CHECK (job_type IN ('conversation_enrichment')),
+    job_type TEXT NOT NULL CHECK (job_type IN ('artifact_enrichment')),
     job_status TEXT NOT NULL CHECK (
         job_status IN ('pending', 'running', 'completed', 'partial', 'failed', 'retryable')
     ),

@@ -1,8 +1,7 @@
 use crate::error::StorageResult;
 use crate::storage::types::{
-    ArtifactListItem, EnrichmentStatus, LoadedArtifactForEnrichment,
-    LoadedConversationForEnrichment, LoadedParticipant, LoadedSegment, NewArtifact, NewParticipant,
-    SourceType,
+    ArtifactListItem, EnrichmentStatus, LoadedArtifactForEnrichment, LoadedArtifactRecord,
+    LoadedParticipant, LoadedSegment, NewArtifact, NewParticipant, SourceType,
 };
 use crate::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 
@@ -136,10 +135,10 @@ pub fn list_artifacts(client: &mut postgres::Client) -> StorageResult<Vec<Artifa
     Ok(artifacts)
 }
 
-pub fn load_conversation_for_enrichment(
+pub fn load_artifact_for_enrichment(
     client: &mut postgres::Client,
     artifact_id: &str,
-) -> StorageResult<Option<LoadedConversationForEnrichment>> {
+) -> StorageResult<Option<LoadedArtifactForEnrichment>> {
     let artifact_row = client
         .query_opt(
             "SELECT artifact_id, import_id, source_type, title \
@@ -161,7 +160,7 @@ pub fn load_conversation_for_enrichment(
             value: source_type_str,
         }
     })?;
-    let artifact = LoadedArtifactForEnrichment {
+    let artifact = LoadedArtifactRecord {
         artifact_id: artifact_id_value.clone(),
         import_id,
         source_type,
@@ -247,7 +246,7 @@ pub fn load_conversation_for_enrichment(
         });
     }
 
-    Ok(Some(LoadedConversationForEnrichment {
+    Ok(Some(LoadedArtifactForEnrichment {
         artifact,
         participants,
         segments,

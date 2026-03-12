@@ -1,10 +1,10 @@
 use crate::processor::{
-    ConversationProcessorFactory, ConversationProcessorInput, ConversationProcessorOutput,
+    ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
     StubProcessorFactory,
 };
 use crate::shutdown::ShutdownToken;
 use crate::storage::{
-    ArtifactReadStore, ClaimedJob, ClassificationObjectJson, ConversationEnrichmentPayload,
+    ArtifactReadStore, ClaimedJob, ClassificationObjectJson, ArtifactEnrichmentPayload,
     DerivationRunStatus, DerivationRunType, DerivedMetadataWriteStore, DerivedObjectPayload,
     EnrichmentJobLifecycleStore, EvidenceRole, InputScopeType, MemoryObjectJson, NewDerivationRun,
     NewDerivedObject, NewEvidenceLink, ObjectStatus, OriginKind, ScopeType, SummaryObjectJson,
@@ -27,7 +27,7 @@ fn enrichment_worker(
     job_store: Arc<dyn EnrichmentJobLifecycleStore>,
     read_store: Arc<dyn ArtifactReadStore>,
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
-    processor_factory: Arc<dyn ConversationProcessorFactory>,
+    processor_factory: Arc<dyn ArtifactProcessorFactory>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
 ) {
@@ -71,13 +71,13 @@ fn process_claimed_job(
     job_store: &dyn EnrichmentJobLifecycleStore,
     read_store: &dyn ArtifactReadStore,
     derived_store: &dyn DerivedMetadataWriteStore,
-    processor_factory: &dyn ConversationProcessorFactory,
+    processor_factory: &dyn ArtifactProcessorFactory,
 ) -> std::result::Result<(), String> {
-    let payload = ConversationEnrichmentPayload::from_json(&claimed_job.payload_json)
+    let payload = ArtifactEnrichmentPayload::from_json(&claimed_job.payload_json)
         .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to parse payload JSON", err))?;
 
     let loaded = read_store
-        .load_conversation_for_enrichment(&claimed_job.artifact_id)
+        .load_artifact_for_enrichment(&claimed_job.artifact_id)
         .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to load artifact for enrichment", err))?
         .ok_or_else(|| {
             fail_job_message(
@@ -88,7 +88,7 @@ fn process_claimed_job(
             )
         })?;
 
-    let processor_input = ConversationProcessorInput {
+    let processor_input = ArtifactProcessorInput {
         artifact_id: loaded.artifact.artifact_id.clone(),
         import_id: payload.import_id.clone(),
         source_type: crate::storage::SourceType::from_str(&payload.source_type)
@@ -143,8 +143,8 @@ fn fail_job_message(
 
 fn build_derivation_attempt(
     claimed_job: &ClaimedJob,
-    input: &ConversationProcessorInput,
-    output: &ConversationProcessorOutput,
+    input: &ArtifactProcessorInput,
+    output: &ArtifactProcessorOutput,
 ) -> WriteDerivationAttempt {
     let derivation_run_id = new_id("drvrun");
     let mut objects = Vec::with_capacity(1 + output.classifications.len() + output.memories.len());
@@ -166,7 +166,7 @@ fn build_derivation_attempt(
                 title: output.summary.title.clone(),
                 body_text: output.summary.body_text.clone(),
                 object_json: Some(SummaryObjectJson {
-                    summary_kind: Some("conversation".to_string()),
+                    summary_kind: Some("artifact".to_string()),
                     summary_version: Some(output.pipeline_version.clone()),
                 }),
             },
@@ -311,7 +311,7 @@ pub fn start_enrichment_workers_with_factory(
     read_store: Arc<dyn ArtifactReadStore>,
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     shutdown: ShutdownToken,
-    processor_factory: Arc<dyn ConversationProcessorFactory>,
+    processor_factory: Arc<dyn ArtifactProcessorFactory>,
 ) -> Result<Vec<thread::JoinHandle<()>>, anyhow::Error> {
     let pid = std::process::id();
     let poll_interval = Duration::from_millis(config.enrichment_poll_interval_ms);
@@ -348,10 +348,10 @@ pub fn start_enrichment_workers_with_factory(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::processor::{ConversationProcessor, ConversationProcessorFactory, ProcessorError};
+    use crate::processor::{ArtifactProcessor, ArtifactProcessorFactory, ProcessorError};
     use crate::storage::types::{
-        EnrichmentTier, LoadedArtifactForEnrichment, LoadedConversationForEnrichment,
-        LoadedParticipant, LoadedSegment, RetryOutcome,
+        EnrichmentTier, LoadedArtifactForEnrichment, LoadedArtifactRecord, LoadedParticipant,
+        LoadedSegment, RetryOutcome,
     };
     use crate::storage::{ArtifactListItem, ArtifactReadStore};
     use std::sync::Mutex;
@@ -412,7 +412,7 @@ mod tests {
     }
 
     struct MockReadStore {
-        loaded: Option<LoadedConversationForEnrichment>,
+        loaded: Option<LoadedArtifactForEnrichment>,
     }
 
     impl ArtifactReadStore for MockReadStore {
@@ -420,10 +420,10 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn load_conversation_for_enrichment(
+        fn load_artifact_for_enrichment(
             &self,
             _artifact_id: &str,
-        ) -> crate::error::StorageResult<Option<LoadedConversationForEnrichment>> {
+        ) -> crate::error::StorageResult<Option<LoadedArtifactForEnrichment>> {
             Ok(self.loaded.clone())
         }
     }
@@ -467,11 +467,11 @@ mod tests {
 
     struct FailingFactory;
 
-    impl ConversationProcessorFactory for FailingFactory {
+    impl ArtifactProcessorFactory for FailingFactory {
         fn build(
             &self,
             _tier: EnrichmentTier,
-        ) -> std::result::Result<Box<dyn ConversationProcessor>, ProcessorError> {
+        ) -> std::result::Result<Box<dyn ArtifactProcessor>, ProcessorError> {
             Err(ProcessorError::Message {
                 message: "boom".to_string(),
             })
@@ -482,8 +482,8 @@ mod tests {
     fn process_claimed_job_persists_derivation_attempt_and_completes_job() {
         let job_store = MockJobStore::new();
         let read_store = MockReadStore {
-            loaded: Some(LoadedConversationForEnrichment {
-                artifact: LoadedArtifactForEnrichment {
+            loaded: Some(LoadedArtifactForEnrichment {
+                artifact: LoadedArtifactRecord {
                     artifact_id: "artifact-1".to_string(),
                     import_id: "import-1".to_string(),
                     source_type: crate::storage::SourceType::ChatGptExport,
@@ -510,13 +510,13 @@ mod tests {
         let claimed_job = ClaimedJob {
             job_id: "job-1".to_string(),
             artifact_id: "artifact-1".to_string(),
-            job_type: crate::storage::JobType::ConversationEnrichment,
+            job_type: crate::storage::JobType::ArtifactEnrichment,
             enrichment_tier: EnrichmentTier::Standard,
             spawned_by_job_id: None,
             attempt_count: 1,
             max_attempts: 3,
             required_capabilities: vec!["text".to_string()],
-            payload_json: ConversationEnrichmentPayload::new_v1(
+            payload_json: ArtifactEnrichmentPayload::new_v1(
                 "artifact-1",
                 "import-1",
                 crate::storage::SourceType::ChatGptExport,
@@ -550,13 +550,13 @@ mod tests {
         let claimed_job = ClaimedJob {
             job_id: "job-2".to_string(),
             artifact_id: "artifact-2".to_string(),
-            job_type: crate::storage::JobType::ConversationEnrichment,
+            job_type: crate::storage::JobType::ArtifactEnrichment,
             enrichment_tier: EnrichmentTier::Quality,
             spawned_by_job_id: None,
             attempt_count: 1,
             max_attempts: 3,
             required_capabilities: vec!["text".to_string()],
-            payload_json: ConversationEnrichmentPayload::new_v1(
+            payload_json: ArtifactEnrichmentPayload::new_v1(
                 "artifact-2",
                 "import-2",
                 crate::storage::SourceType::ChatGptExport,

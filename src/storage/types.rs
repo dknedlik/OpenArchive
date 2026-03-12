@@ -181,13 +181,13 @@ impl SegmentType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobType {
-    ConversationEnrichment,
+    ArtifactEnrichment,
 }
 
 impl JobType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            JobType::ConversationEnrichment => "conversation_enrichment",
+            JobType::ArtifactEnrichment => "artifact_enrichment",
         }
     }
 }
@@ -195,7 +195,7 @@ impl JobType {
 impl JobType {
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
-            "conversation_enrichment" => Some(Self::ConversationEnrichment),
+            "artifact_enrichment" => Some(Self::ArtifactEnrichment),
             _ => None,
         }
     }
@@ -684,7 +684,7 @@ pub struct NewEvidenceLink {
 // Job payload contract
 // ---------------------------------------------------------------------------
 
-/// Documented contract for the `conversation_enrichment` job payload.
+/// Documented contract for the `artifact_enrichment` job payload.
 ///
 /// This is the exact shape stored in `oa_enrichment_job.payload_json`. The
 /// payload is self-contained: a future out-of-process worker can execute the
@@ -698,14 +698,14 @@ pub struct NewEvidenceLink {
 /// * `source_type` — e.g. `"chatgpt_export"`. Tells the worker which
 ///   enrichment pipeline to apply.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct ConversationEnrichmentPayload {
+pub struct ArtifactEnrichmentPayload {
     pub schema_version: String,
     pub artifact_id: String,
     pub import_id: String,
     pub source_type: String,
 }
 
-impl ConversationEnrichmentPayload {
+impl ArtifactEnrichmentPayload {
     /// Build a slice-one payload with `schema_version = "1"`.
     pub fn new_v1(artifact_id: &str, import_id: &str, source_type: SourceType) -> Self {
         Self {
@@ -718,7 +718,7 @@ impl ConversationEnrichmentPayload {
 
     /// Serialize to a JSON string suitable for `oa_enrichment_job.payload_json`.
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).expect("ConversationEnrichmentPayload is always serializable")
+        serde_json::to_string(self).expect("ArtifactEnrichmentPayload is always serializable")
     }
 
     /// Deserialize from the `payload_json` column.
@@ -768,9 +768,9 @@ pub struct ArtifactListItem {
     pub enrichment_status: EnrichmentStatus,
 }
 
-/// Worker-facing conversation metadata assembled from canonical relational rows.
+/// Worker-facing artifact metadata assembled from canonical relational rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoadedArtifactForEnrichment {
+pub struct LoadedArtifactRecord {
     pub artifact_id: String,
     pub import_id: String,
     pub source_type: SourceType,
@@ -797,8 +797,8 @@ pub struct LoadedSegment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoadedConversationForEnrichment {
-    pub artifact: LoadedArtifactForEnrichment,
+pub struct LoadedArtifactForEnrichment {
+    pub artifact: LoadedArtifactRecord,
     pub participants: Vec<LoadedParticipant>,
     pub segments: Vec<LoadedSegment>,
 }

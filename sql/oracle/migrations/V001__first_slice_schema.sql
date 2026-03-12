@@ -201,7 +201,7 @@ CREATE TABLE oa_enrichment_job (
         REFERENCES oa_artifact (artifact_id)
         ON DELETE CASCADE,
     CONSTRAINT ck_oa_job_type CHECK (
-        job_type IN ('conversation_enrichment')
+        job_type IN ('artifact_enrichment')
     ),
     CONSTRAINT ck_oa_job_status CHECK (
         job_status IN (

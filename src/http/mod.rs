@@ -163,10 +163,10 @@ mod tests {
             Ok(self.artifacts.clone())
         }
 
-        fn load_conversation_for_enrichment(
+        fn load_artifact_for_enrichment(
             &self,
             _artifact_id: &str,
-        ) -> crate::error::StorageResult<Option<crate::storage::LoadedConversationForEnrichment>> {
+        ) -> crate::error::StorageResult<Option<crate::storage::LoadedArtifactForEnrichment>> {
             Ok(None)
         }
     }

@@ -54,12 +54,12 @@ impl ArtifactReadStore for OracleImportWriteStore {
         artifact::list_artifacts(&conn)
     }
 
-    fn load_conversation_for_enrichment(
+    fn load_artifact_for_enrichment(
         &self,
         artifact_id: &str,
-    ) -> StorageResult<Option<crate::storage::types::LoadedConversationForEnrichment>> {
+    ) -> StorageResult<Option<crate::storage::types::LoadedArtifactForEnrichment>> {
         let conn = db::connect(&self.config)?;
-        artifact::load_conversation_for_enrichment(&conn, artifact_id)
+        artifact::load_artifact_for_enrichment(&conn, artifact_id)
     }
 }
 

@@ -3,11 +3,11 @@ use open_archive::enrichment_worker::{
     format_worker_id, start_enrichment_workers, start_enrichment_workers_with_factory,
 };
 use open_archive::error::StorageResult;
-use open_archive::processor::{ConversationProcessor, ConversationProcessorFactory, ProcessorError};
+use open_archive::processor::{ArtifactProcessor, ArtifactProcessorFactory, ProcessorError};
 use open_archive::shutdown::ShutdownToken;
 use open_archive::storage::types::{
-    ClaimedJob, ConversationEnrichmentPayload, EnrichmentTier, LoadedArtifactForEnrichment,
-    LoadedConversationForEnrichment, LoadedParticipant, LoadedSegment, RetryOutcome, SourceType,
+    ArtifactEnrichmentPayload, ClaimedJob, EnrichmentTier, LoadedArtifactForEnrichment,
+    LoadedArtifactRecord, LoadedParticipant, LoadedSegment, RetryOutcome, SourceType,
 };
 use open_archive::storage::{
     ArtifactListItem, ArtifactReadStore, DerivationWriteResult, DerivedMetadataWriteStore,
@@ -68,7 +68,7 @@ fn test_enabled_workers_start_and_shutdown() {
 fn test_worker_persists_stub_outputs_and_completes_job() {
     let config = test_config(1);
     let job_store = Arc::new(SingleJobStore::new(valid_claimed_job()));
-    let read_store = Arc::new(FixedReadStore::with_sample_conversation());
+    let read_store = Arc::new(FixedReadStore::with_sample_artifact());
     let derived_store = Arc::new(MockDerivedStore::default());
     let shutdown = ShutdownToken::new();
     let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
@@ -104,7 +104,7 @@ fn test_worker_fails_job_when_factory_rejects_claimed_tier() {
     claimed_job.enrichment_tier = EnrichmentTier::Quality;
 
     let job_store = Arc::new(SingleJobStore::new(claimed_job));
-    let read_store = Arc::new(FixedReadStore::with_sample_conversation());
+    let read_store = Arc::new(FixedReadStore::with_sample_artifact());
     let derived_store = Arc::new(MockDerivedStore::default());
     let shutdown = ShutdownToken::new();
     let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
@@ -141,7 +141,7 @@ fn test_config(enrichment_worker_count: usize) -> HttpConfig {
 }
 
 fn valid_claimed_job() -> ClaimedJob {
-    let payload = ConversationEnrichmentPayload::new_v1(
+    let payload = ArtifactEnrichmentPayload::new_v1(
         "artifact-1",
         "import-1",
         SourceType::ChatGptExport,
@@ -149,7 +149,7 @@ fn valid_claimed_job() -> ClaimedJob {
     ClaimedJob {
         job_id: "job-1".to_string(),
         artifact_id: "artifact-1".to_string(),
-        job_type: JobType::ConversationEnrichment,
+        job_type: JobType::ArtifactEnrichment,
         enrichment_tier: EnrichmentTier::Standard,
         spawned_by_job_id: None,
         attempt_count: 1,
@@ -243,18 +243,18 @@ impl EnrichmentJobLifecycleStore for EmptyQueueMockStore {
 
 #[derive(Default)]
 struct FixedReadStore {
-    loaded: Option<LoadedConversationForEnrichment>,
+    loaded: Option<LoadedArtifactForEnrichment>,
 }
 
 impl FixedReadStore {
-    fn with_sample_conversation() -> Self {
+    fn with_sample_artifact() -> Self {
         Self {
-            loaded: Some(LoadedConversationForEnrichment {
-                artifact: LoadedArtifactForEnrichment {
+            loaded: Some(LoadedArtifactForEnrichment {
+                artifact: LoadedArtifactRecord {
                     artifact_id: "artifact-1".to_string(),
                     import_id: "import-1".to_string(),
                     source_type: SourceType::ChatGptExport,
-                    title: Some("Test conversation".to_string()),
+                    title: Some("Test artifact".to_string()),
                 },
                 participants: vec![
                     LoadedParticipant {
@@ -300,10 +300,10 @@ impl ArtifactReadStore for FixedReadStore {
         Ok(Vec::new())
     }
 
-    fn load_conversation_for_enrichment(
+    fn load_artifact_for_enrichment(
         &self,
         _artifact_id: &str,
-    ) -> StorageResult<Option<LoadedConversationForEnrichment>> {
+    ) -> StorageResult<Option<LoadedArtifactForEnrichment>> {
         Ok(self.loaded.clone())
     }
 }
@@ -340,11 +340,11 @@ impl DerivedMetadataWriteStore for MockDerivedStore {
 
 struct RejectAllFactory;
 
-impl ConversationProcessorFactory for RejectAllFactory {
+impl ArtifactProcessorFactory for RejectAllFactory {
     fn build(
         &self,
         _tier: EnrichmentTier,
-    ) -> std::result::Result<Box<dyn ConversationProcessor>, ProcessorError> {
+    ) -> std::result::Result<Box<dyn ArtifactProcessor>, ProcessorError> {
         Err(ProcessorError::Message {
             message: "tier rejected".to_string(),
         })

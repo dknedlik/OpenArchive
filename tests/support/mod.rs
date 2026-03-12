@@ -2,7 +2,7 @@
 
 use open_archive::object_store::StoredObject;
 use open_archive::storage::{
-    ArtifactClass, ArtifactIngestResult, ArtifactStatus, ConversationEnrichmentPayload,
+    ArtifactClass, ArtifactIngestResult, ArtifactStatus, ArtifactEnrichmentPayload,
     ClassificationObjectJson, DerivedMetadataWriteStore, DerivedObjectPayload, DerivationRunStatus,
     DerivationRunType,
     EnrichmentJobLifecycleStore, EnrichmentStatus, ImportStatus, ImportWriteStore, JobStatus,
@@ -82,7 +82,7 @@ pub fn make_test_import_fixture_with_max_attempts(
     let conv_hash = sha256_hex(&format!("conv-hash-{suffix}"));
 
     let enrichment_payload =
-        ConversationEnrichmentPayload::new_v1(&artifact_id, &import_id, SourceType::ChatGptExport);
+        ArtifactEnrichmentPayload::new_v1(&artifact_id, &import_id, SourceType::ChatGptExport);
 
     let write_set = WriteImportSet {
         payload_object: NewImportObjectRef {
@@ -201,7 +201,7 @@ pub fn make_test_import_fixture_with_max_attempts(
             job: NewEnrichmentJob {
                 job_id: job_id.clone(),
                 artifact_id: artifact_id.clone(),
-                job_type: JobType::ConversationEnrichment,
+                job_type: JobType::ArtifactEnrichment,
                 enrichment_tier: open_archive::storage::EnrichmentTier::Standard,
                 spawned_by_job_id: None,
                 job_status: JobStatus::Pending,
@@ -465,7 +465,7 @@ pub fn contract_claim_complete_happy_path<H: ProviderHarness>(harness: &H) {
 
     assert_eq!(claimed.job_id, expected_job_id);
     assert_eq!(claimed.artifact_id, expected_artifact_id);
-    assert_eq!(claimed.job_type, JobType::ConversationEnrichment);
+    assert_eq!(claimed.job_type, JobType::ArtifactEnrichment);
     assert_eq!(claimed.attempt_count, 1);
     assert_eq!(claimed.max_attempts, 3);
     assert!(!claimed.payload_json.is_empty());
@@ -677,9 +677,9 @@ pub fn contract_payload_matches_documented_schema<H: ProviderHarness>(harness: &
         .expect("claim_next_job should succeed")
         .expect("should claim the pending job");
 
-    let payload = ConversationEnrichmentPayload::from_json(&claimed.payload_json)
+    let payload = ArtifactEnrichmentPayload::from_json(&claimed.payload_json)
         .expect("payload_json should deserialize");
-    let expected = ConversationEnrichmentPayload::new_v1(
+    let expected = ArtifactEnrichmentPayload::new_v1(
         &artifact_id,
         &import_id,
         SourceType::ChatGptExport,
