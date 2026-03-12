@@ -43,6 +43,13 @@ impl ArtifactReadStore for DelegatingArchiveAppService {
     fn list_artifacts(&self) -> crate::error::StorageResult<Vec<crate::storage::ArtifactListItem>> {
         self.archive_store.list_artifacts()
     }
+
+    fn load_conversation_for_enrichment(
+        &self,
+        artifact_id: &str,
+    ) -> crate::error::StorageResult<Option<crate::storage::LoadedConversationForEnrichment>> {
+        self.archive_store.load_conversation_for_enrichment(artifact_id)
+    }
 }
 
 impl ObjectStore for DelegatingArchiveAppService {
@@ -70,7 +77,9 @@ impl ObjectStore for DelegatingArchiveAppService {
 
 pub struct ServiceBundle {
     pub archive_service: Arc<dyn ArchiveAppService>,
+    pub read_store: Arc<dyn ArtifactReadStore>,
     pub enrichment_store: Arc<dyn EnrichmentJobLifecycleStore>,
+    pub derived_store: Arc<dyn crate::storage::DerivedMetadataWriteStore>,
 }
 
 pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
@@ -84,20 +93,36 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
     };
 
     match &config.relational_store {
-        RelationalStoreConfig::Postgres(pg_config) => Ok(ServiceBundle {
-            archive_service: Arc::new(DelegatingArchiveAppService {
-                archive_store: Arc::new(PostgresImportWriteStore::new(pg_config.clone())),
-                object_store,
-            }),
-            enrichment_store: Arc::new(PostgresEnrichmentJobStore::new(pg_config.clone())),
-        }),
-        RelationalStoreConfig::Oracle(db_config) => Ok(ServiceBundle {
-            archive_service: Arc::new(DelegatingArchiveAppService {
-                archive_store: Arc::new(OracleImportWriteStore::new(db_config.clone())),
-                object_store,
-            }),
-            enrichment_store: Arc::new(OracleEnrichmentJobStore::new(db_config.clone())),
-        }),
+        RelationalStoreConfig::Postgres(pg_config) => {
+            let archive_store: Arc<dyn ArchiveStore> =
+                Arc::new(PostgresImportWriteStore::new(pg_config.clone()));
+            Ok(ServiceBundle {
+                archive_service: Arc::new(DelegatingArchiveAppService {
+                    archive_store: Arc::clone(&archive_store),
+                    object_store,
+                }),
+                read_store: archive_store,
+                enrichment_store: Arc::new(PostgresEnrichmentJobStore::new(pg_config.clone())),
+                derived_store: Arc::new(crate::storage::PostgresDerivedMetadataStore::new(
+                    pg_config.clone(),
+                )),
+            })
+        }
+        RelationalStoreConfig::Oracle(db_config) => {
+            let archive_store: Arc<dyn ArchiveStore> =
+                Arc::new(OracleImportWriteStore::new(db_config.clone()));
+            Ok(ServiceBundle {
+                archive_service: Arc::new(DelegatingArchiveAppService {
+                    archive_store: Arc::clone(&archive_store),
+                    object_store,
+                }),
+                read_store: archive_store,
+                enrichment_store: Arc::new(OracleEnrichmentJobStore::new(db_config.clone())),
+                derived_store: Arc::new(crate::storage::OracleDerivedMetadataStore::new(
+                    db_config.clone(),
+                )),
+            })
+        }
     }
 }
 

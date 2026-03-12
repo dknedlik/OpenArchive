@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16
+    profiles: ["postgres"]
     environment:
       POSTGRES_DB: ${OA_POSTGRES_DB:-openarchive}
       POSTGRES_USER: ${OA_POSTGRES_USER:-openarchive}
@@ -22,9 +23,23 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+        required: false
+      oracle:
+        condition: service_started
+        required: false
     environment:
       OA_RELATIONAL_STORE: ${OA_RELATIONAL_STORE:-postgres}
       OA_POSTGRES_URL: ${OA_POSTGRES_URL:-postgres://openarchive:openarchive@postgres:5432/openarchive}
+      OA_ORACLE_CONNECT_STRING: ${OA_DOCKER_ORACLE_CONNECT_STRING:-oracle:1521/FREEPDB1}
+      OA_ORACLE_USERNAME: ${OA_ORACLE_USERNAME:-system}
+      OA_ORACLE_PASSWORD: ${OA_ORACLE_PASSWORD:-openarchive}
+      OA_ORACLE_CALL_TIMEOUT_MS: ${OA_ORACLE_CALL_TIMEOUT_MS:-30000}
+      OA_DB_POOL_MIN: ${OA_DB_POOL_MIN:-1}
+      OA_DB_POOL_MAX: ${OA_DB_POOL_MAX:-8}
+      OA_DB_POOL_INCREMENT: ${OA_DB_POOL_INCREMENT:-1}
+      OA_DB_POOL_STMT_CACHE_SIZE: ${OA_DB_POOL_STMT_CACHE_SIZE:-50}
+      OA_DB_POOL_GET_TIMEOUT_MS: ${OA_DB_POOL_GET_TIMEOUT_MS:-30000}
+      OA_DB_POOL_PING_INTERVAL_MS: ${OA_DB_POOL_PING_INTERVAL_MS:-60000}
       OA_OBJECT_STORE: ${OA_OBJECT_STORE:-local_fs}
       OA_OBJECT_STORE_ROOT: ${OA_OBJECT_STORE_ROOT:-/var/lib/openarchive/objects}
       OA_S3_ENDPOINT: ${OA_S3_ENDPOINT:-}
@@ -58,7 +73,7 @@ services:
       - ollama_data:/root/.ollama
 
   oracle:
-    image: container-registry.oracle.com/database/free:latest-lite
+    image: ${OA_ORACLE_IMAGE:-container-registry.oracle.com/database/free:latest-lite}
     profiles: ["oracle"]
     ports:
       - "1521:1521"

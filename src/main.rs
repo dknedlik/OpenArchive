@@ -68,6 +68,7 @@ fn serve() -> Result<(), anyhow::Error> {
     env_logger::init();
 
     let app_config = AppConfig::from_env().context("failed to load application configuration")?;
+    migrations::migrate(&app_config).context("failed to apply database migrations before serve")?;
     let http_config = app_config.http.clone();
     let services = build_service_bundle(&app_config)
         .context("failed to construct configured service providers")?;
@@ -100,6 +101,8 @@ fn serve() -> Result<(), anyhow::Error> {
         start_enrichment_workers(
             &http_config,
             Arc::clone(&services.enrichment_store),
+            Arc::clone(&services.read_store),
+            Arc::clone(&services.derived_store),
             shutdown.clone(),
         )?
     } else {
@@ -231,6 +234,15 @@ mod tests {
     impl ArtifactReadStore for MockStore {
         fn list_artifacts(&self) -> open_archive::error::StorageResult<Vec<ArtifactListItem>> {
             Ok(self.artifacts.clone())
+        }
+
+        fn load_conversation_for_enrichment(
+            &self,
+            _artifact_id: &str,
+        ) -> open_archive::error::StorageResult<
+            Option<open_archive::storage::LoadedConversationForEnrichment>,
+        > {
+            Ok(None)
         }
     }
 

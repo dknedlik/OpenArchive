@@ -31,3 +31,4 @@ risks: |
   - It is easy to “fix” this by changing behavior for ordinary timestamps. Preserve existing semantics for normal input.
 notes: |
   - This is correctness hardening, not a known production failure. Keep the implementation small and well tested.
+  - `is_finite()` is already present and tested (NaN and INFINITY covered at lines 1263-1264 of the test module). The missing guards are: (1) i64 overflow range check for extreme-but-finite values, and (2) nsecs=1_000_000_000 normalization. Do not re-add the non-finite check or duplicate existing tests.

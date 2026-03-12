@@ -2,7 +2,9 @@ use crate::error::{StorageError, StorageResult};
 use oracle::Connection;
 use oracle::ErrorKind;
 
-use crate::storage::types::{ClaimedJob, JobStatus, JobType, NewEnrichmentJob, RetryOutcome};
+use crate::storage::types::{
+    ClaimedJob, EnrichmentTier, JobStatus, JobType, NewEnrichmentJob, RetryOutcome,
+};
 
 // ---------------------------------------------------------------------------
 // Insert (used during import write path)
@@ -10,18 +12,25 @@ use crate::storage::types::{ClaimedJob, JobStatus, JobType, NewEnrichmentJob, Re
 
 pub fn insert_job(conn: &Connection, j: &NewEnrichmentJob) -> StorageResult<()> {
     let job_type = j.job_type.as_str();
+    let enrichment_tier = j.enrichment_tier.as_str();
     let job_status = j.job_status.as_str();
+    let required_capabilities =
+        serde_json::to_string(&j.required_capabilities).expect("required capabilities serializable");
     conn.execute(
         "INSERT INTO oa_enrichment_job \
-         (job_id, artifact_id, job_type, job_status, max_attempts, priority_no, payload_json) \
-         VALUES (:1, :2, :3, :4, :5, :6, :7)",
+         (job_id, artifact_id, job_type, enrichment_tier, spawned_by_job_id, job_status, \
+          max_attempts, priority_no, required_capabilities, payload_json) \
+         VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)",
         &[
             &j.job_id,
             &j.artifact_id,
             &job_type,
+            &enrichment_tier,
+            &j.spawned_by_job_id,
             &job_status,
             &j.max_attempts,
             &j.priority_no,
+            &required_capabilities,
             &j.payload_json,
         ],
     )
@@ -50,7 +59,8 @@ pub fn claim_next_job(conn: &Connection, worker_id: &str) -> StorageResult<Optio
     // an empty queue.
     let mut rows = conn
         .query(
-            "SELECT job_id, artifact_id, job_type, attempt_count, max_attempts, payload_json \
+            "SELECT job_id, artifact_id, job_type, enrichment_tier, spawned_by_job_id, \
+                    attempt_count, max_attempts, required_capabilities, payload_json \
              FROM oa_enrichment_job \
              WHERE job_status IN ('pending', 'retryable') \
                AND available_at <= SYSTIMESTAMP \
@@ -64,8 +74,18 @@ pub fn claim_next_job(conn: &Connection, worker_id: &str) -> StorageResult<Optio
         Some(row_result) => row_result.map_err(|source| StorageError::ClaimJob { source })?,
         None => return Ok(None),
     };
-    let (job_id, artifact_id, job_type_str, attempt_count, max_attempts, payload_json) = row
-        .get_as::<(String, String, String, i32, i32, String)>()
+    let (
+        job_id,
+        artifact_id,
+        job_type_str,
+        tier_str,
+        spawned_by_job_id,
+        attempt_count,
+        max_attempts,
+        required_capabilities_json,
+        payload_json,
+    ) = row
+        .get_as::<(String, String, String, String, Option<String>, i32, i32, String, String)>()
         .map_err(|source| StorageError::ClaimJob { source })?;
 
     // Validate job_type BEFORE any update to avoid stranding invalid jobs in running state
@@ -73,6 +93,16 @@ pub fn claim_next_job(conn: &Connection, worker_id: &str) -> StorageResult<Optio
         JobType::from_str(&job_type_str).ok_or_else(|| StorageError::InvalidJobType {
             job_id: job_id.clone(),
             job_type: job_type_str.clone(),
+        })?;
+    let enrichment_tier =
+        EnrichmentTier::from_str(&tier_str).ok_or_else(|| StorageError::InvalidEnrichmentTier {
+            job_id: job_id.clone(),
+            value: tier_str.clone(),
+        })?;
+    let required_capabilities: Vec<String> = serde_json::from_str(&required_capabilities_json)
+        .map_err(|err| StorageError::InvalidJobCapabilities {
+            job_id: job_id.clone(),
+            detail: err.to_string(),
         })?;
 
     // Step 2: Update the job to running, increment attempt count, set claim fields.
@@ -100,9 +130,12 @@ pub fn claim_next_job(conn: &Connection, worker_id: &str) -> StorageResult<Optio
         job_id,
         artifact_id,
         job_type,
+        enrichment_tier,
+        spawned_by_job_id,
         // attempt_count reflects the NEW value after increment
         attempt_count: attempt_count + 1,
         max_attempts,
+        required_capabilities,
         payload_json,
     }))
 }

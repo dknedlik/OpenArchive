@@ -27,6 +27,13 @@ impl SourceType {
             SourceType::ChatGptExport => "chatgpt_export",
         }
     }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "chatgpt_export" => Some(Self::ChatGptExport),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,6 +220,29 @@ impl JobStatus {
             JobStatus::Partial => "partial",
             JobStatus::Failed => "failed",
             JobStatus::Retryable => "retryable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrichmentTier {
+    Standard,
+    Quality,
+}
+
+impl EnrichmentTier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EnrichmentTier::Standard => "standard",
+            EnrichmentTier::Quality => "quality",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "standard" => Some(Self::Standard),
+            "quality" => Some(Self::Quality),
+            _ => None,
         }
     }
 }
@@ -513,11 +543,15 @@ pub struct NewEnrichmentJob {
     /// FK to oa_artifact
     pub artifact_id: String,
     pub job_type: JobType,
+    pub enrichment_tier: EnrichmentTier,
+    pub spawned_by_job_id: Option<String>,
     pub job_status: JobStatus,
     /// DDL DEFAULT 3. Must be > 0 (DDL CHECK).
     pub max_attempts: i32,
     /// DDL DEFAULT 100. Must be >= 0 (DDL CHECK).
     pub priority_no: i32,
+    /// Required model capabilities for this job, stored as a JSON array.
+    pub required_capabilities: Vec<String>,
     /// Self-contained JSON payload for future out-of-process execution. NOT NULL in DDL.
     pub payload_json: String,
 }
@@ -706,8 +740,11 @@ pub struct ClaimedJob {
     pub job_id: String,
     pub artifact_id: String,
     pub job_type: JobType,
+    pub enrichment_tier: EnrichmentTier,
+    pub spawned_by_job_id: Option<String>,
     pub attempt_count: i32,
     pub max_attempts: i32,
+    pub required_capabilities: Vec<String>,
     pub payload_json: String,
 }
 
@@ -729,4 +766,39 @@ pub struct ArtifactListItem {
     pub created_at_source: Option<String>,
     pub captured_at: String,
     pub enrichment_status: EnrichmentStatus,
+}
+
+/// Worker-facing conversation metadata assembled from canonical relational rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedArtifactForEnrichment {
+    pub artifact_id: String,
+    pub import_id: String,
+    pub source_type: SourceType,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedParticipant {
+    pub participant_id: String,
+    pub participant_role: ParticipantRole,
+    pub display_name: Option<String>,
+    pub external_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedSegment {
+    pub segment_id: String,
+    pub participant_id: Option<String>,
+    pub participant_role: Option<ParticipantRole>,
+    pub sequence_no: i32,
+    pub text_content: String,
+    pub created_at_source: Option<SourceTimestamp>,
+    pub visibility_status: VisibilityStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedConversationForEnrichment {
+    pub artifact: LoadedArtifactForEnrichment,
+    pub participants: Vec<LoadedParticipant>,
+    pub segments: Vec<LoadedSegment>,
 }

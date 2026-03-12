@@ -502,8 +502,16 @@ fn epoch_to_datetime(epoch: f64) -> Option<DateTime<Utc>> {
     if !epoch.is_finite() {
         return None;
     }
-    let secs = epoch.floor() as i64;
-    let nsecs = ((epoch - epoch.floor()) * 1_000_000_000.0).round() as u32;
+    let secs_floor = epoch.floor();
+    if secs_floor < i64::MIN as f64 || secs_floor > i64::MAX as f64 {
+        return None;
+    }
+    let mut secs = secs_floor as i64;
+    let mut nsecs = ((epoch - secs_floor) * 1_000_000_000.0).round() as u32;
+    if nsecs == 1_000_000_000 {
+        nsecs = 0;
+        secs = secs.checked_add(1)?;
+    }
     Utc.timestamp_opt(secs, nsecs).single()
 }
 
@@ -1262,6 +1270,16 @@ mod tests {
         // Non-finite returns None.
         assert!(epoch_to_datetime(f64::NAN).is_none());
         assert!(epoch_to_datetime(f64::INFINITY).is_none());
+
+        // Extreme but finite values return None (i64 overflow guard).
+        assert!(epoch_to_datetime(1e20).is_none());
+        assert!(epoch_to_datetime(-1e20).is_none());
+
+        // Nanosecond rounding edge case: fractional rounding to 1_000_000_000
+        // should carry into seconds rather than failing.
+        let dt = epoch_to_datetime(1700000000.999999999).unwrap();
+        assert_eq!(dt.timestamp(), 1700000001);
+        assert_eq!(dt.timestamp_subsec_nanos(), 0);
     }
 
     #[test]

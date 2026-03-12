@@ -47,6 +47,14 @@ impl ArtifactReadStore for PostgresImportWriteStore {
         let mut client = postgres_db::connect(&self.config)?;
         artifact::list_artifacts(&mut client)
     }
+
+    fn load_conversation_for_enrichment(
+        &self,
+        artifact_id: &str,
+    ) -> StorageResult<Option<crate::storage::types::LoadedConversationForEnrichment>> {
+        let mut client = postgres_db::connect(&self.config)?;
+        artifact::load_conversation_for_enrichment(&mut client, artifact_id)
+    }
 }
 
 impl ImportWriteStore for PostgresImportWriteStore {

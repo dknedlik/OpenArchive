@@ -432,6 +432,24 @@ pub enum StorageError {
     #[error("invalid job_type '{job_type}' for job {job_id}")]
     InvalidJobType { job_id: String, job_type: String },
 
+    #[error("invalid source_type '{value}' for artifact {artifact_id}")]
+    InvalidSourceType { artifact_id: String, value: String },
+
+    #[error("invalid participant_role '{value}' for participant {participant_id}")]
+    InvalidParticipantRole {
+        participant_id: String,
+        value: String,
+    },
+
+    #[error("invalid visibility_status '{value}' for segment {segment_id}")]
+    InvalidVisibilityStatus { segment_id: String, value: String },
+
+    #[error("invalid enrichment_tier '{value}' for job {job_id}")]
+    InvalidEnrichmentTier { job_id: String, value: String },
+
+    #[error("invalid required_capabilities for job {job_id}: {detail}")]
+    InvalidJobCapabilities { job_id: String, detail: String },
+
     #[error("worker {worker_id} does not own running job {job_id}")]
     JobNotClaimed { job_id: String, worker_id: String },
 

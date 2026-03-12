@@ -1,7 +1,10 @@
 use crate::error::StorageResult;
 use crate::storage::types::{
-    ArtifactListItem, EnrichmentStatus, NewArtifact, NewParticipant, SourceType,
+    ArtifactListItem, EnrichmentStatus, LoadedArtifactForEnrichment,
+    LoadedConversationForEnrichment, LoadedParticipant, LoadedSegment, NewArtifact, NewParticipant,
+    SourceType,
 };
+use crate::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 
 pub fn find_artifact_by_source_hash(
     client: &mut postgres::Client,
@@ -131,6 +134,124 @@ pub fn list_artifacts(client: &mut postgres::Client) -> StorageResult<Vec<Artifa
     }
 
     Ok(artifacts)
+}
+
+pub fn load_conversation_for_enrichment(
+    client: &mut postgres::Client,
+    artifact_id: &str,
+) -> StorageResult<Option<LoadedConversationForEnrichment>> {
+    let artifact_row = client
+        .query_opt(
+            "SELECT artifact_id, import_id, source_type, title \
+             FROM oa_artifact WHERE artifact_id = $1",
+            &[&artifact_id],
+        )
+        .map_err(map_pg_storage_err)?;
+
+    let Some(artifact_row) = artifact_row else {
+        return Ok(None);
+    };
+
+    let artifact_id_value: String = artifact_row.get(0);
+    let import_id: String = artifact_row.get(1);
+    let source_type_str: String = artifact_row.get(2);
+    let source_type = SourceType::from_str(&source_type_str).ok_or_else(|| {
+        crate::error::StorageError::InvalidSourceType {
+            artifact_id: artifact_id_value.clone(),
+            value: source_type_str,
+        }
+    })?;
+    let artifact = LoadedArtifactForEnrichment {
+        artifact_id: artifact_id_value.clone(),
+        import_id,
+        source_type,
+        title: artifact_row.get(3),
+    };
+
+    let participant_rows = client
+        .query(
+            "SELECT participant_id, participant_role, display_name, source_participant_key \
+             FROM oa_conversation_participant \
+             WHERE artifact_id = $1 \
+             ORDER BY sequence_no ASC, participant_id ASC",
+            &[&artifact_id],
+        )
+        .map_err(map_pg_storage_err)?;
+    let mut participants = Vec::with_capacity(participant_rows.len());
+    for row in participant_rows {
+        let participant_id: String = row.get(0);
+        let role: String = row.get(1);
+        participants.push(LoadedParticipant {
+            participant_id: participant_id.clone(),
+            participant_role: ParticipantRole::from_str(&role).ok_or_else(|| {
+                crate::error::StorageError::InvalidParticipantRole {
+                    participant_id,
+                    value: role,
+                }
+            })?,
+            display_name: row.get(2),
+            external_id: row.get(3),
+        });
+    }
+
+    let segment_rows = client
+        .query(
+            "SELECT s.segment_id, s.participant_id, p.participant_role, s.sequence_no, s.text_content, \
+                    to_char(s.created_at_source, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), s.visibility_status \
+             FROM oa_segment s \
+             LEFT JOIN oa_conversation_participant p ON p.participant_id = s.participant_id \
+             WHERE s.artifact_id = $1 \
+             ORDER BY s.sequence_no ASC, s.segment_id ASC",
+            &[&artifact_id],
+        )
+        .map_err(map_pg_storage_err)?;
+    let mut segments = Vec::with_capacity(segment_rows.len());
+    for row in segment_rows {
+        let segment_id: String = row.get(0);
+        let participant_role = row
+            .get::<_, Option<String>>(2)
+            .map(|value| {
+                ParticipantRole::from_str(&value).ok_or_else(|| {
+                    crate::error::StorageError::InvalidParticipantRole {
+                        participant_id: row
+                            .get::<_, Option<String>>(1)
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        value,
+                    }
+                })
+            })
+            .transpose()?;
+        let visibility_status: String = row.get(6);
+        segments.push(LoadedSegment {
+            segment_id: segment_id.clone(),
+            participant_id: row.get(1),
+            participant_role,
+            sequence_no: row.get(3),
+            text_content: row.get(4),
+            created_at_source: row
+                .get::<_, Option<String>>(5)
+                .map(|value| SourceTimestamp::parse_rfc3339(&value))
+                .transpose()
+                .map_err(|err| crate::error::StorageError::InvalidDerivationWrite {
+                    detail: format!(
+                        "failed to parse created_at_source for segment {}: {}",
+                        segment_id, err
+                    ),
+                })?,
+            visibility_status: VisibilityStatus::from_str(&visibility_status).ok_or_else(|| {
+                crate::error::StorageError::InvalidVisibilityStatus {
+                    segment_id,
+                    value: visibility_status,
+                }
+            })?,
+        });
+    }
+
+    Ok(Some(LoadedConversationForEnrichment {
+        artifact,
+        participants,
+        segments,
+    }))
 }
 
 fn map_pg_storage_err(source: postgres::Error) -> crate::error::StorageError {

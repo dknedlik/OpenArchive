@@ -16,7 +16,7 @@ use crate::storage::{
     ArtifactClass, ArtifactStatus, ConversationEnrichmentPayload, EnrichmentStatus, ImportStatus,
     ImportWriteStore, JobStatus, JobType, NewArtifact, NewEnrichmentJob, NewImport,
     NewImportObjectRef, NewParticipant, NewSegment, PayloadFormat, SegmentType, SourceType,
-    VisibilityStatus, WriteArtifactSet, WriteImportSet,
+    WriteArtifactSet, WriteImportSet,
 };
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -129,13 +129,15 @@ fn persist_raw_payload(
     payload_bytes: &[u8],
     payload_sha256: &str,
 ) -> Result<PutObjectResult, OpenArchiveError> {
-    object_store.put_object(NewObject {
-        object_id: object_id.to_string(),
-        namespace: "import-payloads".to_string(),
-        mime_type: "application/json".to_string(),
-        bytes: payload_bytes.to_vec(),
-        sha256: payload_sha256.to_string(),
-    }).map_err(OpenArchiveError::from)
+    object_store
+        .put_object(NewObject {
+            object_id: object_id.to_string(),
+            namespace: "import-payloads".to_string(),
+            mime_type: "application/json".to_string(),
+            bytes: payload_bytes.to_vec(),
+            sha256: payload_sha256.to_string(),
+        })
+        .map_err(OpenArchiveError::from)
 }
 
 fn cleanup_unreferenced_payload_object(
@@ -230,9 +232,12 @@ fn build_artifact_set(
             job_id: new_id("job"),
             artifact_id: artifact_id.clone(),
             job_type: JobType::ConversationEnrichment,
+            enrichment_tier: crate::storage::EnrichmentTier::Standard,
+            spawned_by_job_id: None,
             job_status: JobStatus::Pending,
             max_attempts: 3,
             priority_no: 100,
+            required_capabilities: vec!["text".to_string()],
             payload_json: ConversationEnrichmentPayload::new_v1(
                 &artifact_id,
                 import_id,
@@ -286,17 +291,9 @@ fn build_segment(
         locator_json: Some(
             serde_json::json!({ "source_node_id": message.source_node_id }).to_string(),
         ),
-        visibility_status: map_visibility(message.visibility),
+        visibility_status: message.visibility,
         unsupported_content_json,
     })
-}
-
-fn map_visibility(visibility: VisibilityStatus) -> VisibilityStatus {
-    match visibility {
-        VisibilityStatus::Visible => VisibilityStatus::Visible,
-        VisibilityStatus::Hidden => VisibilityStatus::Hidden,
-        VisibilityStatus::SkippedUnsupported => VisibilityStatus::SkippedUnsupported,
-    }
 }
 
 fn new_id(prefix: &str) -> String {
@@ -399,7 +396,10 @@ mod tests {
     }
 
     impl ObjectStore for MockObjectStore {
-        fn put_object(&self, object: NewObject) -> crate::error::ObjectStoreResult<PutObjectResult> {
+        fn put_object(
+            &self,
+            object: NewObject,
+        ) -> crate::error::ObjectStoreResult<PutObjectResult> {
             let stored = StoredObject {
                 object_id: object.object_id.clone(),
                 provider: "mock".to_string(),
@@ -432,9 +432,12 @@ mod tests {
     fn import_chatgpt_payload_returns_compact_response() {
         let store = MockStore::new();
         let object_store = MockObjectStore::new();
-        let response =
-            import_chatgpt_payload(&store, &object_store, single_conversation_export().as_bytes())
-                .unwrap();
+        let response = import_chatgpt_payload(
+            &store,
+            &object_store,
+            single_conversation_export().as_bytes(),
+        )
+        .unwrap();
 
         assert_eq!(response.import_id, "import-test");
         assert_eq!(response.import_status, "completed");
@@ -447,14 +450,21 @@ mod tests {
     fn import_chatgpt_payload_builds_multi_conversation_write_set() {
         let store = MockStore::new();
         let object_store = MockObjectStore::new();
-        import_chatgpt_payload(&store, &object_store, multi_conversation_export().as_bytes())
-            .unwrap();
+        import_chatgpt_payload(
+            &store,
+            &object_store,
+            multi_conversation_export().as_bytes(),
+        )
+        .unwrap();
 
         let captured = store.captured.lock().unwrap();
         let import_set = captured.first().unwrap();
         assert_eq!(import_set.import.conversation_count_detected, 2);
         assert_eq!(import_set.artifact_sets.len(), 2);
-        assert_eq!(import_set.import.payload_object_id, import_set.payload_object.object_id);
+        assert_eq!(
+            import_set.import.payload_object_id,
+            import_set.payload_object.object_id
+        );
         assert_eq!(
             import_set.artifact_sets[0].job.job_status,
             JobStatus::Pending
@@ -587,8 +597,12 @@ mod tests {
     fn import_chatgpt_payload_parser_failure_does_not_mutate_prior_store_state() {
         let store = MockStore::new();
         let object_store = MockObjectStore::new();
-        import_chatgpt_payload(&store, &object_store, single_conversation_export().as_bytes())
-            .unwrap();
+        import_chatgpt_payload(
+            &store,
+            &object_store,
+            single_conversation_export().as_bytes(),
+        )
+        .unwrap();
 
         let err = import_chatgpt_payload(&store, &object_store, br#"{"bad":true}"#).unwrap_err();
         assert!(matches!(err, OpenArchiveError::Parser(_)));
@@ -606,9 +620,12 @@ mod tests {
         let store = FailingImportStore;
         let object_store = MockObjectStore::new();
 
-        let err =
-            import_chatgpt_payload(&store, &object_store, single_conversation_export().as_bytes())
-                .unwrap_err();
+        let err = import_chatgpt_payload(
+            &store,
+            &object_store,
+            single_conversation_export().as_bytes(),
+        )
+        .unwrap_err();
 
         assert!(matches!(err, OpenArchiveError::Storage(_)));
         assert_eq!(object_store.puts.lock().unwrap().len(), 1);

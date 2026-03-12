@@ -127,9 +127,18 @@ impl DerivedMetadataHarness for OracleHarness {
                         job_id: fixture.write_set.artifact_sets[0].job.job_id.clone(),
                         artifact_id: fixture.write_set.artifact_sets[0].job.artifact_id.clone(),
                         job_type: fixture.write_set.artifact_sets[0].job.job_type,
+                        enrichment_tier: fixture.write_set.artifact_sets[0].job.enrichment_tier,
+                        spawned_by_job_id: fixture.write_set.artifact_sets[0]
+                            .job
+                            .spawned_by_job_id
+                            .clone(),
                         job_status: fixture.write_set.artifact_sets[0].job.job_status,
                         max_attempts: fixture.write_set.artifact_sets[0].job.max_attempts,
                         priority_no: fixture.write_set.artifact_sets[0].job.priority_no,
+                        required_capabilities: fixture.write_set.artifact_sets[0]
+                            .job
+                            .required_capabilities
+                            .clone(),
                         payload_json: fixture.write_set.artifact_sets[0].job.payload_json.clone(),
                     },
                 }],

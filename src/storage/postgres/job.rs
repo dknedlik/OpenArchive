@@ -1,21 +1,30 @@
 use crate::error::StorageResult;
-use crate::storage::types::{ClaimedJob, JobStatus, JobType, NewEnrichmentJob, RetryOutcome};
+use crate::storage::types::{
+    ClaimedJob, EnrichmentTier, JobStatus, JobType, NewEnrichmentJob, RetryOutcome,
+};
 
 pub fn insert_job(client: &mut postgres::Client, j: &NewEnrichmentJob) -> StorageResult<()> {
     let job_type = j.job_type.as_str();
+    let enrichment_tier = j.enrichment_tier.as_str();
     let job_status = j.job_status.as_str();
+    let required_capabilities =
+        serde_json::to_string(&j.required_capabilities).expect("required capabilities serializable");
     client
         .execute(
             "INSERT INTO oa_enrichment_job \
-             (job_id, artifact_id, job_type, job_status, max_attempts, priority_no, payload_json) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb)",
+             (job_id, artifact_id, job_type, enrichment_tier, spawned_by_job_id, job_status, \
+              max_attempts, priority_no, required_capabilities, payload_json) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::text::jsonb, $10::text::jsonb)",
             &[
                 &j.job_id,
                 &j.artifact_id,
                 &job_type,
+                &enrichment_tier,
+                &j.spawned_by_job_id,
                 &job_status,
                 &j.max_attempts,
                 &j.priority_no,
+                &required_capabilities,
                 &j.payload_json,
             ],
         )
@@ -30,7 +39,8 @@ pub fn claim_next_job(client: &mut postgres::Client, worker_id: &str) -> Storage
 
     let row = client
         .query_opt(
-            "SELECT job_id, artifact_id, job_type, attempt_count, max_attempts, payload_json::text \
+            "SELECT job_id, artifact_id, job_type, enrichment_tier, spawned_by_job_id, \
+                    attempt_count, max_attempts, required_capabilities::text, payload_json::text \
              FROM oa_enrichment_job \
              WHERE job_status IN ('pending', 'retryable') \
                AND available_at <= NOW() \
@@ -49,9 +59,12 @@ pub fn claim_next_job(client: &mut postgres::Client, worker_id: &str) -> Storage
     let job_id: String = row.get(0);
     let artifact_id: String = row.get(1);
     let job_type_str: String = row.get(2);
-    let attempt_count: i32 = row.get(3);
-    let max_attempts: i32 = row.get(4);
-    let payload_json: String = row.get(5);
+    let tier_str: String = row.get(3);
+    let spawned_by_job_id: Option<String> = row.get(4);
+    let attempt_count: i32 = row.get(5);
+    let max_attempts: i32 = row.get(6);
+    let required_capabilities_json: String = row.get(7);
+    let payload_json: String = row.get(8);
 
     let job_type = JobType::from_str(&job_type_str).ok_or_else(|| {
         crate::error::StorageError::InvalidJobType {
@@ -59,6 +72,17 @@ pub fn claim_next_job(client: &mut postgres::Client, worker_id: &str) -> Storage
             job_type: job_type_str.clone(),
         }
     })?;
+    let enrichment_tier = EnrichmentTier::from_str(&tier_str).ok_or_else(|| {
+        crate::error::StorageError::InvalidEnrichmentTier {
+            job_id: job_id.clone(),
+            value: tier_str.clone(),
+        }
+    })?;
+    let required_capabilities: Vec<String> = serde_json::from_str(&required_capabilities_json)
+        .map_err(|err| crate::error::StorageError::InvalidJobCapabilities {
+            job_id: job_id.clone(),
+            detail: err.to_string(),
+        })?;
 
     let running = JobStatus::Running.as_str();
     client
@@ -79,8 +103,11 @@ pub fn claim_next_job(client: &mut postgres::Client, worker_id: &str) -> Storage
         job_id,
         artifact_id,
         job_type,
+        enrichment_tier,
+        spawned_by_job_id,
         attempt_count: attempt_count + 1,
         max_attempts,
+        required_capabilities,
         payload_json,
     }))
 }

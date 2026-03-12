@@ -1,3 +1,5 @@
+ARG OA_RUNTIME_BASE_IMAGE=open_archive-oracle-runtime:23.26.1
+
 FROM rust:1.86-slim AS builder
 
 WORKDIR /app
@@ -8,11 +10,7 @@ COPY sql sql
 
 RUN cargo build --release --bin open_archive
 
-FROM debian:bookworm-slim
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
+FROM ${OA_RUNTIME_BASE_IMAGE}
 
 WORKDIR /app
 

@@ -44,6 +44,17 @@ impl ParticipantRole {
             ParticipantRole::Unknown => "unknown",
         }
     }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "user" => Some(Self::User),
+            "assistant" => Some(Self::Assistant),
+            "system" => Some(Self::System),
+            "tool" => Some(Self::Tool),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +70,15 @@ impl VisibilityStatus {
             VisibilityStatus::Visible => "visible",
             VisibilityStatus::Hidden => "hidden",
             VisibilityStatus::SkippedUnsupported => "skipped_unsupported",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "visible" => Some(Self::Visible),
+            "hidden" => Some(Self::Hidden),
+            "skipped_unsupported" => Some(Self::SkippedUnsupported),
+            _ => None,
         }
     }
 }

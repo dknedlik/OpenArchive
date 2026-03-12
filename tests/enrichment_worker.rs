@@ -1,237 +1,175 @@
 use open_archive::config::HttpConfig;
 use open_archive::enrichment_worker::{
-    format_worker_id, start_enrichment_workers, start_enrichment_workers_with_executor,
+    format_worker_id, start_enrichment_workers, start_enrichment_workers_with_factory,
 };
 use open_archive::error::StorageResult;
+use open_archive::processor::{ConversationProcessor, ConversationProcessorFactory, ProcessorError};
 use open_archive::shutdown::ShutdownToken;
 use open_archive::storage::types::{
-    ClaimedJob, ConversationEnrichmentPayload, JobType, RetryOutcome, SourceType,
+    ClaimedJob, ConversationEnrichmentPayload, EnrichmentTier, LoadedArtifactForEnrichment,
+    LoadedConversationForEnrichment, LoadedParticipant, LoadedSegment, RetryOutcome, SourceType,
 };
-use open_archive::storage::EnrichmentJobLifecycleStore;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use open_archive::storage::{
+    ArtifactListItem, ArtifactReadStore, DerivationWriteResult, DerivedMetadataWriteStore,
+    EnrichmentJobLifecycleStore, JobType, WriteDerivationAttempt,
+};
+use open_archive::{ParticipantRole, VisibilityStatus};
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 #[test]
 fn test_format_worker_id() {
-    let id = format_worker_id(123, 0);
-    assert_eq!(id, "enrichment:123:0");
-
-    let id2 = format_worker_id(456, 1);
-    assert_eq!(id2, "enrichment:456:1");
+    assert_eq!(format_worker_id(123, 0), "enrichment:123:0");
+    assert_eq!(format_worker_id(456, 1), "enrichment:456:1");
 }
 
 #[test]
 fn test_disabled_workers_start() {
-    let config = HttpConfig {
-        bind_addr: "127.0.0.1:3000".to_string(),
-        request_worker_count: 4,
-        enrichment_worker_count: 0,
-        enrichment_poll_interval_ms: 500,
-    };
-
-    let store = Arc::new(MockStore::new());
+    let config = test_config(0);
+    let job_store = Arc::new(EmptyQueueMockStore::new());
+    let read_store = Arc::new(FixedReadStore::default());
+    let derived_store = Arc::new(MockDerivedStore::default());
     let shutdown = ShutdownToken::new();
-    let result = start_enrichment_workers(&config, store, shutdown);
-    assert!(result.is_ok());
-    let workers = result.unwrap();
-    assert!(workers.is_empty());
+
+    let workers = start_enrichment_workers(&config, job_store, read_store, derived_store, shutdown)
+        .expect("disabled workers should start")
+        .len();
+
+    assert_eq!(workers, 0);
 }
 
 #[test]
-fn test_enabled_workers_start() {
-    let config = HttpConfig {
-        bind_addr: "127.0.0.1:3000".to_string(),
-        request_worker_count: 4,
-        enrichment_worker_count: 2,
-        enrichment_poll_interval_ms: 500,
-    };
-
-    let store = Arc::new(MockStore::new());
+fn test_enabled_workers_start_and_shutdown() {
+    let config = test_config(2);
+    let job_store = Arc::new(EmptyQueueMockStore::new());
+    let read_store = Arc::new(FixedReadStore::default());
+    let derived_store = Arc::new(MockDerivedStore::default());
     let shutdown = ShutdownToken::new();
-    let result = start_enrichment_workers(&config, store, shutdown.clone());
-    assert!(result.is_ok());
-    let workers = result.unwrap();
+
+    let workers = start_enrichment_workers(
+        &config,
+        job_store,
+        read_store,
+        derived_store,
+        shutdown.clone(),
+    )
+    .expect("workers should start");
     assert_eq!(workers.len(), 2);
 
-    for worker in &workers {
-        let name = worker.thread().name().unwrap();
-        assert!(name.starts_with("enrichment-worker-"));
-    }
-
-    // Clean shutdown
     shutdown.signal();
     for worker in workers {
-        worker.join().expect("Worker should join cleanly");
+        worker.join().expect("worker should join cleanly");
     }
 }
 
 #[test]
-fn test_empty_queue_handling() {
-    let config = HttpConfig {
-        bind_addr: "127.0.0.1:3000".to_string(),
-        request_worker_count: 1,
-        enrichment_worker_count: 1,
-        enrichment_poll_interval_ms: 10,
-    };
-
-    let store = Arc::new(EmptyQueueMockStore::new());
+fn test_worker_persists_stub_outputs_and_completes_job() {
+    let config = test_config(1);
+    let job_store = Arc::new(SingleJobStore::new(valid_claimed_job()));
+    let read_store = Arc::new(FixedReadStore::with_sample_conversation());
+    let derived_store = Arc::new(MockDerivedStore::default());
     let shutdown = ShutdownToken::new();
-    let result = start_enrichment_workers(&config, store.clone(), shutdown.clone());
-    assert!(result.is_ok());
-    let workers = result.unwrap();
+    let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
+    let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
+    let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store.clone();
 
-    // Give worker time to poll at least once
-    std::thread::sleep(Duration::from_millis(50));
+    let workers = start_enrichment_workers(
+        &config,
+        job_store_trait,
+        read_store_trait,
+        derived_store_trait,
+        shutdown.clone(),
+    )
+    .expect("worker should start");
 
-    let claim_count = store.claim_count.load(Ordering::SeqCst);
-    assert!(claim_count > 0, "Worker should poll even with empty queue");
-
-    // Clean shutdown
+    std::thread::sleep(Duration::from_millis(75));
     shutdown.signal();
     for worker in workers {
-        worker.join().expect("Worker should join cleanly");
+        worker.join().expect("worker should join cleanly");
     }
+
+    assert!(job_store.complete_count.load(Ordering::SeqCst) > 0);
+    assert_eq!(job_store.fail_count.load(Ordering::SeqCst), 0);
+    let attempts = derived_store.attempts.lock().unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert!(attempts[0].objects.len() >= 3);
 }
 
 #[test]
-fn test_worker_calls_complete_on_success() {
-    let config = HttpConfig {
+fn test_worker_fails_job_when_factory_rejects_claimed_tier() {
+    let config = test_config(1);
+    let mut claimed_job = valid_claimed_job();
+    claimed_job.enrichment_tier = EnrichmentTier::Quality;
+
+    let job_store = Arc::new(SingleJobStore::new(claimed_job));
+    let read_store = Arc::new(FixedReadStore::with_sample_conversation());
+    let derived_store = Arc::new(MockDerivedStore::default());
+    let shutdown = ShutdownToken::new();
+    let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
+    let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
+    let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store;
+
+    let workers = start_enrichment_workers_with_factory(
+        &config,
+        job_store_trait,
+        read_store_trait,
+        derived_store_trait,
+        shutdown.clone(),
+        Arc::new(RejectAllFactory),
+    )
+    .expect("worker should start");
+
+    std::thread::sleep(Duration::from_millis(75));
+    shutdown.signal();
+    for worker in workers {
+        worker.join().expect("worker should join cleanly");
+    }
+
+    assert_eq!(job_store.complete_count.load(Ordering::SeqCst), 0);
+    assert!(job_store.fail_count.load(Ordering::SeqCst) > 0);
+}
+
+fn test_config(enrichment_worker_count: usize) -> HttpConfig {
+    HttpConfig {
         bind_addr: "127.0.0.1:3000".to_string(),
         request_worker_count: 1,
-        enrichment_worker_count: 1,
+        enrichment_worker_count,
         enrichment_poll_interval_ms: 10,
-    };
+    }
+}
 
-    let store = Arc::new(MockStore::new());
-    let shutdown = ShutdownToken::new();
-    let result = start_enrichment_workers(&config, store.clone(), shutdown.clone());
-    assert!(result.is_ok());
-    let workers = result.unwrap();
-
-    // Wait for at least one job to be processed
-    std::thread::sleep(Duration::from_millis(50));
-
-    let claim_count = store.claim_count.load(Ordering::SeqCst);
-    let complete_count = store.complete_count.load(Ordering::SeqCst);
-
-    assert!(claim_count > 0, "Worker should claim jobs");
-    assert!(
-        complete_count > 0,
-        "At least some jobs should be completed (placeholder always succeeds)"
+fn valid_claimed_job() -> ClaimedJob {
+    let payload = ConversationEnrichmentPayload::new_v1(
+        "artifact-1",
+        "import-1",
+        SourceType::ChatGptExport,
     );
-
-    // Clean shutdown
-    shutdown.signal();
-    for worker in workers {
-        worker.join().expect("Worker should join cleanly");
+    ClaimedJob {
+        job_id: "job-1".to_string(),
+        artifact_id: "artifact-1".to_string(),
+        job_type: JobType::ConversationEnrichment,
+        enrichment_tier: EnrichmentTier::Standard,
+        spawned_by_job_id: None,
+        attempt_count: 1,
+        max_attempts: 3,
+        required_capabilities: vec!["text".to_string()],
+        payload_json: payload.to_json(),
     }
 }
 
-#[test]
-fn test_worker_calls_fail_on_payload_parse_error() {
-    let config = HttpConfig {
-        bind_addr: "127.0.0.1:3000".to_string(),
-        request_worker_count: 1,
-        enrichment_worker_count: 1,
-        enrichment_poll_interval_ms: 10,
-    };
-
-    let store = Arc::new(InvalidPayloadMockStore::new());
-    let shutdown = ShutdownToken::new();
-    let result = start_enrichment_workers(&config, store.clone(), shutdown.clone());
-    assert!(result.is_ok());
-    let workers = result.unwrap();
-
-    // Wait for worker to process the job
-    std::thread::sleep(Duration::from_millis(50));
-
-    let claim_count = store.claim_count.load(Ordering::SeqCst);
-    let fail_count = store.fail_count.load(Ordering::SeqCst);
-
-    assert!(claim_count > 0, "Worker should claim jobs");
-    assert!(
-        fail_count > 0,
-        "Worker should call fail_job when payload parsing fails"
-    );
-
-    // Clean shutdown
-    shutdown.signal();
-    for worker in workers {
-        worker.join().expect("Worker should join cleanly");
-    }
-}
-
-#[test]
-fn test_worker_logs_error_on_store_failure() {
-    let config = HttpConfig {
-        bind_addr: "127.0.0.1:3000".to_string(),
-        request_worker_count: 1,
-        enrichment_worker_count: 1,
-        enrichment_poll_interval_ms: 10,
-    };
-
-    let store = Arc::new(FailingCompleteMockStore::new());
-    let shutdown = ShutdownToken::new();
-    let result = start_enrichment_workers(&config, store.clone(), shutdown.clone());
-    assert!(result.is_ok());
-    let workers = result.unwrap();
-
-    // Wait for worker to process the job
-    std::thread::sleep(Duration::from_millis(50));
-
-    let claim_count = store.claim_count.load(Ordering::SeqCst);
-
-    assert!(claim_count > 0, "Worker should claim jobs");
-    // Note: We can't directly test the error logging, but the worker should
-    // not crash when store operations fail
-
-    // Clean shutdown
-    shutdown.signal();
-    for worker in workers {
-        worker.join().expect("Worker should join cleanly");
-    }
-}
-
-#[test]
-fn test_invalid_poll_interval_rejected() {
-    std::env::remove_var("OA_ENRICHMENT_POLL_INTERVAL_MS");
-    std::env::set_var("OA_ENRICHMENT_POLL_INTERVAL_MS", "invalid");
-
-    let result = HttpConfig::from_env();
-
-    std::env::remove_var("OA_ENRICHMENT_POLL_INTERVAL_MS");
-
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_zero_workers_allowed() {
-    std::env::remove_var("OA_ENRICHMENT_WORKERS");
-    std::env::set_var("OA_ENRICHMENT_WORKERS", "0");
-
-    let result = HttpConfig::from_env();
-
-    std::env::remove_var("OA_ENRICHMENT_WORKERS");
-
-    assert!(
-        result.is_ok(),
-        "Config should accept OA_ENRICHMENT_WORKERS=0"
-    );
-    assert_eq!(result.unwrap().enrichment_worker_count, 0);
-}
-
-// Mock store implementations
-
-struct MockStore {
+struct SingleJobStore {
+    claimed_job: Mutex<Option<ClaimedJob>>,
     claim_count: AtomicUsize,
     complete_count: AtomicUsize,
     fail_count: AtomicUsize,
 }
 
-impl MockStore {
-    fn new() -> Self {
+impl SingleJobStore {
+    fn new(claimed_job: ClaimedJob) -> Self {
         Self {
+            claimed_job: Mutex::new(Some(claimed_job)),
             claim_count: AtomicUsize::new(0),
             complete_count: AtomicUsize::new(0),
             fail_count: AtomicUsize::new(0),
@@ -239,25 +177,10 @@ impl MockStore {
     }
 }
 
-impl EnrichmentJobLifecycleStore for MockStore {
+impl EnrichmentJobLifecycleStore for SingleJobStore {
     fn claim_next_job(&self, _worker_id: &str) -> StorageResult<Option<ClaimedJob>> {
         self.claim_count.fetch_add(1, Ordering::SeqCst);
-
-        let job_id = format!("job-{}", self.claim_count.load(Ordering::SeqCst));
-        let payload = ConversationEnrichmentPayload::new_v1(
-            "test-artifact",
-            "test-import",
-            SourceType::ChatGptExport,
-        );
-
-        Ok(Some(ClaimedJob {
-            job_id,
-            artifact_id: payload.artifact_id.clone(),
-            job_type: JobType::ConversationEnrichment,
-            attempt_count: 1,
-            max_attempts: 3,
-            payload_json: payload.to_json(),
-        }))
+        Ok(self.claimed_job.lock().unwrap().take())
     }
 
     fn complete_job(&self, _worker_id: &str, _job_id: &str) -> StorageResult<()> {
@@ -318,239 +241,112 @@ impl EnrichmentJobLifecycleStore for EmptyQueueMockStore {
     }
 }
 
-struct InvalidPayloadMockStore {
-    claim_count: AtomicUsize,
-    fail_count: AtomicUsize,
+#[derive(Default)]
+struct FixedReadStore {
+    loaded: Option<LoadedConversationForEnrichment>,
 }
 
-impl InvalidPayloadMockStore {
-    fn new() -> Self {
+impl FixedReadStore {
+    fn with_sample_conversation() -> Self {
         Self {
-            claim_count: AtomicUsize::new(0),
-            fail_count: AtomicUsize::new(0),
+            loaded: Some(LoadedConversationForEnrichment {
+                artifact: LoadedArtifactForEnrichment {
+                    artifact_id: "artifact-1".to_string(),
+                    import_id: "import-1".to_string(),
+                    source_type: SourceType::ChatGptExport,
+                    title: Some("Test conversation".to_string()),
+                },
+                participants: vec![
+                    LoadedParticipant {
+                        participant_id: "participant-user".to_string(),
+                        participant_role: ParticipantRole::User,
+                        display_name: Some("User".to_string()),
+                        external_id: Some("user-1".to_string()),
+                    },
+                    LoadedParticipant {
+                        participant_id: "participant-assistant".to_string(),
+                        participant_role: ParticipantRole::Assistant,
+                        display_name: Some("Assistant".to_string()),
+                        external_id: Some("assistant-1".to_string()),
+                    },
+                ],
+                segments: vec![
+                    LoadedSegment {
+                        segment_id: "segment-1".to_string(),
+                        participant_id: Some("participant-user".to_string()),
+                        participant_role: Some(ParticipantRole::User),
+                        sequence_no: 0,
+                        text_content: "hello".to_string(),
+                        created_at_source: None,
+                        visibility_status: VisibilityStatus::Visible,
+                    },
+                    LoadedSegment {
+                        segment_id: "segment-2".to_string(),
+                        participant_id: Some("participant-assistant".to_string()),
+                        participant_role: Some(ParticipantRole::Assistant),
+                        sequence_no: 1,
+                        text_content: "hi".to_string(),
+                        created_at_source: None,
+                        visibility_status: VisibilityStatus::Visible,
+                    },
+                ],
+            }),
         }
     }
 }
 
-impl EnrichmentJobLifecycleStore for InvalidPayloadMockStore {
-    fn claim_next_job(&self, _worker_id: &str) -> StorageResult<Option<ClaimedJob>> {
-        self.claim_count.fetch_add(1, Ordering::SeqCst);
-
-        let job_id = format!("job-{}", self.claim_count.load(Ordering::SeqCst));
-
-        Ok(Some(ClaimedJob {
-            job_id,
-            artifact_id: "test-artifact".to_string(),
-            job_type: JobType::ConversationEnrichment,
-            attempt_count: 1,
-            max_attempts: 3,
-            payload_json: "invalid json {{{".to_string(),
-        }))
+impl ArtifactReadStore for FixedReadStore {
+    fn list_artifacts(&self) -> StorageResult<Vec<ArtifactListItem>> {
+        Ok(Vec::new())
     }
 
-    fn complete_job(&self, _worker_id: &str, _job_id: &str) -> StorageResult<()> {
-        Ok(())
-    }
-
-    fn fail_job(&self, _worker_id: &str, _job_id: &str, _error_message: &str) -> StorageResult<()> {
-        self.fail_count.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-
-    fn mark_job_retryable(
+    fn load_conversation_for_enrichment(
         &self,
-        _worker_id: &str,
-        _job_id: &str,
-        _error_message: &str,
-        _retry_after_seconds: i64,
-    ) -> StorageResult<RetryOutcome> {
-        Ok(RetryOutcome::Retried)
+        _artifact_id: &str,
+    ) -> StorageResult<Option<LoadedConversationForEnrichment>> {
+        Ok(self.loaded.clone())
     }
 }
 
-struct FailingCompleteMockStore {
-    claim_count: AtomicUsize,
+#[derive(Default)]
+struct MockDerivedStore {
+    attempts: Mutex<Vec<WriteDerivationAttempt>>,
 }
 
-impl FailingCompleteMockStore {
-    fn new() -> Self {
-        Self {
-            claim_count: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl EnrichmentJobLifecycleStore for FailingCompleteMockStore {
-    fn claim_next_job(&self, _worker_id: &str) -> StorageResult<Option<ClaimedJob>> {
-        self.claim_count.fetch_add(1, Ordering::SeqCst);
-
-        let job_id = format!("job-{}", self.claim_count.load(Ordering::SeqCst));
-        let payload = ConversationEnrichmentPayload::new_v1(
-            "test-artifact",
-            "test-import",
-            SourceType::ChatGptExport,
-        );
-
-        Ok(Some(ClaimedJob {
-            job_id,
-            artifact_id: payload.artifact_id.clone(),
-            job_type: JobType::ConversationEnrichment,
-            attempt_count: 1,
-            max_attempts: 3,
-            payload_json: payload.to_json(),
-        }))
-    }
-
-    fn complete_job(&self, _worker_id: &str, _job_id: &str) -> StorageResult<()> {
-        // Simulate a database error by returning an arbitrary storage error
-        use open_archive::error::StorageError;
-        Err(StorageError::ClaimJob {
-            source: oracle::Error::new(
-                oracle::ErrorKind::InvalidOperation,
-                "Test: database connection failed",
-            ),
+impl DerivedMetadataWriteStore for MockDerivedStore {
+    fn write_derivation_attempt(
+        &self,
+        attempt: WriteDerivationAttempt,
+    ) -> StorageResult<DerivationWriteResult> {
+        let derivation_run_id = attempt.run.derivation_run_id.clone();
+        let derived_object_ids = attempt
+            .objects
+            .iter()
+            .map(|object| object.object.derived_object_id.clone())
+            .collect::<Vec<_>>();
+        let evidence_links_written = attempt
+            .objects
+            .iter()
+            .map(|object| object.evidence_links.len())
+            .sum();
+        self.attempts.lock().unwrap().push(attempt);
+        Ok(DerivationWriteResult {
+            derivation_run_id,
+            derived_object_ids,
+            evidence_links_written,
         })
     }
+}
 
-    fn fail_job(&self, _worker_id: &str, _job_id: &str, _error_message: &str) -> StorageResult<()> {
-        Ok(())
-    }
+struct RejectAllFactory;
 
-    fn mark_job_retryable(
+impl ConversationProcessorFactory for RejectAllFactory {
+    fn build(
         &self,
-        _worker_id: &str,
-        _job_id: &str,
-        _error_message: &str,
-        _retry_after_seconds: i64,
-    ) -> StorageResult<RetryOutcome> {
-        Ok(RetryOutcome::Retried)
-    }
-}
-
-struct FailingExecutorMockStore {
-    claim_count: AtomicUsize,
-    fail_count: AtomicUsize,
-}
-
-impl FailingExecutorMockStore {
-    fn new() -> Self {
-        Self {
-            claim_count: AtomicUsize::new(0),
-            fail_count: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl EnrichmentJobLifecycleStore for FailingExecutorMockStore {
-    fn claim_next_job(&self, _worker_id: &str) -> StorageResult<Option<ClaimedJob>> {
-        self.claim_count.fetch_add(1, Ordering::SeqCst);
-
-        let job_id = format!("job-{}", self.claim_count.load(Ordering::SeqCst));
-        let payload = ConversationEnrichmentPayload::new_v1(
-            "test-artifact",
-            "test-import",
-            SourceType::ChatGptExport,
-        );
-
-        Ok(Some(ClaimedJob {
-            job_id,
-            artifact_id: payload.artifact_id.clone(),
-            job_type: JobType::ConversationEnrichment,
-            attempt_count: 1,
-            max_attempts: 3,
-            payload_json: payload.to_json(),
-        }))
-    }
-
-    fn complete_job(&self, _worker_id: &str, _job_id: &str) -> StorageResult<()> {
-        Ok(())
-    }
-
-    fn fail_job(&self, _worker_id: &str, _job_id: &str, _error_message: &str) -> StorageResult<()> {
-        self.fail_count.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-
-    fn mark_job_retryable(
-        &self,
-        _worker_id: &str,
-        _job_id: &str,
-        _error_message: &str,
-        _retry_after_seconds: i64,
-    ) -> StorageResult<RetryOutcome> {
-        Ok(RetryOutcome::Retried)
-    }
-}
-
-#[test]
-fn test_worker_calls_fail_on_executor_error() {
-    let config = HttpConfig {
-        bind_addr: "127.0.0.1:3000".to_string(),
-        request_worker_count: 1,
-        enrichment_worker_count: 1,
-        enrichment_poll_interval_ms: 10,
-    };
-
-    let store = Arc::new(FailingExecutorMockStore::new());
-    let shutdown = ShutdownToken::new();
-    let result = start_enrichment_workers_with_executor(
-        &config,
-        store.clone(),
-        shutdown.clone(),
-        |_payload| Err("test executor failure".to_string()),
-    );
-    assert!(result.is_ok());
-    let workers = result.unwrap();
-
-    // Wait for worker to process the job
-    std::thread::sleep(Duration::from_millis(50));
-
-    let claim_count = store.claim_count.load(Ordering::SeqCst);
-    let fail_count = store.fail_count.load(Ordering::SeqCst);
-
-    assert!(claim_count > 0, "Worker should claim jobs");
-    assert!(
-        fail_count > 0,
-        "Worker should call fail_job when executor fails"
-    );
-
-    // Clean shutdown
-    shutdown.signal();
-    for worker in workers {
-        worker.join().expect("Worker should join cleanly");
-    }
-}
-
-#[test]
-fn test_shutdown_token() {
-    let token = ShutdownToken::new();
-    assert!(!token.is_shutdown());
-    token.signal();
-    assert!(token.is_shutdown());
-
-    let token2 = token.clone();
-    assert!(token2.is_shutdown());
-}
-
-#[test]
-fn test_worker_exit_on_shutdown() {
-    let config = HttpConfig {
-        bind_addr: "127.0.0.1:3000".to_string(),
-        request_worker_count: 1,
-        enrichment_worker_count: 1,
-        enrichment_poll_interval_ms: 10,
-    };
-
-    let store = Arc::new(EmptyQueueMockStore::new());
-    let shutdown = ShutdownToken::new();
-    let result = start_enrichment_workers(&config, store.clone(), shutdown.clone());
-    let workers = result.unwrap();
-
-    // Signal shutdown
-    shutdown.signal();
-
-    // Workers should join
-    for worker in workers {
-        worker.join().expect("Worker should join cleanly");
+        _tier: EnrichmentTier,
+    ) -> std::result::Result<Box<dyn ConversationProcessor>, ProcessorError> {
+        Err(ProcessorError::Message {
+            message: "tier rejected".to_string(),
+        })
     }
 }

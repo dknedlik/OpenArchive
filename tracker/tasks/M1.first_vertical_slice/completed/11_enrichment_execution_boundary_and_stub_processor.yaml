@@ -1,0 +1,141 @@
+id: "11"
+title: Add enrichment execution boundary and stub processor
+assignee: david
+status: completed
+type: feature
+priority: medium
+planned_order: 10
+milestone: M1.first_vertical_slice
+labels: [enrichment, workers, architecture]
+depends_on: ["09", "10"]
+description: |
+  Introduce the first execution boundary between job claiming and metadata
+  persistence so workers can run a stub or fixture-backed enrichment processor
+  without coupling execution flow directly to HTTP or storage internals.
+
+  The worker orchestration layer is responsible for loading artifact + segment +
+  participant data from read stores before invoking the processor. The processor
+  itself must not reach into the DB or object store. This split gives the right
+  future shape for real model-backed processors (Ollama, hosted providers) that
+  will plug in at the same seam.
+acceptance_criteria:
+  - A `ConversationProcessorInput` type exists with artifact identity/metadata,
+    ordered participants, and ordered message segments — loaded by the worker, not the processor.
+  - A `ConversationProcessorOutput` type exists representing one derivation attempt:
+    a summary, one or more classifications, one or more memories, each with evidence
+    references to segment IDs.
+  - A stub processor function exists that accepts `ConversationProcessorInput` and
+    returns deterministic `ConversationProcessorOutput` from the loaded input without
+    calling any external service.
+  - The enrichment worker loop is extended through explicit stages:
+    claim job → load artifact/segments/participants → build processor input →
+    call processor → persist outputs via `DerivedMetadataWriteStore` → finalize job status.
+  - The enrichment worker is injected with all three dependencies:
+    `EnrichmentJobLifecycleStore`, a read store for artifact/segment/participant data,
+    and `DerivedMetadataWriteStore`.
+  - The stub execution path results in a persisted `DerivationRun` and at least one
+    `DerivedObject` with at least one `EvidenceLink` in the database.
+  - The processor boundary is a plain function or trait with no storage dependencies
+    in its signature.
+files_touched:
+  - src/enrichment_worker.rs        # extend worker loop with load → process → persist stages; tier dispatch
+  - src/storage/mod.rs              # re-export read/write store traits needed by the worker
+  - src/storage/types.rs            # NewEnrichmentJob + ClaimedJob fields; shared loading/result shapes if kept here
+  - src/storage/job_store.rs        # update insert_job/claim_next_job for new fields
+  - src/storage/artifact_store.rs   # extend artifact read contract beyond list-only behavior
+  - src/storage/segment_store.rs    # add ordered segment read support if kept as a separate seam
+  - src/storage/derivation_store.rs # worker persists processor outputs through DerivedMetadataWriteStore
+  - src/processor/mod.rs            # new module: ConversationProcessor trait + StubProcessor impl
+  - src/import_service.rs           # update NewEnrichmentJob construction to include tier + capabilities
+  - src/bootstrap.rs                # wire read store + DerivedMetadataWriteStore into worker
+  - src/main.rs                     # pass new stores when spawning enrichment workers
+implementation_plan: |
+  1. Audit `ArtifactReadStore` (and segment/participant equivalents) to confirm the
+     worker can load a full conversation input. Add any missing read methods.
+
+  2. Define `ConversationProcessorInput` in `storage/types.rs` (or a new
+     `processor/types.rs`):
+     - artifact_id, import_id, source_type
+     - participants: Vec<LoadedParticipant> (role, display_name, external_id)
+     - segments: Vec<LoadedSegment> (segment_id, participant role, text_content,
+       create_time, visibility_status) ordered by sequence_index
+
+  3. Define `ConversationProcessorOutput` in the same location:
+     - derivation_run_id (caller-generated)
+     - pipeline_name, pipeline_version
+     - summary: SummaryOutput { title, body_text, evidence_segment_ids }
+     - classifications: Vec<ClassificationOutput { title, body_text, evidence_segment_ids }>
+     - memories: Vec<MemoryOutput { title, body_text, evidence_segment_ids }>
+
+  4. Update `NewEnrichmentJob` and `ClaimedJob` in `storage/types.rs` to carry the
+     three fields added in V002:
+     - `enrichment_tier: EnrichmentTier` (standard | quality)
+     - `spawned_by_job_id: Option<String>`
+     - `required_capabilities: Vec<String>`
+     Update all callers (insert_job, claim_next_job, job store impls) accordingly.
+
+  5. Create `src/processor/mod.rs` with:
+     - `ConversationProcessor` as a trait (no Send/Sync bounds — app is synchronous,
+       each worker constructs its own processor instance):
+       ```
+       trait ConversationProcessor {
+           fn process(&self, input: &ConversationProcessorInput)
+               -> Result<ConversationProcessorOutput, ProcessorError>;
+       }
+       ```
+     - `StubProcessor`: implements `ConversationProcessor`, accepts real loaded input,
+       emits deterministic outputs that echo artifact_id and segment counts so tests
+       can assert on content.
+
+  6. Extend the enrichment worker loop in `enrichment_worker.rs`:
+     - After claim: read `claimed_job.enrichment_tier` to select the right processor
+       (standard → `StubProcessor` for now; unsupported tiers must transition the
+       job through an explicit failure path, not panic or log + skip)
+     - Load artifact, participants, segments via read store
+     - Build `ConversationProcessorInput`
+     - Call `processor.process(&input)`
+     - On Ok(output): map output to `WriteDerivationAttempt`, call
+       `derived_store.write_derivation_attempt(attempt)`
+     - On persist success: call `complete_job()`
+     - On processor or persist error: call `fail_job()` (or `mark_job_retryable()`)
+
+  7. Update worker constructors (`start_enrichment_workers`,
+     `start_enrichment_workers_with_executor`) to accept the two additional stores.
+
+  8. Update `bootstrap.rs` to construct and wire both stores into the worker pool.
+
+  9. Update `main.rs` to pass the new stores when spawning enrichment workers.
+test_plan: |
+  - Add ignored integration coverage for both providers using the existing harness
+    conventions: `OA_POSTGRES_INTEGRATION_TESTS=1` or `OA_ORACLE_INTEGRATION_TESTS=1`,
+    plus `OA_ALLOW_SCHEMA_RESET=1`.
+  - Cover the full stub path: insert import → import writes job → worker claims
+    job → loads artifact/segments → stub processor runs → derivation run + derived
+    objects persisted → job status is completed.
+  - Add a test proving processor failure surfaces as job failure: stub returns Err,
+    job ends in failed or retryable status, no derivation run is persisted.
+  - Run `cargo build` and `cargo test` to verify no regressions.
+risks: |
+  - If the read store traits are incomplete, adding the missing methods could ripple
+    into multiple impl files. Audit before writing new worker code.
+  - The mapping from ConversationProcessorOutput to WriteDerivationAttempt requires
+    generating IDs (derivation_run_id, derived_object_ids, evidence_link_ids).
+    Use the same application-assigned ID strategy already in use elsewhere.
+  - Keep the processor fn signature free of Arc/dyn store references so a real
+    model-backed processor can be dropped in without restructuring the worker.
+notes: |
+  - This task is still not the real inference pipeline; it creates the seam that
+    real enrichment will plug into.
+  - The processor boundary is a trait (`ConversationProcessor`), not a plain fn.
+    No Send/Sync bounds — app is synchronous, each worker owns its own instance.
+    `StubProcessor` is the only impl for now.
+  - The stub processor should echo something from the loaded input (e.g. segment
+    count, artifact_id) so test assertions are meaningful, not just "a string exists".
+  - Loading happens in the worker/orchestration layer. The processor receives a
+    fully assembled input struct and must not call any store methods itself.
+  - The worker dispatches based on `claimed_job.enrichment_tier`. Standard tier →
+    StubProcessor. Unsupported tiers must fail or mark the job retryable with an
+    explicit reason; they must not panic or silently skip after claim.
+  - `NewEnrichmentJob` must include `enrichment_tier` (defaults to standard) and
+    `required_capabilities` (defaults to ["text"]). `spawned_by_job_id` is optional.
+    All callers of job insertion (import_service, tests) need updating.

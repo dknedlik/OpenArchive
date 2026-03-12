@@ -2,8 +2,11 @@ use crate::error::{StorageError, StorageResult};
 use oracle::Connection;
 
 use crate::storage::types::{
-    ArtifactListItem, EnrichmentStatus, NewArtifact, NewParticipant, SourceType,
+    ArtifactListItem, EnrichmentStatus, LoadedArtifactForEnrichment,
+    LoadedConversationForEnrichment, LoadedParticipant, LoadedSegment, NewArtifact, NewParticipant,
+    SourceType,
 };
+use crate::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 
 pub fn find_artifact_by_source_hash(
     conn: &Connection,
@@ -157,4 +160,126 @@ pub fn list_artifacts(conn: &Connection) -> StorageResult<Vec<ArtifactListItem>>
     }
 
     Ok(artifacts)
+}
+
+pub fn load_conversation_for_enrichment(
+    conn: &Connection,
+    artifact_id: &str,
+) -> StorageResult<Option<LoadedConversationForEnrichment>> {
+    let artifact_row = conn
+        .query_row_as::<(String, String, String, Option<String>)>(
+            "SELECT artifact_id, import_id, source_type, title \
+             FROM oa_artifact WHERE artifact_id = :1",
+            &[&artifact_id],
+        )
+        .map(Some)
+        .or_else(|source| match source.kind() {
+            oracle::ErrorKind::NoDataFound => Ok(None),
+            _ => Err(StorageError::ListArtifacts { source }),
+        })?;
+
+    let Some((artifact_id_value, import_id, source_type_str, title)) = artifact_row else {
+        return Ok(None);
+    };
+    let source_type = SourceType::from_str(&source_type_str).ok_or_else(|| {
+        StorageError::InvalidSourceType {
+            artifact_id: artifact_id_value.clone(),
+            value: source_type_str,
+        }
+    })?;
+    let artifact = LoadedArtifactForEnrichment {
+        artifact_id: artifact_id_value,
+        import_id,
+        source_type,
+        title,
+    };
+
+    let participant_rows = conn
+        .query(
+            "SELECT participant_id, participant_role, display_name, source_participant_key \
+             FROM oa_conversation_participant \
+             WHERE artifact_id = :1 \
+             ORDER BY sequence_no ASC, participant_id ASC",
+            &[&artifact_id],
+        )
+        .map_err(|source| StorageError::ListArtifacts { source })?;
+    let mut participants = Vec::new();
+    for row_result in participant_rows {
+        let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
+        let participant_id: String = row.get(0).map_err(|source| StorageError::ListArtifacts { source })?;
+        let role: String = row.get(1).map_err(|source| StorageError::ListArtifacts { source })?;
+        participants.push(LoadedParticipant {
+            participant_id: participant_id.clone(),
+            participant_role: ParticipantRole::from_str(&role).ok_or_else(|| {
+                StorageError::InvalidParticipantRole {
+                    participant_id,
+                    value: role,
+                }
+            })?,
+            display_name: row.get(2).map_err(|source| StorageError::ListArtifacts { source })?,
+            external_id: row.get(3).map_err(|source| StorageError::ListArtifacts { source })?,
+        });
+    }
+
+    let segment_rows = conn
+        .query(
+            "SELECT s.segment_id, s.participant_id, p.participant_role, s.sequence_no, s.text_content, \
+                    TO_CHAR(s.created_at_source, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9TZH:TZM'), s.visibility_status \
+             FROM oa_segment s \
+             LEFT JOIN oa_conversation_participant p ON p.participant_id = s.participant_id \
+             WHERE s.artifact_id = :1 \
+             ORDER BY s.sequence_no ASC, s.segment_id ASC",
+            &[&artifact_id],
+        )
+        .map_err(|source| StorageError::ListArtifacts { source })?;
+    let mut segments = Vec::new();
+    for row_result in segment_rows {
+        let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
+        let segment_id: String = row.get(0).map_err(|source| StorageError::ListArtifacts { source })?;
+        let participant_id: Option<String> =
+            row.get(1).map_err(|source| StorageError::ListArtifacts { source })?;
+        let participant_role_raw: Option<String> =
+            row.get(2).map_err(|source| StorageError::ListArtifacts { source })?;
+        let participant_role = participant_role_raw
+            .map(|value| {
+                ParticipantRole::from_str(&value).ok_or_else(|| StorageError::InvalidParticipantRole {
+                    participant_id: participant_id.clone().unwrap_or_else(|| "unknown".to_string()),
+                    value,
+                })
+            })
+            .transpose()?;
+        let created_at_source_raw: Option<String> =
+            row.get(5).map_err(|source| StorageError::ListArtifacts { source })?;
+        let visibility_status_raw: String =
+            row.get(6).map_err(|source| StorageError::ListArtifacts { source })?;
+
+        segments.push(LoadedSegment {
+            segment_id: segment_id.clone(),
+            participant_id,
+            participant_role,
+            sequence_no: row.get(3).map_err(|source| StorageError::ListArtifacts { source })?,
+            text_content: row.get(4).map_err(|source| StorageError::ListArtifacts { source })?,
+            created_at_source: created_at_source_raw
+                .map(|value| SourceTimestamp::parse_rfc3339(&value))
+                .transpose()
+                .map_err(|err| StorageError::InvalidDerivationWrite {
+                    detail: format!(
+                        "failed to parse created_at_source for segment {}: {}",
+                        segment_id, err
+                    ),
+                })?,
+            visibility_status: VisibilityStatus::from_str(&visibility_status_raw).ok_or_else(|| {
+                StorageError::InvalidVisibilityStatus {
+                    segment_id,
+                    value: visibility_status_raw,
+                }
+            })?,
+        });
+    }
+
+    Ok(Some(LoadedConversationForEnrichment {
+        artifact,
+        participants,
+        segments,
+    }))
 }

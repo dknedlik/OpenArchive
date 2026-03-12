@@ -162,6 +162,13 @@ mod tests {
         fn list_artifacts(&self) -> crate::error::StorageResult<Vec<ArtifactListItem>> {
             Ok(self.artifacts.clone())
         }
+
+        fn load_conversation_for_enrichment(
+            &self,
+            _artifact_id: &str,
+        ) -> crate::error::StorageResult<Option<crate::storage::LoadedConversationForEnrichment>> {
+            Ok(None)
+        }
     }
 
     impl ObjectStore for MockStore {

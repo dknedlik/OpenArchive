@@ -46,9 +46,10 @@ pub use types::{
     ArtifactClass, ArtifactIngestResult, ArtifactListItem, ArtifactStatus, ClaimedJob,
     ClassificationObjectJson, ConversationEnrichmentPayload, DerivationRunStatus,
     DerivationRunType, DerivedObjectPayload, DerivedObjectType, EnrichmentStatus, EvidenceRole,
-    ImportStatus, InputScopeType, JobStatus, JobType, MemoryObjectJson, NewArtifact, NewDerivationRun,
-    NewDerivedObject, NewEnrichmentJob, NewEvidenceLink, NewImport, NewImportObjectRef,
-    NewParticipant, NewSegment, ObjectStatus, OriginKind, PayloadFormat,
+    EnrichmentTier, ImportStatus, InputScopeType, JobStatus, JobType, LoadedArtifactForEnrichment,
+    LoadedConversationForEnrichment, LoadedParticipant, LoadedSegment, MemoryObjectJson, NewArtifact,
+    NewDerivationRun, NewDerivedObject, NewEnrichmentJob, NewEvidenceLink, NewImport,
+    NewImportObjectRef, NewParticipant, NewSegment, ObjectStatus, OriginKind, PayloadFormat,
     RetryOutcome, ScopeType, SegmentType, SourceType, SummaryObjectJson, SupportStrength,
 };
 

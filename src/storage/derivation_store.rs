@@ -37,7 +37,7 @@ pub struct DerivationWriteResult {
     pub evidence_links_written: usize,
 }
 
-pub trait DerivedMetadataWriteStore {
+pub trait DerivedMetadataWriteStore: Send + Sync {
     fn write_derivation_attempt(
         &self,
         attempt: WriteDerivationAttempt,

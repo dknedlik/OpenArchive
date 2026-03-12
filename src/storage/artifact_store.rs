@@ -1,6 +1,6 @@
 use crate::error::StorageResult;
 
-use crate::storage::types::{NewArtifact, NewParticipant};
+use crate::storage::types::{LoadedConversationForEnrichment, NewArtifact, NewParticipant};
 use crate::storage::StorageTx;
 
 /// Stores conversation artifacts and their participants.
@@ -20,6 +20,12 @@ pub trait ArtifactStore {
 }
 
 /// Read model for listing imported artifacts.
-pub trait ArtifactReadStore {
+pub trait ArtifactReadStore: Send + Sync {
     fn list_artifacts(&self) -> StorageResult<Vec<crate::storage::types::ArtifactListItem>>;
+
+    /// Load the ordered conversation shape the enrichment worker needs.
+    fn load_conversation_for_enrichment(
+        &self,
+        artifact_id: &str,
+    ) -> StorageResult<Option<LoadedConversationForEnrichment>>;
 }
