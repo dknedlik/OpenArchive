@@ -1,5 +1,6 @@
 use crate::processor::{
-    ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput, ProcessorError,
+    ArtifactBatchProcessor, ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
+    ProcessorError,
     StubProcessorFactory,
 };
 use crate::shutdown::ShutdownToken;
@@ -45,17 +46,17 @@ fn enrichment_worker(
         match job_store.claim_next_job(&worker_id) {
             Ok(Some(claimed_job)) => {
                 debug!("Worker {} claimed job {}", worker_id, claimed_job.job_id);
-                if let Err(err) = process_claimed_job(
+                if let Err(err) = process_claimed_or_batched_jobs(
                     &worker_id,
-                    &claimed_job,
+                    claimed_job,
                     job_store.as_ref(),
                     read_store.as_ref(),
                     derived_store.as_ref(),
                     processor_factory.as_ref(),
                 ) {
                     error!(
-                        "Worker {} failed to process job {}: {}",
-                        worker_id, claimed_job.job_id, err
+                        "Worker {} failed to process claimed work: {}",
+                        worker_id, err
                     );
                 }
             }
@@ -66,6 +67,216 @@ fn enrichment_worker(
             }
         }
     }
+}
+
+fn process_claimed_or_batched_jobs(
+    worker_id: &str,
+    first_job: ClaimedJob,
+    job_store: &dyn EnrichmentJobLifecycleStore,
+    read_store: &dyn ArtifactReadStore,
+    derived_store: &dyn DerivedMetadataWriteStore,
+    processor_factory: &dyn ArtifactProcessorFactory,
+) -> std::result::Result<(), String> {
+    let Some(batch_processor) = processor_factory
+        .build_batch_processor(first_job.enrichment_tier)
+        .map_err(|err| format!("failed to build batch processor: {err}"))?
+    else {
+        return process_claimed_job(
+            worker_id,
+            &first_job,
+            job_store,
+            read_store,
+            derived_store,
+            processor_factory,
+        );
+    };
+
+    let mut claimed_jobs = vec![first_job];
+    while claimed_jobs.len() < batch_processor.max_batch_jobs() {
+        match job_store.claim_next_job(worker_id) {
+            Ok(Some(job)) if job.enrichment_tier == claimed_jobs[0].enrichment_tier => claimed_jobs.push(job),
+            Ok(Some(job)) => {
+                process_claimed_job(worker_id, &job, job_store, read_store, derived_store, processor_factory)?;
+            }
+            Ok(None) => break,
+            Err(err) => {
+                error!("Worker {} failed to claim additional batch job: {}", worker_id, err);
+                break;
+            }
+        }
+    }
+
+    process_claimed_job_batch(
+        worker_id,
+        claimed_jobs,
+        job_store,
+        read_store,
+        derived_store,
+        processor_factory,
+        batch_processor,
+    )
+}
+
+fn process_claimed_job_batch(
+    worker_id: &str,
+    claimed_jobs: Vec<ClaimedJob>,
+    job_store: &dyn EnrichmentJobLifecycleStore,
+    read_store: &dyn ArtifactReadStore,
+    derived_store: &dyn DerivedMetadataWriteStore,
+    processor_factory: &dyn ArtifactProcessorFactory,
+    batch_processor: Box<dyn ArtifactBatchProcessor>,
+) -> std::result::Result<(), String> {
+    let single_processor = processor_factory
+        .build(claimed_jobs[0].enrichment_tier)
+        .map_err(|err| format!("failed to build single processor fallback: {err}"))?;
+
+    let mut batch_candidates = Vec::new();
+    let mut batch_bytes = 0usize;
+    let mut deferred_single = Vec::new();
+
+    for claimed_job in claimed_jobs {
+        let payload = match ArtifactEnrichmentPayload::from_json(&claimed_job.payload_json) {
+            Ok(payload) => payload,
+            Err(err) => {
+                fail_job(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    "Failed to parse payload JSON",
+                    err,
+                );
+                continue;
+            }
+        };
+
+        let loaded = match read_store.load_artifact_for_enrichment(&claimed_job.artifact_id) {
+            Ok(Some(loaded)) => loaded,
+            Ok(None) => {
+                fail_job_message(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    format!("Artifact {} not found for enrichment", claimed_job.artifact_id),
+                );
+                continue;
+            }
+            Err(err) => {
+                fail_job(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    "Failed to load artifact for enrichment",
+                    err,
+                );
+                continue;
+            }
+        };
+
+        let Some(source_type) = crate::storage::SourceType::from_str(&payload.source_type) else {
+            fail_job_message(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                format!(
+                    "Invalid artifact source_type in enrichment payload: {}",
+                    payload.source_type
+                ),
+            );
+            continue;
+        };
+
+        let input = ArtifactProcessorInput {
+            artifact_id: loaded.artifact.artifact_id.clone(),
+            import_id: payload.import_id.clone(),
+            source_type,
+            title: loaded.artifact.title.clone(),
+            participants: loaded.participants,
+            segments: loaded.segments,
+        };
+
+        if !batch_processor.can_process(&input) {
+            deferred_single.push((claimed_job, input));
+            continue;
+        }
+
+        match batch_processor.estimate_size_bytes(&input) {
+            Ok(size)
+                if batch_candidates.len() < batch_processor.max_batch_jobs()
+                    && batch_bytes + size <= batch_processor.max_batch_bytes() =>
+            {
+                batch_bytes += size;
+                batch_candidates.push((claimed_job, input));
+            }
+            Ok(_) => deferred_single.push((claimed_job, input)),
+            Err(err) => {
+                fail_job(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    "Failed to prepare batch prompt",
+                    err,
+                );
+            }
+        }
+    }
+
+    if !batch_candidates.is_empty() {
+        let inputs: Vec<ArtifactProcessorInput> =
+            batch_candidates.iter().map(|(_, input)| input.clone()).collect();
+        let results = batch_processor.process_batch(&inputs);
+        for ((claimed_job, input), result) in batch_candidates.into_iter().zip(results.into_iter()) {
+            match result {
+                Ok(output) => persist_and_complete_job(
+                    worker_id,
+                    &claimed_job,
+                    &input,
+                    &output,
+                    job_store,
+                    derived_store,
+                )?,
+                Err(err) => {
+                    debug!(
+                        "Worker {} retrying batch item {} through single-item fallback after batch failure: {}",
+                        worker_id, claimed_job.job_id, err
+                    );
+                    match single_processor.process(&input) {
+                        Ok(output) => persist_and_complete_job(
+                            worker_id,
+                            &claimed_job,
+                            &input,
+                            &output,
+                            job_store,
+                            derived_store,
+                        )?,
+                        Err(single_err) => {
+                            let _ = handle_processor_error(
+                                job_store,
+                                worker_id,
+                                &claimed_job.job_id,
+                                single_err,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (claimed_job, input) in deferred_single {
+        let output = single_processor.process(&input).map_err(|err| {
+            handle_processor_error(job_store, worker_id, &claimed_job.job_id, err)
+        })?;
+        persist_and_complete_job(
+            worker_id,
+            &claimed_job,
+            &input,
+            &output,
+            job_store,
+            derived_store,
+        )?;
+    }
+
+    Ok(())
 }
 
 fn process_claimed_job(
@@ -121,6 +332,24 @@ fn process_claimed_job(
         handle_processor_error(job_store, worker_id, &claimed_job.job_id, err)
     })?;
 
+    persist_and_complete_job(
+        worker_id,
+        claimed_job,
+        &processor_input,
+        &output,
+        job_store,
+        derived_store,
+    )
+}
+
+fn persist_and_complete_job(
+    worker_id: &str,
+    claimed_job: &ClaimedJob,
+    processor_input: &ArtifactProcessorInput,
+    output: &ArtifactProcessorOutput,
+    job_store: &dyn EnrichmentJobLifecycleStore,
+    derived_store: &dyn DerivedMetadataWriteStore,
+) -> std::result::Result<(), String> {
     let attempt = build_derivation_attempt(claimed_job, &processor_input, &output);
     derived_store
         .write_derivation_attempt(attempt)

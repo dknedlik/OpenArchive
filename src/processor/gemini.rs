@@ -1,4 +1,6 @@
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
@@ -8,13 +10,15 @@ use crate::config::GeminiConfig;
 use crate::storage::types::EnrichmentTier;
 
 use super::{
-    structured_output_schema, ArtifactProcessor, ArtifactProcessorFactory,
-    ConversationEnrichmentStrategy, HostedArtifactProcessor, InferenceClient, InferenceResult,
-    InferenceUsage, ProcessorError,
+    build_conversation_user_prompt, should_shape_conversation_input, structured_output_schema,
+    ArtifactBatchProcessor, ArtifactProcessor, ArtifactProcessorFactory, ArtifactProcessorInput,
+    ArtifactProcessorOutput, ConversationEnrichmentStrategy, GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+    HostedArtifactProcessor, InferenceClient, InferenceResult, InferenceUsage, ProcessorError,
 };
 
 pub struct GeminiProcessorFactory {
     client: Arc<dyn InferenceClient>,
+    batch_client: Option<Arc<GeminiBatchClient>>,
     standard_model: String,
     quality_model: String,
 }
@@ -29,6 +33,11 @@ impl GeminiProcessorFactory {
 
         Ok(Self {
             client: Arc::new(client),
+            batch_client: if config.batch_enabled {
+                Some(Arc::new(GeminiBatchClient::new(&config).map_err(|err| err.to_string())?))
+            } else {
+                None
+            },
             standard_model: config.standard_model,
             quality_model,
         })
@@ -49,6 +58,135 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
             provider_name: "gemini",
             strategy: ConversationEnrichmentStrategy::gemini_default(),
         }))
+    }
+
+    fn build_batch_processor(
+        &self,
+        tier: EnrichmentTier,
+    ) -> Result<Option<Box<dyn ArtifactBatchProcessor>>, ProcessorError> {
+        let Some(batch_client) = &self.batch_client else {
+            return Ok(None);
+        };
+        let model = match tier {
+            EnrichmentTier::Standard => self.standard_model.clone(),
+            EnrichmentTier::Quality => self.quality_model.clone(),
+        };
+        Ok(Some(Box::new(GeminiBatchProcessor {
+            client: Arc::clone(batch_client),
+            model,
+        })))
+    }
+}
+
+struct GeminiBatchProcessor {
+    client: Arc<GeminiBatchClient>,
+    model: String,
+}
+
+impl ArtifactBatchProcessor for GeminiBatchProcessor {
+    fn max_batch_jobs(&self) -> usize {
+        self.client.max_batch_jobs
+    }
+
+    fn max_batch_bytes(&self) -> usize {
+        self.client.batch_max_bytes
+    }
+
+    fn can_process(&self, input: &ArtifactProcessorInput) -> bool {
+        !should_shape_conversation_input(input)
+    }
+
+    fn estimate_size_bytes(&self, input: &ArtifactProcessorInput) -> Result<usize, ProcessorError> {
+        let user_prompt = build_conversation_user_prompt(input)?;
+        Ok(GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT.len() + user_prompt.len())
+    }
+
+    fn process_batch(
+        &self,
+        inputs: &[ArtifactProcessorInput],
+    ) -> Vec<Result<ArtifactProcessorOutput, ProcessorError>> {
+        if inputs.is_empty() {
+            return Vec::new();
+        }
+
+        let mut requests = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            match build_conversation_user_prompt(input) {
+                Ok(user_prompt) => requests.push(GeminiBatchEnrichmentRequest {
+                    key: input.artifact_id.clone(),
+                    system_prompt: GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT.to_string(),
+                    user_prompt,
+                    max_output_tokens: None,
+                }),
+                Err(err) => {
+                    return inputs
+                        .iter()
+                        .map(|_| {
+                            Err(ProcessorError::Message {
+                                message: err.to_string(),
+                            })
+                        })
+                        .collect()
+                }
+            }
+        }
+
+        let job = match self.client.submit_inline_batch(&self.model, Some("openarchive-enrichment"), &requests) {
+            Ok(job) => job,
+            Err(err) => {
+                let message = err.to_string();
+                return inputs
+                    .iter()
+                    .map(|_| Err(ProcessorError::Message { message: message.clone() }))
+                    .collect();
+            }
+        };
+
+        let completed = match self.client.wait_for_batch(&job.name) {
+            Ok(job) => job,
+            Err(err) => {
+                let message = err.to_string();
+                return inputs
+                    .iter()
+                    .map(|_| Err(ProcessorError::Message { message: message.clone() }))
+                    .collect();
+            }
+        };
+
+        match completed.inline_results() {
+            Ok(results) => results
+                .into_iter()
+                .map(|result| {
+                    let parsed: super::ModelArtifactOutput = serde_json::from_str(&result.output_text)
+                        .map_err(|source| ProcessorError::ParseModelJson {
+                            source,
+                            body_preview: super::preview(&result.output_text),
+                        })?;
+                    let input = inputs
+                        .iter()
+                        .find(|input| input.artifact_id == result.key)
+                        .ok_or_else(|| ProcessorError::Message {
+                            message: format!("Gemini batch returned unknown key {}", result.key),
+                        })?;
+                    let parsed = parsed.resolve_evidence_aliases(input);
+                    parsed.validate_against(input)?;
+                    Ok(parsed.into_processor_output(
+                        self.model.clone(),
+                        result.usage,
+                        "gemini_enrichment",
+                        "gemini",
+                        super::GEMINI_PROMPT_VERSION,
+                    ))
+                })
+                .collect(),
+            Err(err) => {
+                let message = err.to_string();
+                inputs
+                    .iter()
+                    .map(|_| Err(ProcessorError::Message { message: message.clone() }))
+                    .collect()
+            }
+        }
     }
 }
 
@@ -175,6 +313,7 @@ impl InferenceClient for GeminiClient {
 
 #[derive(Debug, Clone)]
 pub struct GeminiBatchEnrichmentRequest {
+    pub key: String,
     pub system_prompt: String,
     pub user_prompt: String,
     pub max_output_tokens: Option<u32>,
@@ -193,12 +332,17 @@ pub struct GeminiBatchJob {
     pub create_time: Option<String>,
     #[serde(default, rename = "updateTime")]
     pub update_time: Option<String>,
+    #[serde(default)]
+    pub dest: Option<GeminiBatchDestination>,
 }
 
 pub struct GeminiBatchClient {
     client: Client,
     base_url: String,
     max_output_tokens: u32,
+    max_batch_jobs: usize,
+    batch_max_bytes: usize,
+    poll_interval: Duration,
 }
 
 impl GeminiBatchClient {
@@ -221,6 +365,9 @@ impl GeminiBatchClient {
             client,
             base_url: config.base_url.trim_end_matches('/').to_string(),
             max_output_tokens: config.max_output_tokens,
+            max_batch_jobs: config.batch_max_jobs,
+            batch_max_bytes: config.batch_max_bytes,
+            poll_interval: config.batch_poll_interval,
         })
     }
 
@@ -230,40 +377,46 @@ impl GeminiBatchClient {
         display_name: Option<&str>,
         requests: &[GeminiBatchEnrichmentRequest],
     ) -> Result<GeminiBatchJob, ProcessorError> {
-        let endpoint = format!("{}/batches", self.base_url);
+        let endpoint = format!(
+            "{}/{}:batchGenerateContent",
+            self.base_url,
+            normalize_model_resource(model)
+        );
         let body = GeminiBatchCreateRequest {
-            model: normalize_model_resource(model),
-            config: GeminiBatchConfig {
+            batch: GeminiBatchDefinition {
                 display_name: display_name.map(|value| value.to_string()),
-            },
-            src: GeminiBatchSource {
-                inlined_requests: GeminiInlinedRequests {
-                    requests: requests
-                        .iter()
-                        .map(|request| GeminiBatchRequestEntry {
-                            request: GeminiGenerateContentRequest {
-                                system_instruction: GeminiRequestContent {
-                                    role: None,
-                                    parts: vec![GeminiTextPart {
-                                        text: request.system_prompt.clone(),
+                input_config: GeminiBatchInputConfig {
+                    requests: GeminiInlineBatchRequests {
+                        requests: requests
+                            .iter()
+                            .map(|request| GeminiBatchRequestEntry {
+                                request: GeminiGenerateContentRequest {
+                                    system_instruction: GeminiRequestContent {
+                                        role: None,
+                                        parts: vec![GeminiTextPart {
+                                            text: request.system_prompt.clone(),
+                                        }],
+                                    },
+                                    contents: vec![GeminiRequestContent {
+                                        role: Some("user".to_string()),
+                                        parts: vec![GeminiTextPart {
+                                            text: request.user_prompt.clone(),
+                                        }],
                                     }],
+                                    generation_config: GeminiGenerationConfig {
+                                        response_mime_type: "application/json".to_string(),
+                                        response_json_schema: structured_output_schema(),
+                                        max_output_tokens: request
+                                            .max_output_tokens
+                                            .unwrap_or(self.max_output_tokens),
+                                    },
                                 },
-                                contents: vec![GeminiRequestContent {
-                                    role: Some("user".to_string()),
-                                    parts: vec![GeminiTextPart {
-                                        text: request.user_prompt.clone(),
-                                    }],
-                                }],
-                                generation_config: GeminiGenerationConfig {
-                                    response_mime_type: "application/json".to_string(),
-                                    response_json_schema: structured_output_schema(),
-                                    max_output_tokens: request
-                                        .max_output_tokens
-                                        .unwrap_or(self.max_output_tokens),
+                                metadata: GeminiBatchRequestMetadata {
+                                    key: request.key.clone(),
                                 },
-                            },
-                        })
-                        .collect(),
+                            })
+                            .collect(),
+                    },
                 },
             },
         };
@@ -289,10 +442,12 @@ impl GeminiBatchClient {
             });
         }
 
-        serde_json::from_str(&response_text).map_err(|source| ProcessorError::ParseInferenceResponse {
-            source,
-            body_preview: super::preview(&response_text),
-        })
+        let operation: GeminiBatchOperation =
+            serde_json::from_str(&response_text).map_err(|source| ProcessorError::ParseInferenceResponse {
+                source,
+                body_preview: super::preview(&response_text),
+            })?;
+        Ok(operation.into_batch_job())
     }
 
     pub fn get_batch(&self, name: &str) -> Result<GeminiBatchJob, ProcessorError> {
@@ -321,10 +476,39 @@ impl GeminiBatchClient {
             });
         }
 
-        serde_json::from_str(&response_text).map_err(|source| ProcessorError::ParseInferenceResponse {
-            source,
-            body_preview: super::preview(&response_text),
-        })
+        let operation: GeminiBatchOperation =
+            serde_json::from_str(&response_text).map_err(|source| ProcessorError::ParseInferenceResponse {
+                source,
+                body_preview: super::preview(&response_text),
+            })?;
+        Ok(operation.into_batch_job())
+    }
+
+    pub fn wait_for_batch(&self, name: &str) -> Result<GeminiBatchJob, ProcessorError> {
+        loop {
+            let job = self.get_batch(name)?;
+            let state = job.state.as_deref().unwrap_or_default();
+            if matches!(
+                state,
+                "JOB_STATE_SUCCEEDED" | "SUCCEEDED" | "BATCH_STATE_SUCCEEDED"
+            ) {
+                return Ok(job);
+            }
+            if matches!(
+                state,
+                "JOB_STATE_FAILED"
+                    | "FAILED"
+                    | "JOB_STATE_CANCELLED"
+                    | "CANCELLED"
+                    | "BATCH_STATE_FAILED"
+                    | "BATCH_STATE_CANCELLED"
+            ) {
+                return Err(ProcessorError::Message {
+                    message: format!("Gemini batch {name} finished in terminal state {state}"),
+                });
+            }
+            thread::sleep(self.poll_interval);
+        }
     }
 }
 
@@ -385,7 +569,7 @@ struct GeminiGenerationConfig {
     max_output_tokens: u32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiGenerateContentResponse {
     #[serde(default)]
@@ -419,7 +603,7 @@ impl GeminiGenerateContentResponse {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiCandidate {
     #[serde(default)]
@@ -428,13 +612,13 @@ struct GeminiCandidate {
     finish_reason: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct GeminiResponseContent {
     #[serde(default)]
     parts: Vec<GeminiResponsePart>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct GeminiResponsePart {
     #[serde(default)]
     text: Option<String>,
@@ -456,30 +640,180 @@ struct GeminiUsageMetadata {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiBatchCreateRequest {
-    model: String,
-    config: GeminiBatchConfig,
-    src: GeminiBatchSource,
+    batch: GeminiBatchDefinition,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GeminiBatchConfig {
+struct GeminiBatchDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
+    input_config: GeminiBatchInputConfig,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GeminiBatchSource {
-    inlined_requests: GeminiInlinedRequests,
+struct GeminiBatchInputConfig {
+    requests: GeminiInlineBatchRequests,
 }
 
 #[derive(Debug, Serialize)]
-struct GeminiInlinedRequests {
+struct GeminiInlineBatchRequests {
     requests: Vec<GeminiBatchRequestEntry>,
 }
 
 #[derive(Debug, Serialize)]
 struct GeminiBatchRequestEntry {
     request: GeminiGenerateContentRequest,
+    metadata: GeminiBatchRequestMetadata,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiBatchRequestMetadata {
+    key: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeminiBatchResult {
+    pub key: String,
+    pub output_text: String,
+    pub usage: Option<InferenceUsage>,
+}
+
+impl GeminiBatchJob {
+    pub fn inline_results(&self) -> Result<Vec<GeminiBatchResult>, ProcessorError> {
+        let response_group = self
+            .dest
+            .as_ref()
+            .and_then(|dest| dest.inlined_responses.as_ref())
+            .ok_or_else(|| ProcessorError::Message {
+                message: "Gemini batch completed without inline responses".to_string(),
+            })?;
+        let responses = if !response_group.responses.is_empty() {
+            &response_group.responses
+        } else {
+            &response_group.inline_entries
+        };
+
+        responses
+            .iter()
+            .map(|entry| {
+                let key = entry
+                    .key
+                    .clone()
+                    .or_else(|| entry.metadata.as_ref().and_then(|metadata| metadata.key.clone()))
+                    .ok_or_else(|| ProcessorError::Message {
+                        message: "Gemini batch response missing request key".to_string(),
+                    })?;
+                let response = entry.response.as_ref().ok_or_else(|| ProcessorError::Message {
+                    message: format!("Gemini batch response {key} missing output"),
+                })?;
+                let output_text = response.flatten_text().ok_or_else(|| ProcessorError::Message {
+                    message: format!("Gemini batch response {key} returned empty content"),
+                })?;
+                Ok(GeminiBatchResult {
+                    key,
+                    output_text,
+                    usage: response
+                        .usage_metadata
+                        .clone()
+                        .and_then(InferenceUsage::from_gemini_usage),
+                })
+            })
+            .collect()
+    }
+
+    pub fn request_count(&self) -> usize {
+        self.dest
+            .as_ref()
+            .and_then(|dest| dest.inlined_responses.as_ref())
+            .map(|responses| {
+                if !responses.responses.is_empty() {
+                    responses.responses.len()
+                } else {
+                    responses.inline_entries.len()
+                }
+            })
+            .unwrap_or(0)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GeminiBatchDestination {
+    #[serde(default, rename = "inlinedResponses")]
+    pub inlined_responses: Option<GeminiInlinedResponses>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GeminiInlinedResponses {
+    #[serde(default)]
+    pub responses: Vec<GeminiInlinedResponseEntry>,
+    #[serde(default, rename = "inlinedResponses")]
+    pub inline_entries: Vec<GeminiInlinedResponseEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GeminiInlinedResponseEntry {
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<GeminiInlinedResponseMetadata>,
+    #[serde(default)]
+    response: Option<GeminiGenerateContentResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GeminiInlinedResponseMetadata {
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiBatchOperation {
+    name: String,
+    #[serde(default)]
+    metadata: Option<GeminiBatchOperationMetadata>,
+    #[serde(default)]
+    response: Option<GeminiBatchOperationResponse>,
+}
+
+impl GeminiBatchOperation {
+    fn into_batch_job(self) -> GeminiBatchJob {
+        GeminiBatchJob {
+            name: self.name,
+            state: self.metadata.as_ref().and_then(|metadata| metadata.state.clone()),
+            display_name: self.metadata.as_ref().and_then(|metadata| metadata.display_name.clone()),
+            model: self.metadata.as_ref().and_then(|metadata| metadata.model.clone()),
+            create_time: self.metadata.as_ref().and_then(|metadata| metadata.create_time.clone()),
+            update_time: self.metadata.as_ref().and_then(|metadata| metadata.update_time.clone()),
+            dest: self.response.map(|response| GeminiBatchDestination {
+                inlined_responses: response.dest.and_then(|dest| dest.inlined_responses).or(response.inlined_responses),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiBatchOperationMetadata {
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    create_time: Option<String>,
+    #[serde(default)]
+    update_time: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiBatchOperationResponse {
+    #[serde(default)]
+    dest: Option<GeminiBatchDestination>,
+    #[serde(default, rename = "inlinedResponses")]
+    inlined_responses: Option<GeminiInlinedResponses>,
 }

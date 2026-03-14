@@ -188,6 +188,10 @@ pub struct GeminiConfig {
     pub max_output_tokens: u32,
     pub standard_model: String,
     pub quality_model: Option<String>,
+    pub batch_enabled: bool,
+    pub batch_max_jobs: usize,
+    pub batch_max_bytes: usize,
+    pub batch_poll_interval: Duration,
 }
 
 impl GeminiConfig {
@@ -202,6 +206,14 @@ impl GeminiConfig {
                 .unwrap_or(4000),
             standard_model: required_env("OA_GEMINI_STANDARD_MODEL")?,
             quality_model: optional_trimmed_env("OA_GEMINI_QUALITY_MODEL"),
+            batch_enabled: env::var("OA_GEMINI_BATCH_ENABLED")
+                .ok()
+                .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+                .unwrap_or(false),
+            batch_max_jobs: positive_usize_env("OA_GEMINI_BATCH_MAX_JOBS")?.unwrap_or(16),
+            batch_max_bytes: positive_usize_env("OA_GEMINI_BATCH_MAX_BYTES")?.unwrap_or(1_500_000),
+            batch_poll_interval: optional_duration_env_ms("OA_GEMINI_BATCH_POLL_INTERVAL_MS")?
+                .unwrap_or(Duration::from_secs(5)),
         })
     }
 }

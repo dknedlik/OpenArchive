@@ -154,6 +154,24 @@ impl ArtifactProcessor for StubProcessor {
 
 pub trait ArtifactProcessorFactory: Send + Sync {
     fn build(&self, tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError>;
+
+    fn build_batch_processor(
+        &self,
+        _tier: EnrichmentTier,
+    ) -> Result<Option<Box<dyn ArtifactBatchProcessor>>, ProcessorError> {
+        Ok(None)
+    }
+}
+
+pub trait ArtifactBatchProcessor: Send + Sync {
+    fn max_batch_jobs(&self) -> usize;
+    fn max_batch_bytes(&self) -> usize;
+    fn can_process(&self, input: &ArtifactProcessorInput) -> bool;
+    fn estimate_size_bytes(&self, input: &ArtifactProcessorInput) -> Result<usize, ProcessorError>;
+    fn process_batch(
+        &self,
+        inputs: &[ArtifactProcessorInput],
+    ) -> Vec<Result<ArtifactProcessorOutput, ProcessorError>>;
 }
 
 trait EnrichmentStrategy: Send + Sync {
@@ -968,7 +986,9 @@ fn normalize_optional_text(value: String) -> Option<String> {
     }
 }
 
-fn build_conversation_user_prompt(input: &ArtifactProcessorInput) -> Result<String, ProcessorError> {
+pub(crate) fn build_conversation_user_prompt(
+    input: &ArtifactProcessorInput,
+) -> Result<String, ProcessorError> {
     #[derive(Serialize)]
     struct PromptSegment<'a> {
         evidence_ref: String,
@@ -1023,7 +1043,7 @@ struct ConversationWindow {
     segments: Vec<LoadedSegment>,
 }
 
-fn should_shape_conversation_input(input: &ArtifactProcessorInput) -> bool {
+pub(crate) fn should_shape_conversation_input(input: &ArtifactProcessorInput) -> bool {
     let char_count: usize = input
         .segments
         .iter()
@@ -1360,11 +1380,11 @@ pub(crate) fn structured_output_schema() -> serde_json::Value {
 }
 
 const OPENAI_PROMPT_VERSION: &str = "openai-strict-v1";
-const GEMINI_PROMPT_VERSION: &str = "gemini-strict-v5";
+pub(crate) const GEMINI_PROMPT_VERSION: &str = "gemini-strict-v5";
 
 const ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every summary, classification, and memory must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, or commitments.\n4. Keep the output compact and machine-readable.\n5. Prefer fewer, stronger memories over weak ones.\n6. If the artifact contains durable engineering decisions, constraints, or explicit next steps, emit at least one memory.\n7. Classifications are optional. Prefer 0 or 1 classifications. Emit a second classification only if it adds a clearly distinct retrieval hook.\n8. Do not emit generic or redundant classifications.\n9. classification_type must be \"topic\" or \"intent\".\n10. topic must be a specific retrieval-useful subject phrase, not a generic label.\n11. intent must be a short concrete goal phrase in snake_case.\n12. Memories must use only these memory_type values: preference, project_fact, identity_fact, ongoing_task, reference.\n13. memory_scope is always \"artifact\" and memory_scope_value is the artifact_id.\n14. Summary must be 2-4 compact sentences focused on lasting engineering substance.\n15. importance_score measures long-term retrieval value, operational risk, or durable decision significance.\n16. Low-signal artifacts should usually have low importance and no classifications.\n17. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n18. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
-const GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Gemini. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every summary, classification, and memory must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, or commitments.\n4. Keep the output compact, but do not overcompress rich artifacts.\n5. For dense artifacts, preserve the main topic plus the most important subtopics, decisions, or tensions instead of collapsing them into one generic idea.\n6. Prefer fewer, stronger memories over weak ones, but do not omit durable memories from rich artifacts.\n7. When several distinct durable facts exist, prefer memories that cover different aspects of the artifact instead of repeating one theme.\n8. Use memory_type precisely: preference for stable likes/dislikes or values stated by the user, identity_fact for self-description, ongoing_task for explicit unfinished work, project_fact for durable facts or decisions, reference for reusable external resources.\n9. Only use preference or identity_fact when the artifact directly supports them with first-person statements or clear stable values. Do not force those types when support is weak.\n10. Do not split one idea into several narrow project_fact memories. Prefer 3-5 distinct high-value memories over many small ones.\n11. Classifications are optional. Prefer 0 or 1 classifications. Emit a second classification only if it adds a clearly distinct retrieval hook.\n12. Do not emit generic or redundant classifications.\n13. classification_type must be \"topic\" or \"intent\".\n14. topic must be a specific retrieval-useful subject phrase, not a generic label.\n15. intent must be a short concrete goal phrase in snake_case.\n16. Classification body_text must be brief and should not restate the full summary.\n17. memory_scope is always \"artifact\" and memory_scope_value is the artifact_id.\n18. Summary must be 2-4 compact sentences, but should still cover the artifact's lasting substance.\n19. importance_score measures long-term retrieval value, operational risk, or durable decision significance.\n20. Routine advice, consumer guidance, troubleshooting, and general Q&A should usually stay in the 3-6 range.\n21. Use 7 or higher only for artifacts with durable life decisions, major technical direction, significant operational risk, or unusually reusable knowledge.\n22. Low-signal artifacts should usually have low importance and no classifications.\n23. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n24. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+pub(crate) const GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Gemini. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every summary, classification, and memory must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, or commitments.\n4. Keep the output compact, but do not overcompress rich artifacts.\n5. For dense artifacts, preserve the main topic plus the most important subtopics, decisions, or tensions instead of collapsing them into one generic idea.\n6. Prefer fewer, stronger memories over weak ones, but do not omit durable memories from rich artifacts.\n7. When several distinct durable facts exist, prefer memories that cover different aspects of the artifact instead of repeating one theme.\n8. Use memory_type precisely: preference for stable likes/dislikes or values stated by the user, identity_fact for self-description, ongoing_task for explicit unfinished work, project_fact for durable facts or decisions, reference for reusable external resources.\n9. Only use preference or identity_fact when the artifact directly supports them with first-person statements or clear stable values. Do not force those types when support is weak.\n10. Do not split one idea into several narrow project_fact memories. Prefer 3-5 distinct high-value memories over many small ones.\n11. Classifications are optional. Prefer 0 or 1 classifications. Emit a second classification only if it adds a clearly distinct retrieval hook.\n12. Do not emit generic or redundant classifications.\n13. classification_type must be \"topic\" or \"intent\".\n14. topic must be a specific retrieval-useful subject phrase, not a generic label.\n15. intent must be a short concrete goal phrase in snake_case.\n16. Classification body_text must be brief and should not restate the full summary.\n17. memory_scope is always \"artifact\" and memory_scope_value is the artifact_id.\n18. Summary must be 2-4 compact sentences, but should still cover the artifact's lasting substance.\n19. importance_score measures long-term retrieval value, operational risk, or durable decision significance.\n20. Routine advice, consumer guidance, troubleshooting, and general Q&A should usually stay in the 3-6 range.\n21. Use 7 or higher only for artifacts with durable life decisions, major technical direction, significant operational risk, or unusually reusable knowledge.\n22. Low-signal artifacts should usually have low importance and no classifications.\n23. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n24. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
 #[derive(Debug, Error)]
 pub enum ProcessorError {
