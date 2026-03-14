@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use open_archive::config::OpenRouterConfig;
+use open_archive::config::OpenAiConfig;
 use open_archive::processor::{
-    ArtifactProcessorFactory, ArtifactProcessorInput, OpenRouterProcessorFactory,
+    ArtifactProcessorFactory, ArtifactProcessorInput, OpenAiProcessorFactory,
 };
 use open_archive::storage::types::{
     EnrichmentTier, LoadedParticipant, LoadedSegment, ScopeType, SourceType,
@@ -17,9 +17,9 @@ use serde::Deserialize;
 
 #[derive(Debug, Parser)]
 #[command(name = "eval_models")]
-#[command(about = "Run OpenArchive enrichment eval fixtures against one or more OpenRouter models")]
+#[command(about = "Run OpenArchive enrichment eval fixtures against one or more OpenAI models")]
 struct Args {
-    /// OpenRouter model ids to compare.
+    /// OpenAI model ids to compare.
     #[arg(required = true)]
     models: Vec<String>,
 
@@ -80,8 +80,8 @@ struct ModelPricing {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let config = OpenRouterConfig::from_env().context(
-        "failed to load OpenRouter config from env; set OA_OPENROUTER_API_KEY and related vars",
+    let config = OpenAiConfig::from_env().context(
+        "failed to load OpenAI config from env; set OA_OPENAI_API_KEY and related vars",
     )?;
     let case_names = if args.cases.is_empty() {
         discover_case_names()?
@@ -186,21 +186,19 @@ fn main() -> Result<()> {
 }
 
 fn run_model(
-    base_config: &OpenRouterConfig,
+    base_config: &OpenAiConfig,
     model: &str,
     case_names: &[String],
 ) -> Result<Vec<CaseResult>> {
-    let factory = OpenRouterProcessorFactory::new(OpenRouterConfig {
+    let factory = OpenAiProcessorFactory::new(OpenAiConfig {
         api_key: base_config.api_key.clone(),
         base_url: base_config.base_url.clone(),
         max_output_tokens: base_config.max_output_tokens,
         reasoning_effort_override: base_config.reasoning_effort_override,
         standard_model: model.to_string(),
         quality_model: Some(model.to_string()),
-        site_url: base_config.site_url.clone(),
-        app_name: base_config.app_name.clone(),
     })
-    .map_err(|err| anyhow!("failed to build OpenRouter factory: {err}"))?;
+    .map_err(|err| anyhow!("failed to build OpenAI factory: {err}"))?;
 
     let processor = factory
         .build(EnrichmentTier::Standard)

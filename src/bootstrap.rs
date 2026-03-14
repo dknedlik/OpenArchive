@@ -9,8 +9,8 @@ use crate::config::{AppConfig, InferenceConfig, ObjectStoreConfig, RelationalSto
 use crate::error::{ConfigError, ConfigResult};
 use crate::object_store::{LocalFsObjectStore, ObjectStore, S3CompatibleObjectStore};
 use crate::processor::{
-    ArtifactProcessorFactory, GeminiProcessorFactory, OpenRouterProcessorFactory,
-    StubProcessorFactory,
+    AnthropicProcessorFactory, ArtifactProcessorFactory, GeminiProcessorFactory,
+    GrokProcessorFactory, OpenAiProcessorFactory, StubProcessorFactory,
 };
 use crate::storage::{
     ArtifactReadStore, EnrichmentJobLifecycleStore, ImportWriteStore, OracleEnrichmentJobStore,
@@ -99,13 +99,23 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
 
     let processor_factory: Arc<dyn ArtifactProcessorFactory> = match &config.inference {
         InferenceConfig::Stub => Arc::new(StubProcessorFactory),
-        InferenceConfig::OpenRouter(openrouter) => Arc::new(
-            OpenRouterProcessorFactory::new(openrouter.clone()).map_err(|message| {
+        InferenceConfig::OpenAi(openai) => Arc::new(
+            OpenAiProcessorFactory::new(openai.clone()).map_err(|message| {
                 ConfigError::InvalidInferenceConfig { message }
             })?,
         ),
         InferenceConfig::Gemini(gemini) => Arc::new(
             GeminiProcessorFactory::new(gemini.clone()).map_err(|message| {
+                ConfigError::InvalidInferenceConfig { message }
+            })?,
+        ),
+        InferenceConfig::Anthropic(anthropic) => Arc::new(
+            AnthropicProcessorFactory::new(anthropic.clone()).map_err(|message| {
+                ConfigError::InvalidInferenceConfig { message }
+            })?,
+        ),
+        InferenceConfig::Grok(grok) => Arc::new(
+            GrokProcessorFactory::new(grok.clone()).map_err(|message| {
                 ConfigError::InvalidInferenceConfig { message }
             })?,
         ),

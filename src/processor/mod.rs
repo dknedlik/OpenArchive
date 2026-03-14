@@ -7,11 +7,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
-use crate::config::{OpenRouterConfig, OpenRouterReasoningEffort};
+use crate::config::{OpenAiConfig, OpenAiReasoningEffort};
 use crate::storage::types::{EnrichmentTier, LoadedParticipant, LoadedSegment, ScopeType, SourceType};
 
+mod anthropic;
 mod gemini;
+mod grok;
+pub use anthropic::AnthropicProcessorFactory;
 pub use gemini::{GeminiBatchClient, GeminiBatchEnrichmentRequest, GeminiBatchJob, GeminiProcessorFactory};
+pub use grok::GrokProcessorFactory;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactProcessorInput {
@@ -244,9 +248,9 @@ struct ConversationEnrichmentStrategy {
 }
 
 impl ConversationEnrichmentStrategy {
-    fn openrouter_default() -> Arc<dyn EnrichmentStrategy> {
+    fn openai_default() -> Arc<dyn EnrichmentStrategy> {
         Arc::new(Self {
-            prompt_version: OPENROUTER_PROMPT_VERSION,
+            prompt_version: OPENAI_PROMPT_VERSION,
             system_prompt: ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
         })
     }
@@ -299,15 +303,15 @@ impl EnrichmentStrategy for ConversationEnrichmentStrategy {
     }
 }
 
-pub struct OpenRouterProcessorFactory {
+pub struct OpenAiProcessorFactory {
     client: Arc<dyn InferenceClient>,
     standard_model: String,
     quality_model: String,
 }
 
-impl OpenRouterProcessorFactory {
-    pub fn new(config: OpenRouterConfig) -> Result<Self, String> {
-        let client = OpenRouterClient::new(&config).map_err(|err| err.to_string())?;
+impl OpenAiProcessorFactory {
+    pub fn new(config: OpenAiConfig) -> Result<Self, String> {
+        let client = OpenAiClient::new(&config).map_err(|err| err.to_string())?;
         let quality_model = config
             .quality_model
             .clone()
@@ -334,7 +338,7 @@ impl OpenRouterProcessorFactory {
     }
 }
 
-impl ArtifactProcessorFactory for OpenRouterProcessorFactory {
+impl ArtifactProcessorFactory for OpenAiProcessorFactory {
     fn build(&self, tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError> {
         let model = match tier {
             EnrichmentTier::Standard => self.standard_model.clone(),
@@ -344,9 +348,9 @@ impl ArtifactProcessorFactory for OpenRouterProcessorFactory {
         Ok(Box::new(HostedArtifactProcessor {
             client: Arc::clone(&self.client),
             model,
-            pipeline_name: "openrouter_enrichment",
-            provider_name: "openrouter",
-            strategy: ConversationEnrichmentStrategy::openrouter_default(),
+            pipeline_name: "openai_enrichment",
+            provider_name: "openai",
+            strategy: ConversationEnrichmentStrategy::openai_default(),
         }))
     }
 }
@@ -366,23 +370,21 @@ struct InferenceResult {
     usage: Option<InferenceUsage>,
 }
 
-struct OpenRouterClient {
+struct OpenAiClient {
     client: Client,
     base_url: String,
     max_output_tokens: u32,
-    reasoning_effort_override: OpenRouterReasoningEffort,
-    site_url: Option<String>,
-    app_name: Option<String>,
+    reasoning_effort_override: OpenAiReasoningEffort,
 }
 
-impl OpenRouterClient {
-    fn new(config: &OpenRouterConfig) -> Result<Self, ProcessorError> {
+impl OpenAiClient {
+    fn new(config: &OpenAiConfig) -> Result<Self, ProcessorError> {
         let mut default_headers = HeaderMap::new();
         default_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         let bearer = format!("Bearer {}", config.api_key);
         let auth_value =
             HeaderValue::from_str(&bearer).map_err(|err| ProcessorError::Message {
-                message: format!("invalid OpenRouter API key header: {err}"),
+                message: format!("invalid OpenAI API key header: {err}"),
             })?;
         default_headers.insert(AUTHORIZATION, auth_value);
 
@@ -396,13 +398,11 @@ impl OpenRouterClient {
             base_url: config.base_url.trim_end_matches('/').to_string(),
             max_output_tokens: config.max_output_tokens,
             reasoning_effort_override: config.reasoning_effort_override,
-            site_url: config.site_url.clone(),
-            app_name: config.app_name.clone(),
         })
     }
 }
 
-impl InferenceClient for OpenRouterClient {
+impl InferenceClient for OpenAiClient {
     fn complete_json(
         &self,
         model: &str,
@@ -413,22 +413,14 @@ impl InferenceClient for OpenRouterClient {
     }
 }
 
-impl OpenRouterClient {
+impl OpenAiClient {
     fn complete_via_responses(
         &self,
         model: &str,
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<InferenceResult, ProcessorError> {
-        let mut request = self.client.post(format!("{}/responses", self.base_url));
-
-        if let Some(site_url) = &self.site_url {
-            request = request.header("HTTP-Referer", site_url);
-        }
-        if let Some(app_name) = &self.app_name {
-            request = request.header("X-OpenRouter-Title", app_name);
-            request = request.header("X-Title", app_name);
-        }
+        let request = self.client.post(format!("{}/responses", self.base_url));
 
         let body = OpenRouterResponsesRequest {
             model,
@@ -441,13 +433,22 @@ impl OpenRouterClient {
             text: OpenRouterResponsesTextConfig {
                 format: structured_output_schema_wrapper(),
             },
-            input: vec![OpenRouterResponsesInputItem {
-                role: "user",
-                content: vec![OpenRouterResponsesContentItem {
-                    item_type: "input_text",
-                    text: format!("{system_prompt}\n\n{user_prompt}"),
-                }],
-            }],
+            input: vec![
+                OpenRouterResponsesInputItem {
+                    role: "system",
+                    content: vec![OpenRouterResponsesContentItem {
+                        item_type: "input_text",
+                        text: system_prompt.to_string(),
+                    }],
+                },
+                OpenRouterResponsesInputItem {
+                    role: "user",
+                    content: vec![OpenRouterResponsesContentItem {
+                        item_type: "input_text",
+                        text: user_prompt.to_string(),
+                    }],
+                },
+            ],
         };
 
         let request_body =
@@ -483,7 +484,7 @@ impl OpenRouterClient {
         let content = parsed.flatten_text();
         if content.trim().is_empty() {
             return Err(ProcessorError::Message {
-                message: "OpenRouter responses returned empty content".to_string(),
+                message: "OpenAI responses returned empty content".to_string(),
             });
         }
 
@@ -493,23 +494,23 @@ impl OpenRouterClient {
         })
     }
 
-    fn reasoning_effort_for_model(&self, model: &str) -> Option<OpenRouterReasoningEffort> {
-        if self.reasoning_effort_override != OpenRouterReasoningEffort::Auto {
+    fn reasoning_effort_for_model(&self, model: &str) -> Option<OpenAiReasoningEffort> {
+        if self.reasoning_effort_override != OpenAiReasoningEffort::Auto {
             return Some(self.reasoning_effort_override);
         }
 
         let model = model.to_ascii_lowercase();
         if model.contains("gpt-5.4") {
-            return Some(OpenRouterReasoningEffort::Low);
+            return Some(OpenAiReasoningEffort::Low);
         }
         if model.contains("gpt-5-mini") {
-            return Some(OpenRouterReasoningEffort::Medium);
+            return Some(OpenAiReasoningEffort::Medium);
         }
         if model.contains("gpt-5-nano") {
-            return Some(OpenRouterReasoningEffort::Minimal);
+            return Some(OpenAiReasoningEffort::Minimal);
         }
         if model.contains("gpt-5") {
-            return Some(OpenRouterReasoningEffort::Low);
+            return Some(OpenAiReasoningEffort::Low);
         }
 
         None
@@ -1358,7 +1359,7 @@ pub(crate) fn structured_output_schema() -> serde_json::Value {
     })
 }
 
-const OPENROUTER_PROMPT_VERSION: &str = "openrouter-strict-v7";
+const OPENAI_PROMPT_VERSION: &str = "openai-strict-v1";
 const GEMINI_PROMPT_VERSION: &str = "gemini-strict-v5";
 
 const ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every summary, classification, and memory must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, or commitments.\n4. Keep the output compact and machine-readable.\n5. Prefer fewer, stronger memories over weak ones.\n6. If the artifact contains durable engineering decisions, constraints, or explicit next steps, emit at least one memory.\n7. Classifications are optional. Prefer 0 or 1 classifications. Emit a second classification only if it adds a clearly distinct retrieval hook.\n8. Do not emit generic or redundant classifications.\n9. classification_type must be \"topic\" or \"intent\".\n10. topic must be a specific retrieval-useful subject phrase, not a generic label.\n11. intent must be a short concrete goal phrase in snake_case.\n12. Memories must use only these memory_type values: preference, project_fact, identity_fact, ongoing_task, reference.\n13. memory_scope is always \"artifact\" and memory_scope_value is the artifact_id.\n14. Summary must be 2-4 compact sentences focused on lasting engineering substance.\n15. importance_score measures long-term retrieval value, operational risk, or durable decision significance.\n16. Low-signal artifacts should usually have low importance and no classifications.\n17. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n18. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
@@ -1522,7 +1523,7 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_processor_parses_and_validates_output() {
+    fn openai_processor_parses_and_validates_output() {
         let client = Arc::new(FixedInferenceClient {
             response: serde_json::json!({
                 "summary": {
@@ -1556,12 +1557,12 @@ mod tests {
             .to_string(),
         });
         let factory =
-            OpenRouterProcessorFactory::with_client(client, "openai/gpt-4.1-mini", "openai/gpt-5.4");
+            OpenAiProcessorFactory::with_client(client, "gpt-4.1-mini", "gpt-5.4");
         let processor = factory.build(EnrichmentTier::Standard).expect("processor should build");
 
         let output = processor.process(&sample_input()).expect("processor should succeed");
 
-        assert_eq!(output.pipeline_name, "openrouter_enrichment");
+        assert_eq!(output.pipeline_name, "openai_enrichment");
         assert_eq!(output.classifications.len(), 1);
         assert_eq!(output.memories.len(), 1);
         assert_eq!(output.summary.evidence_segment_ids, vec!["seg-1", "seg-2"]);
@@ -1570,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_processor_rejects_unknown_evidence_segment_ids() {
+    fn openai_processor_rejects_unknown_evidence_segment_ids() {
         let client = Arc::new(FixedInferenceClient {
             response: serde_json::json!({
                 "summary": {
@@ -1594,8 +1595,7 @@ mod tests {
             })
             .to_string(),
         });
-        let factory =
-            OpenRouterProcessorFactory::with_client(client, "openai/gpt-4.1-mini", "openai/gpt-5.4");
+        let factory = OpenAiProcessorFactory::with_client(client, "gpt-4.1-mini", "gpt-5.4");
         let processor = factory.build(EnrichmentTier::Standard).expect("processor should build");
 
         let err = processor.process(&sample_input()).expect_err("processor should fail");
@@ -1603,7 +1603,7 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_processor_retries_once_on_invalid_output_and_accepts_repair() {
+    fn openai_processor_retries_once_on_invalid_output_and_accepts_repair() {
         let client = Arc::new(SequenceInferenceClient {
             responses: std::sync::Mutex::new(vec![
                 serde_json::json!({
@@ -1651,8 +1651,7 @@ mod tests {
                 .to_string(),
             ]),
         });
-        let factory =
-            OpenRouterProcessorFactory::with_client(client, "openai/gpt-4.1-mini", "openai/gpt-5.4");
+        let factory = OpenAiProcessorFactory::with_client(client, "gpt-4.1-mini", "gpt-5.4");
         let processor = factory.build(EnrichmentTier::Standard).expect("processor should build");
 
         let output = processor

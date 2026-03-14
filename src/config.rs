@@ -157,8 +157,10 @@ impl S3UrlStyle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InferenceConfig {
     Stub,
-    OpenRouter(OpenRouterConfig),
+    OpenAi(OpenAiConfig),
     Gemini(GeminiConfig),
+    Anthropic(AnthropicConfig),
+    Grok(GrokConfig),
 }
 
 impl InferenceConfig {
@@ -166,12 +168,14 @@ impl InferenceConfig {
         let provider = env::var("OA_INFERENCE_PROVIDER").unwrap_or_else(|_| "stub".to_string());
         match provider.as_str() {
             "stub" => Ok(Self::Stub),
-            "openrouter" => Ok(Self::OpenRouter(OpenRouterConfig::from_env()?)),
+            "openai" => Ok(Self::OpenAi(OpenAiConfig::from_env()?)),
             "gemini" => Ok(Self::Gemini(GeminiConfig::from_env()?)),
+            "anthropic" => Ok(Self::Anthropic(AnthropicConfig::from_env()?)),
+            "grok" => Ok(Self::Grok(GrokConfig::from_env()?)),
             _ => Err(ConfigError::InvalidEnumEnv {
                 key: "OA_INFERENCE_PROVIDER",
                 value: provider,
-                expected: "stub, openrouter, gemini",
+                expected: "stub, openai, gemini, anthropic, grok",
             }),
         }
     }
@@ -203,38 +207,34 @@ impl GeminiConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenRouterConfig {
+pub struct OpenAiConfig {
     pub api_key: String,
     pub base_url: String,
     pub max_output_tokens: u32,
-    pub reasoning_effort_override: OpenRouterReasoningEffort,
+    pub reasoning_effort_override: OpenAiReasoningEffort,
     pub standard_model: String,
     pub quality_model: Option<String>,
-    pub site_url: Option<String>,
-    pub app_name: Option<String>,
 }
 
-impl OpenRouterConfig {
+impl OpenAiConfig {
     pub fn from_env() -> ConfigResult<Self> {
         Ok(Self {
-            api_key: required_env("OA_OPENROUTER_API_KEY")?,
-            base_url: env::var("OA_OPENROUTER_BASE_URL")
-                .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string()),
-            max_output_tokens: env::var("OA_OPENROUTER_MAX_OUTPUT_TOKENS")
+            api_key: required_env("OA_OPENAI_API_KEY")?,
+            base_url: env::var("OA_OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            max_output_tokens: env::var("OA_OPENAI_MAX_OUTPUT_TOKENS")
                 .ok()
                 .and_then(|value| value.parse::<u32>().ok())
-                .unwrap_or(2000),
-            reasoning_effort_override: OpenRouterReasoningEffort::from_env()?,
-            standard_model: required_env("OA_OPENROUTER_STANDARD_MODEL")?,
-            quality_model: optional_trimmed_env("OA_OPENROUTER_QUALITY_MODEL"),
-            site_url: optional_trimmed_env("OA_OPENROUTER_SITE_URL"),
-            app_name: optional_trimmed_env("OA_OPENROUTER_APP_NAME"),
+                .unwrap_or(4000),
+            reasoning_effort_override: OpenAiReasoningEffort::from_env()?,
+            standard_model: required_env("OA_OPENAI_STANDARD_MODEL")?,
+            quality_model: optional_trimmed_env("OA_OPENAI_QUALITY_MODEL"),
         })
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpenRouterReasoningEffort {
+pub enum OpenAiReasoningEffort {
     Auto,
     Minimal,
     Low,
@@ -242,10 +242,9 @@ pub enum OpenRouterReasoningEffort {
     High,
 }
 
-impl OpenRouterReasoningEffort {
+impl OpenAiReasoningEffort {
     pub fn from_env() -> ConfigResult<Self> {
-        let value =
-            env::var("OA_OPENROUTER_REASONING_EFFORT").unwrap_or_else(|_| "auto".to_string());
+        let value = env::var("OA_OPENAI_REASONING_EFFORT").unwrap_or_else(|_| "auto".to_string());
         match value.as_str() {
             "auto" => Ok(Self::Auto),
             "minimal" => Ok(Self::Minimal),
@@ -253,7 +252,7 @@ impl OpenRouterReasoningEffort {
             "medium" => Ok(Self::Medium),
             "high" => Ok(Self::High),
             _ => Err(ConfigError::InvalidEnumEnv {
-                key: "OA_OPENROUTER_REASONING_EFFORT",
+                key: "OA_OPENAI_REASONING_EFFORT",
                 value,
                 expected: "auto, minimal, low, medium, high",
             }),
@@ -268,6 +267,56 @@ impl OpenRouterReasoningEffort {
             Self::Medium => "medium",
             Self::High => "high",
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnthropicConfig {
+    pub api_key: String,
+    pub base_url: String,
+    pub max_output_tokens: u32,
+    pub standard_model: String,
+    pub quality_model: Option<String>,
+}
+
+impl AnthropicConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        Ok(Self {
+            api_key: required_env("OA_ANTHROPIC_API_KEY")?,
+            base_url: env::var("OA_ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|_| "https://api.anthropic.com/v1".to_string()),
+            max_output_tokens: env::var("OA_ANTHROPIC_MAX_OUTPUT_TOKENS")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(4000),
+            standard_model: required_env("OA_ANTHROPIC_STANDARD_MODEL")?,
+            quality_model: optional_trimmed_env("OA_ANTHROPIC_QUALITY_MODEL"),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrokConfig {
+    pub api_key: String,
+    pub base_url: String,
+    pub max_output_tokens: u32,
+    pub standard_model: String,
+    pub quality_model: Option<String>,
+}
+
+impl GrokConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        Ok(Self {
+            api_key: required_env("OA_GROK_API_KEY")?,
+            base_url: env::var("OA_GROK_BASE_URL")
+                .unwrap_or_else(|_| "https://api.x.ai/v1".to_string()),
+            max_output_tokens: env::var("OA_GROK_MAX_OUTPUT_TOKENS")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(4000),
+            standard_model: required_env("OA_GROK_STANDARD_MODEL")?,
+            quality_model: optional_trimmed_env("OA_GROK_QUALITY_MODEL"),
+        })
     }
 }
 
@@ -459,18 +508,27 @@ mod tests {
             "OA_S3_KEY_PREFIX",
             "OA_S3_URL_STYLE",
             "OA_INFERENCE_PROVIDER",
-            "OA_OPENROUTER_API_KEY",
-            "OA_OPENROUTER_BASE_URL",
-            "OA_OPENROUTER_REASONING_EFFORT",
-            "OA_OPENROUTER_STANDARD_MODEL",
-            "OA_OPENROUTER_QUALITY_MODEL",
-            "OA_OPENROUTER_SITE_URL",
-            "OA_OPENROUTER_APP_NAME",
+            "OA_OPENAI_API_KEY",
+            "OA_OPENAI_BASE_URL",
+            "OA_OPENAI_MAX_OUTPUT_TOKENS",
+            "OA_OPENAI_REASONING_EFFORT",
+            "OA_OPENAI_STANDARD_MODEL",
+            "OA_OPENAI_QUALITY_MODEL",
             "OA_GEMINI_API_KEY",
             "OA_GEMINI_BASE_URL",
             "OA_GEMINI_MAX_OUTPUT_TOKENS",
             "OA_GEMINI_STANDARD_MODEL",
             "OA_GEMINI_QUALITY_MODEL",
+            "OA_ANTHROPIC_API_KEY",
+            "OA_ANTHROPIC_BASE_URL",
+            "OA_ANTHROPIC_MAX_OUTPUT_TOKENS",
+            "OA_ANTHROPIC_STANDARD_MODEL",
+            "OA_ANTHROPIC_QUALITY_MODEL",
+            "OA_GROK_API_KEY",
+            "OA_GROK_BASE_URL",
+            "OA_GROK_MAX_OUTPUT_TOKENS",
+            "OA_GROK_STANDARD_MODEL",
+            "OA_GROK_QUALITY_MODEL",
             "OA_ORACLE_CONNECT_STRING",
             "OA_ORACLE_USERNAME",
             "OA_ORACLE_PASSWORD",
@@ -592,27 +650,25 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_inference_provider_loads_when_configured() {
+    fn openai_inference_provider_loads_when_configured() {
         let _guard = env_lock();
         clear_test_env();
         std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
-        std::env::set_var("OA_INFERENCE_PROVIDER", "openrouter");
-        std::env::set_var("OA_OPENROUTER_API_KEY", "test-key");
-        std::env::set_var("OA_OPENROUTER_REASONING_EFFORT", "low");
-        std::env::set_var("OA_OPENROUTER_STANDARD_MODEL", "openai/gpt-4.1-mini");
+        std::env::set_var("OA_INFERENCE_PROVIDER", "openai");
+        std::env::set_var("OA_OPENAI_API_KEY", "test-key");
+        std::env::set_var("OA_OPENAI_REASONING_EFFORT", "low");
+        std::env::set_var("OA_OPENAI_STANDARD_MODEL", "gpt-4.1-mini");
 
-        let config = AppConfig::from_env().expect("openrouter inference provider should load");
-        let InferenceConfig::OpenRouter(config) = config.inference else {
-            panic!("expected openrouter config");
+        let config = AppConfig::from_env().expect("openai inference provider should load");
+        let InferenceConfig::OpenAi(config) = config.inference else {
+            panic!("expected openai config");
         };
 
         assert_eq!(config.api_key, "test-key");
-        assert_eq!(config.base_url, "https://openrouter.ai/api/v1");
-        assert_eq!(
-            config.reasoning_effort_override,
-            OpenRouterReasoningEffort::Low
-        );
-        assert_eq!(config.standard_model, "openai/gpt-4.1-mini");
+        assert_eq!(config.base_url, "https://api.openai.com/v1");
+        assert_eq!(config.reasoning_effort_override, OpenAiReasoningEffort::Low);
+        assert_eq!(config.max_output_tokens, 4000);
+        assert_eq!(config.standard_model, "gpt-4.1-mini");
         assert_eq!(config.quality_model, None);
     }
 
@@ -637,6 +693,48 @@ mod tests {
         );
         assert_eq!(config.max_output_tokens, 4000);
         assert_eq!(config.standard_model, "gemini-2.5-flash-lite");
+        assert_eq!(config.quality_model, None);
+    }
+
+    #[test]
+    fn anthropic_inference_provider_loads_when_configured() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
+        std::env::set_var("OA_INFERENCE_PROVIDER", "anthropic");
+        std::env::set_var("OA_ANTHROPIC_API_KEY", "test-key");
+        std::env::set_var("OA_ANTHROPIC_STANDARD_MODEL", "claude-sonnet-4-20250514");
+
+        let config = AppConfig::from_env().expect("anthropic inference provider should load");
+        let InferenceConfig::Anthropic(config) = config.inference else {
+            panic!("expected anthropic config");
+        };
+
+        assert_eq!(config.api_key, "test-key");
+        assert_eq!(config.base_url, "https://api.anthropic.com/v1");
+        assert_eq!(config.max_output_tokens, 4000);
+        assert_eq!(config.standard_model, "claude-sonnet-4-20250514");
+        assert_eq!(config.quality_model, None);
+    }
+
+    #[test]
+    fn grok_inference_provider_loads_when_configured() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
+        std::env::set_var("OA_INFERENCE_PROVIDER", "grok");
+        std::env::set_var("OA_GROK_API_KEY", "test-key");
+        std::env::set_var("OA_GROK_STANDARD_MODEL", "grok-4-fast-reasoning");
+
+        let config = AppConfig::from_env().expect("grok inference provider should load");
+        let InferenceConfig::Grok(config) = config.inference else {
+            panic!("expected grok config");
+        };
+
+        assert_eq!(config.api_key, "test-key");
+        assert_eq!(config.base_url, "https://api.x.ai/v1");
+        assert_eq!(config.max_output_tokens, 4000);
+        assert_eq!(config.standard_model, "grok-4-fast-reasoning");
         assert_eq!(config.quality_model, None);
     }
 }

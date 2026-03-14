@@ -2,10 +2,10 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
-use open_archive::config::{GeminiConfig, OpenRouterConfig, PostgresConfig};
+use open_archive::config::{AnthropicConfig, GeminiConfig, GrokConfig, OpenAiConfig, PostgresConfig};
 use open_archive::processor::{
-    ArtifactProcessorFactory, ArtifactProcessorInput, GeminiProcessorFactory,
-    OpenRouterProcessorFactory,
+    AnthropicProcessorFactory, ArtifactProcessorFactory, ArtifactProcessorInput,
+    GeminiProcessorFactory, GrokProcessorFactory, OpenAiProcessorFactory,
 };
 use open_archive::storage::{ArtifactReadStore, PostgresImportWriteStore};
 use open_archive::storage::types::EnrichmentTier;
@@ -19,14 +19,14 @@ struct Args {
     artifact_ids: Vec<String>,
 
     /// Inference provider to use for the probe.
-    #[arg(long = "provider", default_value = "openrouter")]
+    #[arg(long = "provider", default_value = "openai")]
     provider: String,
 
     /// Output token budgets to compare.
     #[arg(long = "budget", required = true)]
     budgets: Vec<u32>,
 
-    /// Override the model for the probe. Defaults to OA_OPENROUTER_STANDARD_MODEL.
+    /// Override the model for the probe. Defaults to the selected provider's standard model.
     #[arg(long = "model")]
     model: Option<String>,
 
@@ -42,16 +42,28 @@ fn main() -> Result<()> {
     let provider = ProbeProvider::from_str(&args.provider)?;
     let model = match provider {
         ProbeProvider::OpenRouter => {
-            let config = OpenRouterConfig::from_env().context(
-                "failed to load OpenRouter config from env; set OA_OPENROUTER_API_KEY and related vars",
+            let config = OpenAiConfig::from_env().context(
+                "failed to load OpenAI config from env; set OA_OPENAI_API_KEY and related vars",
             )?;
-            args_model_openrouter(&config, &args)?
+            args_model_openai(&config, &args)?
         }
         ProbeProvider::Gemini => {
             let config = GeminiConfig::from_env().context(
                 "failed to load Gemini config from env; set OA_GEMINI_API_KEY and related vars",
             )?;
             args_model_gemini(&config, &args)?
+        }
+        ProbeProvider::Anthropic => {
+            let config = AnthropicConfig::from_env().context(
+                "failed to load Anthropic config from env; set OA_ANTHROPIC_API_KEY and related vars",
+            )?;
+            args_model_anthropic(&config, &args)?
+        }
+        ProbeProvider::Grok => {
+            let config = GrokConfig::from_env().context(
+                "failed to load Grok config from env; set OA_GROK_API_KEY and related vars",
+            )?;
+            args_model_grok(&config, &args)?
         }
     };
 
@@ -85,15 +97,15 @@ fn main() -> Result<()> {
         for budget in &args.budgets {
             let factory: Box<dyn ArtifactProcessorFactory> = match provider {
                 ProbeProvider::OpenRouter => {
-                    let mut config = OpenRouterConfig::from_env().context(
-                        "failed to reload OpenRouter config from env",
+                    let mut config = OpenAiConfig::from_env().context(
+                        "failed to reload OpenAI config from env",
                     )?;
                     config.standard_model = model.clone();
                     config.quality_model = Some(model.clone());
                     config.max_output_tokens = *budget;
                     Box::new(
-                        OpenRouterProcessorFactory::new(config)
-                            .map_err(|err| anyhow!("failed to build OpenRouter factory: {err}"))?,
+                        OpenAiProcessorFactory::new(config)
+                            .map_err(|err| anyhow!("failed to build OpenAI factory: {err}"))?,
                     )
                 }
                 ProbeProvider::Gemini => {
@@ -105,6 +117,28 @@ fn main() -> Result<()> {
                     Box::new(
                         GeminiProcessorFactory::new(config)
                             .map_err(|err| anyhow!("failed to build Gemini factory: {err}"))?,
+                    )
+                }
+                ProbeProvider::Anthropic => {
+                    let mut config = AnthropicConfig::from_env()
+                        .context("failed to reload Anthropic config from env")?;
+                    config.standard_model = model.clone();
+                    config.quality_model = Some(model.clone());
+                    config.max_output_tokens = *budget;
+                    Box::new(
+                        AnthropicProcessorFactory::new(config)
+                            .map_err(|err| anyhow!("failed to build Anthropic factory: {err}"))?,
+                    )
+                }
+                ProbeProvider::Grok => {
+                    let mut config =
+                        GrokConfig::from_env().context("failed to reload Grok config from env")?;
+                    config.standard_model = model.clone();
+                    config.quality_model = Some(model.clone());
+                    config.max_output_tokens = *budget;
+                    Box::new(
+                        GrokProcessorFactory::new(config)
+                            .map_err(|err| anyhow!("failed to build Grok factory: {err}"))?,
                     )
                 }
             };
@@ -187,26 +221,34 @@ fn print_output_details(output: &open_archive::processor::ArtifactProcessorOutpu
 enum ProbeProvider {
     OpenRouter,
     Gemini,
+    Anthropic,
+    Grok,
 }
 
 impl ProbeProvider {
     fn from_str(value: &str) -> Result<Self> {
         match value {
-            "openrouter" => Ok(Self::OpenRouter),
+            "openai" => Ok(Self::OpenRouter),
             "gemini" => Ok(Self::Gemini),
-            _ => Err(anyhow!("unsupported provider {value}; expected openrouter or gemini")),
+            "anthropic" => Ok(Self::Anthropic),
+            "grok" => Ok(Self::Grok),
+            _ => Err(anyhow!(
+                "unsupported provider {value}; expected openai, gemini, anthropic, or grok"
+            )),
         }
     }
 
     fn as_str(&self) -> &'static str {
         match self {
-            Self::OpenRouter => "openrouter",
+            Self::OpenRouter => "openai",
             Self::Gemini => "gemini",
+            Self::Anthropic => "anthropic",
+            Self::Grok => "grok",
         }
     }
 }
 
-fn args_model_openrouter(config: &OpenRouterConfig, args: &Args) -> Result<String> {
+fn args_model_openai(config: &OpenAiConfig, args: &Args) -> Result<String> {
     Ok(args
         .model
         .clone()
@@ -214,6 +256,20 @@ fn args_model_openrouter(config: &OpenRouterConfig, args: &Args) -> Result<Strin
 }
 
 fn args_model_gemini(config: &GeminiConfig, args: &Args) -> Result<String> {
+    Ok(args
+        .model
+        .clone()
+        .unwrap_or_else(|| config.standard_model.clone()))
+}
+
+fn args_model_anthropic(config: &AnthropicConfig, args: &Args) -> Result<String> {
+    Ok(args
+        .model
+        .clone()
+        .unwrap_or_else(|| config.standard_model.clone()))
+}
+
+fn args_model_grok(config: &GrokConfig, args: &Args) -> Result<String> {
     Ok(args
         .model
         .clone()
