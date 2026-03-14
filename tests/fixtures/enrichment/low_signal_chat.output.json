@@ -1,0 +1,12 @@
+{
+  "summary": {
+    "title": "Short rewrite request",
+    "body_text": "This artifact is a brief request to rewrite a sentence in a friendlier tone. It has low long-term retrieval value and does not contain durable engineering decisions or project memory.",
+    "evidence_segment_ids": ["seg-1", "seg-2", "seg-3"]
+  },
+  "classifications": [],
+  "memories": [],
+  "importance_score": 2,
+  "escalate_to_frontier": false,
+  "escalation_reason": ""
+}

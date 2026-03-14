@@ -571,6 +571,7 @@ pub struct NewDerivationRun {
     pub run_status: DerivationRunStatus,
     pub input_scope_type: InputScopeType,
     pub input_scope_json: String,
+    pub started_at: SourceTimestamp,
     pub completed_at: Option<SourceTimestamp>,
     pub error_message: Option<String>,
 }

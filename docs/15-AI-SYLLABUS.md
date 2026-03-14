@@ -32,6 +32,42 @@ self-hosted deployment, and later remote providers.
 7. Human review and confidence handling
 8. Interoperability through MCP-oriented workflows
 
+## Future Brain-Aware Enrichment
+
+Early enrichment should stay grounded in the current artifact and produce
+validated structured outputs before it becomes graph-aware.
+
+Later iterations should learn how to enrich with access to existing brain
+state, including prior entities, memories, and relationships.
+
+The intended pattern is:
+
+- first-pass artifact extraction
+- targeted lookups into existing brain state
+- reconciliation of new outputs against existing nodes and edges
+
+This is different from letting the model process every artifact in isolation,
+but it is also different from unconstrained tool use. The learning goal is to
+build disciplined brain-aware reconciliation, not a free-roaming enrichment
+agent.
+
+## Human Review And Confidence Handling
+
+The learning plan should also include a real human review surface for model
+outputs that are too uncertain to trust silently.
+
+Important future review categories include:
+
+- low-confidence memories
+- weak or ambiguous entity matches
+- uncertain relationship creation
+- contradictory facts
+- merge and supersession suggestions
+- artifacts flagged for premium or frontier reruns
+
+The goal is to learn how to keep the brain clean over time, not just how to
+generate structured outputs once.
+
 ## Provider Stance
 
 OpenArchive should learn from concrete providers without letting the learning

@@ -223,7 +223,7 @@ pub fn load_artifact_for_enrichment(
     let segment_rows = conn
         .query(
             "SELECT s.segment_id, s.participant_id, p.participant_role, s.sequence_no, s.text_content, \
-                    TO_CHAR(s.created_at_source, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9TZH:TZM'), s.visibility_status \
+                    s.created_at_source, s.visibility_status \
              FROM oa_segment s \
              LEFT JOIN oa_conversation_participant p ON p.participant_id = s.participant_id \
              WHERE s.artifact_id = :1 \
@@ -247,8 +247,6 @@ pub fn load_artifact_for_enrichment(
                 })
             })
             .transpose()?;
-        let created_at_source_raw: Option<String> =
-            row.get(5).map_err(|source| StorageError::ListArtifacts { source })?;
         let visibility_status_raw: String =
             row.get(6).map_err(|source| StorageError::ListArtifacts { source })?;
 
@@ -258,15 +256,10 @@ pub fn load_artifact_for_enrichment(
             participant_role,
             sequence_no: row.get(3).map_err(|source| StorageError::ListArtifacts { source })?,
             text_content: row.get(4).map_err(|source| StorageError::ListArtifacts { source })?,
-            created_at_source: created_at_source_raw
-                .map(|value| SourceTimestamp::parse_rfc3339(&value))
-                .transpose()
-                .map_err(|err| StorageError::InvalidDerivationWrite {
-                    detail: format!(
-                        "failed to parse created_at_source for segment {}: {}",
-                        segment_id, err
-                    ),
-                })?,
+            created_at_source: row
+                .get::<_, Option<chrono::DateTime<chrono::Utc>>>(5)
+                .map_err(|source| StorageError::ListArtifacts { source })?
+                .map(SourceTimestamp::from),
             visibility_status: VisibilityStatus::from_str(&visibility_status_raw).ok_or_else(|| {
                 StorageError::InvalidVisibilityStatus {
                     segment_id,

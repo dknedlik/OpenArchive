@@ -83,6 +83,50 @@ That means:
 - optional local inference through Ollama
 - provider-specific model details kept below the application boundary
 
+This should eventually become brain-aware rather than artifact-isolated.
+
+That means later enrichment and reconciliation passes should be able to read
+existing brain state such as:
+
+- known entities
+- prior memories
+- existing relationships
+- current project and preference nodes
+
+The goal is not to let the first-pass extractor wander the graph freely. The
+better long-term shape is:
+
+- artifact-local extraction first
+- targeted brain lookups second
+- reconciliation or merge decisions after that
+
+This should help later memory formation avoid duplicate entities, reinforce
+known relationships, and decide when new artifacts update or contradict prior
+brain state.
+
+## Human Review And Brain Hygiene
+
+The brain should not rely on unattended model outputs forever.
+
+Later versions should include a human-usable review surface or curation queue
+for things like:
+
+- low-confidence memories
+- possible duplicate entities
+- uncertain relationship edges
+- conflicting facts
+- merge or supersession proposals
+- artifacts escalated for higher-quality review
+
+The intended operating model is:
+
+- machine proposes
+- human confirms, rejects, merges, or edits
+- confirmed outcomes update canonical brain state
+
+This is the mechanism that should keep long-term memory quality high instead of
+letting duplicate nodes, weak facts, and bad links accumulate silently.
+
 ## Current Summary
 
 The direction is not "build a chat archive."

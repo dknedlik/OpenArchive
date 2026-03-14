@@ -134,6 +134,47 @@ fn test_worker_fails_job_when_factory_rejects_claimed_tier() {
 }
 
 #[test]
+fn test_worker_marks_job_retryable_for_transient_inference_failures() {
+    let config = test_config(1);
+    let job_store = Arc::new(SingleJobStore::new(valid_claimed_job()));
+    let read_store = Arc::new(FixedReadStore::with_sample_artifact());
+    let derived_store = Arc::new(MockDerivedStore::default());
+    let shutdown = ShutdownToken::new();
+    let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
+    let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
+    let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store;
+
+    let workers = start_enrichment_workers_with_factory(
+        &config,
+        job_store_trait,
+        read_store_trait,
+        derived_store_trait,
+        shutdown.clone(),
+        Arc::new(RetryableProcessorFactory),
+    )
+    .expect("worker should start");
+
+    std::thread::sleep(Duration::from_millis(75));
+    shutdown.signal();
+    for worker in workers {
+        worker.join().expect("worker should join cleanly");
+    }
+
+    assert_eq!(job_store.complete_count.load(Ordering::SeqCst), 0);
+    assert_eq!(job_store.fail_count.load(Ordering::SeqCst), 0);
+    assert!(job_store.retryable_count.load(Ordering::SeqCst) > 0);
+    assert!(
+        job_store
+            .last_retryable_message
+            .lock()
+            .unwrap()
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Processor execution failed")
+    );
+}
+
+#[test]
 fn test_worker_fails_job_when_artifact_cannot_be_loaded() {
     let config = test_config(1);
     let job_store = Arc::new(SingleJobStore::new(valid_claimed_job()));
@@ -255,7 +296,9 @@ struct SingleJobStore {
     claim_count: AtomicUsize,
     complete_count: AtomicUsize,
     fail_count: AtomicUsize,
+    retryable_count: AtomicUsize,
     last_fail_message: Mutex<Option<String>>,
+    last_retryable_message: Mutex<Option<String>>,
 }
 
 impl SingleJobStore {
@@ -265,7 +308,9 @@ impl SingleJobStore {
             claim_count: AtomicUsize::new(0),
             complete_count: AtomicUsize::new(0),
             fail_count: AtomicUsize::new(0),
+            retryable_count: AtomicUsize::new(0),
             last_fail_message: Mutex::new(None),
+            last_retryable_message: Mutex::new(None),
         }
     }
 }
@@ -294,6 +339,8 @@ impl EnrichmentJobLifecycleStore for SingleJobStore {
         _error_message: &str,
         _retry_after_seconds: i64,
     ) -> StorageResult<RetryOutcome> {
+        self.retryable_count.fetch_add(1, Ordering::SeqCst);
+        *self.last_retryable_message.lock().unwrap() = Some(_error_message.to_string());
         Ok(RetryOutcome::Retried)
     }
 }
@@ -441,6 +488,31 @@ impl ArtifactProcessorFactory for RejectAllFactory {
     ) -> std::result::Result<Box<dyn ArtifactProcessor>, ProcessorError> {
         Err(ProcessorError::Message {
             message: "tier rejected".to_string(),
+        })
+    }
+}
+
+struct RetryableProcessorFactory;
+
+impl ArtifactProcessorFactory for RetryableProcessorFactory {
+    fn build(
+        &self,
+        _tier: EnrichmentTier,
+    ) -> std::result::Result<Box<dyn ArtifactProcessor>, ProcessorError> {
+        Ok(Box::new(RetryableProcessor))
+    }
+}
+
+struct RetryableProcessor;
+
+impl ArtifactProcessor for RetryableProcessor {
+    fn process(
+        &self,
+        _input: &open_archive::processor::ArtifactProcessorInput,
+    ) -> std::result::Result<open_archive::processor::ArtifactProcessorOutput, ProcessorError> {
+        Err(ProcessorError::InferenceHttpStatus {
+            status: 429,
+            body_preview: "rate limited".to_string(),
         })
     }
 }

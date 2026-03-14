@@ -149,7 +149,7 @@ pub fn mark_job_retryable(
     client.batch_execute("BEGIN").map_err(map_pg_storage_err)?;
 
     let row = client
-        .query_one(
+        .query_opt(
             "SELECT attempt_count, max_attempts \
              FROM oa_enrichment_job \
              WHERE job_id = $1 AND job_status = 'running' AND claimed_by = $2 \
@@ -157,6 +157,13 @@ pub fn mark_job_retryable(
             &[&job_id, &worker_id],
         )
         .map_err(map_pg_storage_err)?;
+    let Some(row) = row else {
+        client.batch_execute("ROLLBACK").map_err(map_pg_storage_err)?;
+        return Err(crate::error::StorageError::JobNotClaimed {
+            job_id: job_id.to_string(),
+            worker_id: worker_id.to_string(),
+        });
+    };
 
     let attempt_count: i32 = row.get(0);
     let max_attempts: i32 = row.get(1);

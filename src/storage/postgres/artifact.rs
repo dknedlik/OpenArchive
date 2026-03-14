@@ -196,7 +196,7 @@ pub fn load_artifact_for_enrichment(
     let segment_rows = client
         .query(
             "SELECT s.segment_id, s.participant_id, p.participant_role, s.sequence_no, s.text_content, \
-                    to_char(s.created_at_source, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), s.visibility_status \
+                    s.created_at_source, s.visibility_status \
              FROM oa_segment s \
              LEFT JOIN oa_conversation_participant p ON p.participant_id = s.participant_id \
              WHERE s.artifact_id = $1 \
@@ -228,15 +228,8 @@ pub fn load_artifact_for_enrichment(
             sequence_no: row.get(3),
             text_content: row.get(4),
             created_at_source: row
-                .get::<_, Option<String>>(5)
-                .map(|value| SourceTimestamp::parse_rfc3339(&value))
-                .transpose()
-                .map_err(|err| crate::error::StorageError::InvalidDerivationWrite {
-                    detail: format!(
-                        "failed to parse created_at_source for segment {}: {}",
-                        segment_id, err
-                    ),
-                })?,
+                .get::<_, Option<chrono::DateTime<chrono::Utc>>>(5)
+                .map(SourceTimestamp::from),
             visibility_status: VisibilityStatus::from_str(&visibility_status).ok_or_else(|| {
                 crate::error::StorageError::InvalidVisibilityStatus {
                     segment_id,

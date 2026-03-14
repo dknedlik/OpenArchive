@@ -156,8 +156,9 @@ impl S3UrlStyle {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InferenceConfig {
-    // Placeholder until local or hosted inference providers are wired in.
     Stub,
+    OpenRouter(OpenRouterConfig),
+    Gemini(GeminiConfig),
 }
 
 impl InferenceConfig {
@@ -165,14 +166,111 @@ impl InferenceConfig {
         let provider = env::var("OA_INFERENCE_PROVIDER").unwrap_or_else(|_| "stub".to_string());
         match provider.as_str() {
             "stub" => Ok(Self::Stub),
+            "openrouter" => Ok(Self::OpenRouter(OpenRouterConfig::from_env()?)),
+            "gemini" => Ok(Self::Gemini(GeminiConfig::from_env()?)),
             _ => Err(ConfigError::InvalidEnumEnv {
                 key: "OA_INFERENCE_PROVIDER",
                 value: provider,
-                expected: "stub",
+                expected: "stub, openrouter, gemini",
             }),
         }
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeminiConfig {
+    pub api_key: String,
+    pub base_url: String,
+    pub max_output_tokens: u32,
+    pub standard_model: String,
+    pub quality_model: Option<String>,
+}
+
+impl GeminiConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        Ok(Self {
+            api_key: required_env("OA_GEMINI_API_KEY")?,
+            base_url: env::var("OA_GEMINI_BASE_URL")
+                .unwrap_or_else(|_| "https://generativelanguage.googleapis.com/v1beta".to_string()),
+            max_output_tokens: env::var("OA_GEMINI_MAX_OUTPUT_TOKENS")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(2000),
+            standard_model: required_env("OA_GEMINI_STANDARD_MODEL")?,
+            quality_model: optional_trimmed_env("OA_GEMINI_QUALITY_MODEL"),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenRouterConfig {
+    pub api_key: String,
+    pub base_url: String,
+    pub max_output_tokens: u32,
+    pub reasoning_effort_override: OpenRouterReasoningEffort,
+    pub standard_model: String,
+    pub quality_model: Option<String>,
+    pub site_url: Option<String>,
+    pub app_name: Option<String>,
+}
+
+impl OpenRouterConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        Ok(Self {
+            api_key: required_env("OA_OPENROUTER_API_KEY")?,
+            base_url: env::var("OA_OPENROUTER_BASE_URL")
+                .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string()),
+            max_output_tokens: env::var("OA_OPENROUTER_MAX_OUTPUT_TOKENS")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(2000),
+            reasoning_effort_override: OpenRouterReasoningEffort::from_env()?,
+            standard_model: required_env("OA_OPENROUTER_STANDARD_MODEL")?,
+            quality_model: optional_trimmed_env("OA_OPENROUTER_QUALITY_MODEL"),
+            site_url: optional_trimmed_env("OA_OPENROUTER_SITE_URL"),
+            app_name: optional_trimmed_env("OA_OPENROUTER_APP_NAME"),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenRouterReasoningEffort {
+    Auto,
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+impl OpenRouterReasoningEffort {
+    pub fn from_env() -> ConfigResult<Self> {
+        let value =
+            env::var("OA_OPENROUTER_REASONING_EFFORT").unwrap_or_else(|_| "auto".to_string());
+        match value.as_str() {
+            "auto" => Ok(Self::Auto),
+            "minimal" => Ok(Self::Minimal),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            _ => Err(ConfigError::InvalidEnumEnv {
+                key: "OA_OPENROUTER_REASONING_EFFORT",
+                value,
+                expected: "auto, minimal, low, medium, high",
+            }),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OracleConfig {
@@ -361,6 +459,18 @@ mod tests {
             "OA_S3_KEY_PREFIX",
             "OA_S3_URL_STYLE",
             "OA_INFERENCE_PROVIDER",
+            "OA_OPENROUTER_API_KEY",
+            "OA_OPENROUTER_BASE_URL",
+            "OA_OPENROUTER_REASONING_EFFORT",
+            "OA_OPENROUTER_STANDARD_MODEL",
+            "OA_OPENROUTER_QUALITY_MODEL",
+            "OA_OPENROUTER_SITE_URL",
+            "OA_OPENROUTER_APP_NAME",
+            "OA_GEMINI_API_KEY",
+            "OA_GEMINI_BASE_URL",
+            "OA_GEMINI_MAX_OUTPUT_TOKENS",
+            "OA_GEMINI_STANDARD_MODEL",
+            "OA_GEMINI_QUALITY_MODEL",
             "OA_ORACLE_CONNECT_STRING",
             "OA_ORACLE_USERNAME",
             "OA_ORACLE_PASSWORD",
@@ -479,5 +589,54 @@ mod tests {
         assert_eq!(config.bucket, "openarchive");
         assert_eq!(config.key_prefix.as_deref(), Some("objects"));
         assert_eq!(config.url_style, S3UrlStyle::Path);
+    }
+
+    #[test]
+    fn openrouter_inference_provider_loads_when_configured() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
+        std::env::set_var("OA_INFERENCE_PROVIDER", "openrouter");
+        std::env::set_var("OA_OPENROUTER_API_KEY", "test-key");
+        std::env::set_var("OA_OPENROUTER_REASONING_EFFORT", "low");
+        std::env::set_var("OA_OPENROUTER_STANDARD_MODEL", "openai/gpt-4.1-mini");
+
+        let config = AppConfig::from_env().expect("openrouter inference provider should load");
+        let InferenceConfig::OpenRouter(config) = config.inference else {
+            panic!("expected openrouter config");
+        };
+
+        assert_eq!(config.api_key, "test-key");
+        assert_eq!(config.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(
+            config.reasoning_effort_override,
+            OpenRouterReasoningEffort::Low
+        );
+        assert_eq!(config.standard_model, "openai/gpt-4.1-mini");
+        assert_eq!(config.quality_model, None);
+    }
+
+    #[test]
+    fn gemini_inference_provider_loads_when_configured() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
+        std::env::set_var("OA_INFERENCE_PROVIDER", "gemini");
+        std::env::set_var("OA_GEMINI_API_KEY", "test-key");
+        std::env::set_var("OA_GEMINI_STANDARD_MODEL", "gemini-2.5-flash-lite");
+
+        let config = AppConfig::from_env().expect("gemini inference provider should load");
+        let InferenceConfig::Gemini(config) = config.inference else {
+            panic!("expected gemini config");
+        };
+
+        assert_eq!(config.api_key, "test-key");
+        assert_eq!(
+            config.base_url,
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
+        assert_eq!(config.max_output_tokens, 2000);
+        assert_eq!(config.standard_model, "gemini-2.5-flash-lite");
+        assert_eq!(config.quality_model, None);
     }
 }

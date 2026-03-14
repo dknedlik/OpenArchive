@@ -9,7 +9,7 @@ chrono = { version = "0.4", default-features = false, features = ["alloc", "serd
 clap = { version = "4.5", features = ["derive"] }
 env_logger = "0.11"
 log = "0.4"
-oracle = "0.6"
+oracle = { version = "0.6", features = ["chrono"] }
 postgres = { version = "0.19", features = ["with-chrono-0_4"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 rusty-s3 = "0.8"

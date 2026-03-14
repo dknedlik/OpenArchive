@@ -1,0 +1,60 @@
+{
+  "artifact_id": "artifact-eval-worker",
+  "source_type": "chatgpt_export",
+  "title": "Enrichment worker hardening and next steps",
+  "segments": [
+    {
+      "segment_id": "seg-1",
+      "participant_role": "user",
+      "text": "I think the silent fallback on invalid source_type in the enrichment worker is wrong. If the payload is corrupted, the worker should fail the job instead of substituting the loaded artifact type."
+    },
+    {
+      "segment_id": "seg-2",
+      "participant_role": "assistant",
+      "text": "Agreed. Silent fallback hides corruption and could route to the wrong processor later once artifact types diverge."
+    },
+    {
+      "segment_id": "seg-3",
+      "participant_role": "user",
+      "text": "Also, a completed derivation run should not have completed_at set to null. That is just inconsistent state."
+    },
+    {
+      "segment_id": "seg-4",
+      "participant_role": "assistant",
+      "text": "Yes. If run_status is completed, completed_at should be stamped at write time."
+    },
+    {
+      "segment_id": "seg-5",
+      "participant_role": "user",
+      "text": "We also need a real test for the artifact-not-found path. That branch currently exists in the worker but isn't covered properly."
+    },
+    {
+      "segment_id": "seg-6",
+      "participant_role": "assistant",
+      "text": "That should be added as a focused worker test: claimed job, load_artifact_for_enrichment returns None, fail_job is called, and no derived writes occur."
+    },
+    {
+      "segment_id": "seg-7",
+      "participant_role": "user",
+      "text": "After that, task 12 is next. The processor seam is in place, and the next milestone is replacing the stub with a real enrichment path."
+    }
+  ],
+  "expectations": {
+    "memory_count": { "min": 3, "max": 4 },
+    "classification_count": { "min": 0, "max": 1 },
+    "importance_score": { "min": 5, "max": 7 },
+    "escalate_to_frontier": false,
+    "required_phrases": [
+      "source_type",
+      "completed_at",
+      "artifact-not-found",
+      "task 12"
+    ],
+    "forbidden_classification_values": [
+      "planning",
+      "architecture",
+      "technical",
+      "discussion"
+    ]
+  }
+}

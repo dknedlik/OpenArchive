@@ -2,7 +2,7 @@ use anyhow::Context;
 use clap::{command, Parser, Subcommand};
 use open_archive::bootstrap::{build_service_bundle, require_oracle_db_config};
 use open_archive::config::AppConfig;
-use open_archive::enrichment_worker::start_enrichment_workers;
+use open_archive::enrichment_worker::start_enrichment_workers_with_factory;
 use open_archive::shutdown::ShutdownToken;
 use open_archive::object_store::ObjectStore;
 use open_archive::storage::{ArtifactReadStore, ImportWriteStore};
@@ -98,18 +98,18 @@ fn serve() -> Result<(), anyhow::Error> {
 
     let enrichment_workers = if enrichment_worker_count > 0 {
         log::info!("Starting {} enrichment workers", enrichment_worker_count);
-        start_enrichment_workers(
+        start_enrichment_workers_with_factory(
             &http_config,
             Arc::clone(&services.enrichment_store),
             Arc::clone(&services.read_store),
             Arc::clone(&services.derived_store),
             shutdown.clone(),
+            Arc::clone(&services.processor_factory),
         )?
     } else {
         log::info!("Enrichment workers disabled (OA_ENRICHMENT_WORKERS=0)");
         Vec::new()
     };
-
     let mut workers = Vec::with_capacity(request_worker_count);
     for worker_index in 0..request_worker_count {
         let server = Arc::clone(&server);

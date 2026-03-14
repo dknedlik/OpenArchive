@@ -1,0 +1,37 @@
+{
+  "artifact_id": "artifact-eval-low-signal",
+  "source_type": "chatgpt_export",
+  "title": "Short low-signal chat",
+  "segments": [
+    {
+      "segment_id": "seg-1",
+      "participant_role": "user",
+      "text": "Hey, can you rewrite this sentence to sound friendlier?"
+    },
+    {
+      "segment_id": "seg-2",
+      "participant_role": "assistant",
+      "text": "Sure. Here is a friendlier rewrite."
+    },
+    {
+      "segment_id": "seg-3",
+      "participant_role": "user",
+      "text": "Looks good, thanks."
+    }
+  ],
+  "expectations": {
+    "memory_count": { "min": 0, "max": 1 },
+    "classification_count": { "min": 0, "max": 1 },
+    "importance_score": { "min": 1, "max": 3 },
+    "escalate_to_frontier": false,
+    "required_phrases": [
+      "rewrite"
+    ],
+    "forbidden_classification_values": [
+      "planning",
+      "architecture",
+      "technical",
+      "discussion"
+    ]
+  }
+}

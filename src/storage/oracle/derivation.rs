@@ -12,15 +12,17 @@ pub fn insert_derivation_run(conn: &Connection, run: &NewDerivationRun) -> Stora
     let run_type = run.run_type.as_str();
     let run_status = run.run_status.as_str();
     let input_scope_type = run.input_scope_type.as_str();
+    let started_at = run.started_at.as_str();
     let completed_at = run.completed_at.as_ref().map(|ts| ts.as_str());
 
     conn.execute(
         "INSERT INTO oa_derivation_run \
          (derivation_run_id, artifact_id, job_id, run_type, pipeline_name, pipeline_version, \
           provider_name, model_name, prompt_version, run_status, input_scope_type, \
-          input_scope_json, completed_at, error_message) \
+          input_scope_json, started_at, completed_at, error_message) \
          VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12, \
-                 TO_TIMESTAMP_TZ(:13, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9TZH:TZM'), :14)",
+                 TO_TIMESTAMP_TZ(:13, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9TZH:TZM'), \
+                 TO_TIMESTAMP_TZ(:14, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9TZH:TZM'), :15)",
         &[
             &run.derivation_run_id,
             &run.artifact_id,
@@ -34,6 +36,7 @@ pub fn insert_derivation_run(conn: &Connection, run: &NewDerivationRun) -> Stora
             &run_status,
             &input_scope_type,
             &run.input_scope_json,
+            &started_at,
             &completed_at,
             &run.error_message,
         ],

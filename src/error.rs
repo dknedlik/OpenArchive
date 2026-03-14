@@ -133,6 +133,9 @@ pub enum ConfigError {
     #[error("invalid object-store configuration: {message}")]
     InvalidObjectStoreConfig { message: String },
 
+    #[error("invalid inference configuration: {message}")]
+    InvalidInferenceConfig { message: String },
+
 }
 
 #[derive(Debug, Error)]

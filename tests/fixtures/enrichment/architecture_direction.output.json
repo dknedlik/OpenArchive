@@ -1,0 +1,61 @@
+{
+  "summary": {
+    "title": "OpenArchive local-first architecture direction",
+    "body_text": "OpenArchive slice 1 is moving to a fully local Docker Compose deployment with Postgres, enrichment, query services, and optional Ollama. Binary payload storage moves out of the database into local volume-backed object storage behind an abstraction, with future S3 support planned. MCP is the primary external interface, while the core stays provider- and protocol-agnostic and prefers synchronous Rust with a database-backed queue.",
+    "evidence_segment_ids": ["seg-1", "seg-2", "seg-3", "seg-4", "seg-5", "seg-6"]
+  },
+  "classifications": [
+    {
+      "classification_type": "intent",
+      "classification_value": "define_local_first_direction",
+      "title": "Define local-first slice-one direction",
+      "body_text": "The artifact sets concrete implementation direction for deployment, storage boundaries, interface shape, and concurrency posture.",
+      "evidence_segment_ids": ["seg-1", "seg-2", "seg-3", "seg-5"]
+    }
+  ],
+  "memories": [
+    {
+      "memory_type": "project_fact",
+      "memory_scope": "artifact",
+      "memory_scope_value": "artifact-eval-architecture",
+      "title": "Slice 1 uses Docker Compose locally",
+      "body_text": "Slice 1 is planned as a local Docker Compose deployment with containerized Postgres, enrichment, query, and possibly Ollama.",
+      "evidence_segment_ids": ["seg-1"]
+    },
+    {
+      "memory_type": "project_fact",
+      "memory_scope": "artifact",
+      "memory_scope_value": "artifact-eval-architecture",
+      "title": "Blob storage moves out of the database",
+      "body_text": "Raw artifact blobs move to local volume-backed object storage through an abstraction, with future S3 bucket support planned.",
+      "evidence_segment_ids": ["seg-2"]
+    },
+    {
+      "memory_type": "project_fact",
+      "memory_scope": "artifact",
+      "memory_scope_value": "artifact-eval-architecture",
+      "title": "MCP is primary but the core stays transport-agnostic",
+      "body_text": "Local MCP is the primary external interface for slice 1, but the application core should not become MCP-protocol-shaped.",
+      "evidence_segment_ids": ["seg-3"]
+    },
+    {
+      "memory_type": "project_fact",
+      "memory_scope": "artifact",
+      "memory_scope_value": "artifact-eval-architecture",
+      "title": "Oracle is only a provider",
+      "body_text": "Oracle should be treated as just another provider like Postgres behind config-driven factories.",
+      "evidence_segment_ids": ["seg-4"]
+    },
+    {
+      "memory_type": "project_fact",
+      "memory_scope": "artifact",
+      "memory_scope_value": "artifact-eval-architecture",
+      "title": "Prefer sync Rust and preserve lineage",
+      "body_text": "The project prefers sync Rust, uses a database-backed queue, and wants edited files to create new artifacts so lineage is preserved.",
+      "evidence_segment_ids": ["seg-5", "seg-6"]
+    }
+  ],
+  "importance_score": 7,
+  "escalate_to_frontier": false,
+  "escalation_reason": ""
+}

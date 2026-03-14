@@ -5,9 +5,13 @@
 
 use std::sync::Arc;
 
-use crate::config::{AppConfig, ObjectStoreConfig, RelationalStoreConfig};
+use crate::config::{AppConfig, InferenceConfig, ObjectStoreConfig, RelationalStoreConfig};
 use crate::error::{ConfigError, ConfigResult};
 use crate::object_store::{LocalFsObjectStore, ObjectStore, S3CompatibleObjectStore};
+use crate::processor::{
+    ArtifactProcessorFactory, GeminiProcessorFactory, OpenRouterProcessorFactory,
+    StubProcessorFactory,
+};
 use crate::storage::{
     ArtifactReadStore, EnrichmentJobLifecycleStore, ImportWriteStore, OracleEnrichmentJobStore,
     OracleImportWriteStore, PostgresEnrichmentJobStore, PostgresImportWriteStore,
@@ -80,6 +84,7 @@ pub struct ServiceBundle {
     pub read_store: Arc<dyn ArtifactReadStore>,
     pub enrichment_store: Arc<dyn EnrichmentJobLifecycleStore>,
     pub derived_store: Arc<dyn crate::storage::DerivedMetadataWriteStore>,
+    pub processor_factory: Arc<dyn ArtifactProcessorFactory>,
 }
 
 pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
@@ -88,6 +93,20 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
         ObjectStoreConfig::S3Compatible(s3) => Arc::new(
             S3CompatibleObjectStore::new(s3.clone()).map_err(|err| ConfigError::InvalidObjectStoreConfig {
                 message: err.to_string(),
+            })?,
+        ),
+    };
+
+    let processor_factory: Arc<dyn ArtifactProcessorFactory> = match &config.inference {
+        InferenceConfig::Stub => Arc::new(StubProcessorFactory),
+        InferenceConfig::OpenRouter(openrouter) => Arc::new(
+            OpenRouterProcessorFactory::new(openrouter.clone()).map_err(|message| {
+                ConfigError::InvalidInferenceConfig { message }
+            })?,
+        ),
+        InferenceConfig::Gemini(gemini) => Arc::new(
+            GeminiProcessorFactory::new(gemini.clone()).map_err(|message| {
+                ConfigError::InvalidInferenceConfig { message }
             })?,
         ),
     };
@@ -106,6 +125,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 derived_store: Arc::new(crate::storage::PostgresDerivedMetadataStore::new(
                     pg_config.clone(),
                 )),
+                processor_factory,
             })
         }
         RelationalStoreConfig::Oracle(db_config) => {
@@ -121,6 +141,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 derived_store: Arc::new(crate::storage::OracleDerivedMetadataStore::new(
                     db_config.clone(),
                 )),
+                processor_factory,
             })
         }
     }

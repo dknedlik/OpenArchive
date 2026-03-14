@@ -23,9 +23,9 @@ pub fn insert_derivation_run(
             "INSERT INTO oa_derivation_run \
              (derivation_run_id, artifact_id, job_id, run_type, pipeline_name, pipeline_version, \
               provider_name, model_name, prompt_version, run_status, input_scope_type, \
-              input_scope_json, completed_at, error_message) \
+              input_scope_json, started_at, completed_at, error_message) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::text::jsonb, \
-                     $13::text::timestamptz, $14)",
+                     $13::text::timestamptz, $14::text::timestamptz, $15)",
             &[
                 &run.derivation_run_id,
                 &run.artifact_id,
@@ -39,6 +39,7 @@ pub fn insert_derivation_run(
                 &run.run_status.as_str(),
                 &run.input_scope_type.as_str(),
                 &run.input_scope_json,
+                &run.started_at.as_str(),
                 &run.completed_at.as_ref().map(|ts| ts.as_str()),
                 &run.error_message,
             ],

@@ -1,0 +1,53 @@
+{
+  "summary": {
+    "title": "Enrichment worker hardening and next steps",
+    "body_text": "The enrichment worker should fail corrupted payloads instead of silently falling back on invalid source_type. Completed derivation runs need a non-null completed_at timestamp, and the artifact-not-found branch needs focused test coverage. After those fixes, the next milestone is replacing the stub pipeline with a real enrichment path.",
+    "evidence_segment_ids": ["seg-1", "seg-3", "seg-5", "seg-7"]
+  },
+  "classifications": [
+    {
+      "classification_type": "intent",
+      "classification_value": "fix_failure_handling",
+      "title": "Fix failure handling in the worker",
+      "body_text": "The artifact is centered on correcting worker failure semantics and missing coverage.",
+      "evidence_segment_ids": ["seg-1", "seg-3", "seg-5"]
+    }
+  ],
+  "memories": [
+    {
+      "memory_type": "project_fact",
+      "memory_scope": "artifact",
+      "memory_scope_value": "artifact-eval-worker",
+      "title": "Invalid source_type should fail the job",
+      "body_text": "The enrichment worker should fail corrupted payloads rather than substituting a loaded artifact type when source_type is invalid.",
+      "evidence_segment_ids": ["seg-1", "seg-2"]
+    },
+    {
+      "memory_type": "project_fact",
+      "memory_scope": "artifact",
+      "memory_scope_value": "artifact-eval-worker",
+      "title": "Completed runs require completed_at",
+      "body_text": "A derivation run marked completed must also write a completed_at timestamp.",
+      "evidence_segment_ids": ["seg-3", "seg-4"]
+    },
+    {
+      "memory_type": "ongoing_task",
+      "memory_scope": "artifact",
+      "memory_scope_value": "artifact-eval-worker",
+      "title": "Add artifact-not-found test coverage",
+      "body_text": "A focused worker test should verify that the artifact-not-found path fails the job without derived writes.",
+      "evidence_segment_ids": ["seg-5", "seg-6"]
+    },
+    {
+      "memory_type": "ongoing_task",
+      "memory_scope": "artifact",
+      "memory_scope_value": "artifact-eval-worker",
+      "title": "Task 12 replaces the stub pipeline",
+      "body_text": "The next milestone after worker hardening is replacing the stub processor with a real enrichment path.",
+      "evidence_segment_ids": ["seg-7"]
+    }
+  ],
+  "importance_score": 6,
+  "escalate_to_frontier": false,
+  "escalation_reason": ""
+}

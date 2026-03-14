@@ -1,5 +1,5 @@
 use crate::processor::{
-    ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
+    ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput, ProcessorError,
     StubProcessorFactory,
 };
 use crate::shutdown::ShutdownToken;
@@ -17,6 +17,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const RETRYABLE_INFERENCE_BACKOFF_SECONDS: i64 = 60;
 
 /// Worker ID format: enrichment:<pid>:<worker_index>
 pub fn format_worker_id(pid: u32, worker_index: usize) -> String {
@@ -115,9 +117,9 @@ fn process_claimed_job(
         .build(claimed_job.enrichment_tier)
         .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to build enrichment processor", err))?;
 
-    let output = processor
-        .process(&processor_input)
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Processor execution failed", err))?;
+    let output = processor.process(&processor_input).map_err(|err| {
+        handle_processor_error(job_store, worker_id, &claimed_job.job_id, err)
+    })?;
 
     let attempt = build_derivation_attempt(claimed_job, &processor_input, &output);
     derived_store
@@ -141,6 +143,26 @@ fn fail_job(
     fail_job_message(job_store, worker_id, job_id, format!("{context}: {err}"))
 }
 
+fn handle_processor_error(
+    job_store: &dyn EnrichmentJobLifecycleStore,
+    worker_id: &str,
+    job_id: &str,
+    err: ProcessorError,
+) -> String {
+    if err.is_retryable() {
+        let message = format!("Processor execution failed: {err}");
+        return mark_job_retryable_message(
+            job_store,
+            worker_id,
+            job_id,
+            message,
+            RETRYABLE_INFERENCE_BACKOFF_SECONDS,
+        );
+    }
+
+    fail_job(job_store, worker_id, job_id, "Processor execution failed", err)
+}
+
 fn fail_job_message(
     job_store: &dyn EnrichmentJobLifecycleStore,
     worker_id: &str,
@@ -154,13 +176,30 @@ fn fail_job_message(
     }
 }
 
+fn mark_job_retryable_message(
+    job_store: &dyn EnrichmentJobLifecycleStore,
+    worker_id: &str,
+    job_id: &str,
+    message: String,
+    retry_after_seconds: i64,
+) -> String {
+    match job_store.mark_job_retryable(worker_id, job_id, &message, retry_after_seconds) {
+        Ok(crate::storage::RetryOutcome::Retried) => message,
+        Ok(crate::storage::RetryOutcome::RetriesExhausted) => {
+            format!("{message}; retries exhausted and job marked failed")
+        }
+        Err(retry_err) => format!("{message}; additionally failed to mark job retryable: {retry_err}"),
+    }
+}
+
 fn build_derivation_attempt(
     claimed_job: &ClaimedJob,
     input: &ArtifactProcessorInput,
     output: &ArtifactProcessorOutput,
 ) -> WriteDerivationAttempt {
     let derivation_run_id = new_id("drvrun");
-    let completed_at = SourceTimestamp::from(chrono::Utc::now());
+    let started_at = SourceTimestamp::from(chrono::Utc::now());
+    let completed_at = started_at.clone();
     let mut objects = Vec::with_capacity(1 + output.classifications.len() + output.memories.len());
 
     let summary_object_id = new_id("dobj");
@@ -254,16 +293,20 @@ fn build_derivation_attempt(
             run_type: DerivationRunType::SummaryExtraction,
             pipeline_name: output.pipeline_name.clone(),
             pipeline_version: output.pipeline_version.clone(),
-            provider_name: Some("stub".to_string()),
-            model_name: Some("stub".to_string()),
-            prompt_version: Some("stub-v1".to_string()),
+            provider_name: output.provider_name.clone(),
+            model_name: output.model_name.clone(),
+            prompt_version: output.prompt_version.clone(),
             run_status: DerivationRunStatus::Completed,
             input_scope_type: InputScopeType::Artifact,
             input_scope_json: serde_json::json!({
                 "artifact_id": input.artifact_id,
-                "segment_count": input.segments.len()
+                "segment_count": input.segments.len(),
+                "importance_score": output.importance_score,
+                "escalate_to_frontier": output.escalate_to_frontier,
+                "escalation_reason": output.escalation_reason
             })
             .to_string(),
+            started_at,
             completed_at: Some(completed_at),
             error_message: None,
         },

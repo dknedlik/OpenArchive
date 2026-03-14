@@ -1,0 +1,56 @@
+{
+  "artifact_id": "artifact-eval-architecture",
+  "source_type": "chatgpt_export",
+  "title": "OpenArchive architecture direction",
+  "segments": [
+    {
+      "segment_id": "seg-1",
+      "participant_role": "user",
+      "text": "Major course correction incoming. Ditch OCI for slice 1. Full local build using docker compose. We containerize postgres, enrichment, and query, maybe ollama too. The system should go live with a simple make up command."
+    },
+    {
+      "segment_id": "seg-2",
+      "participant_role": "user",
+      "text": "We remove artifact blob storage from the database in phase 1 and shift to local storage on a docker volume through a data layer abstraction. We will also have config for an S3 bucket soon."
+    },
+    {
+      "segment_id": "seg-3",
+      "participant_role": "user",
+      "text": "We will bring a local MCP into slice 1 so desktop Claude and GPT can connect. The project should be machine first."
+    },
+    {
+      "segment_id": "seg-4",
+      "participant_role": "user",
+      "text": "Oracle should be just a provider like Postgres, not the shape of the app. We should use factories that read config and return the right stores."
+    },
+    {
+      "segment_id": "seg-5",
+      "participant_role": "user",
+      "text": "We should keep synchronous Rust throughout unless a thin async edge is forced on us by some transport library."
+    },
+    {
+      "segment_id": "seg-6",
+      "participant_role": "user",
+      "text": "I think the queue can live in database records basically forever rather than adding a real MQ. Edited files should create new artifacts later instead of mutating old ones so we preserve lineage and supersession."
+    }
+  ],
+  "expectations": {
+    "memory_count": { "min": 4, "max": 5 },
+    "classification_count": { "min": 1, "max": 2 },
+    "importance_score": { "min": 6, "max": 9 },
+    "escalate_to_frontier": false,
+    "required_phrases": [
+      "docker compose",
+      "s3",
+      "mcp",
+      "sync rust",
+      "lineage"
+    ],
+    "forbidden_classification_values": [
+      "planning",
+      "architecture",
+      "technical",
+      "discussion"
+    ]
+  }
+}
