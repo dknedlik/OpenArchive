@@ -48,6 +48,10 @@ Exit criteria:
 - support local inference through Ollama as a first-class provider
 - improve stored summaries, classifications, and memories
 - allow enrichment workers to run outside the main local stack when needed
+- add native hosted providers in a deliberate sequence:
+  Gemini first, then OpenAI, then Anthropic, then Grok
+- treat OpenAI-compatible endpoints as a follow-on mode built on the OpenAI
+  provider shape rather than the primary inference abstraction
 
 Exit criteria:
 
@@ -60,6 +64,11 @@ Exit criteria:
 - support remote MCP deployment for personal cloud-hosted use
 - keep local and remote deployment shapes aligned around the same application
   core
+- start shifting the primary user experience away from repo-local `.env` and
+  Docker-first setup toward a first-run configuration flow
+- let users choose inference provider and point at any Postgres-compatible
+  connection string, while still offering an easy local Postgres path for
+  users who want the app to bootstrap the default stack
 
 Exit criteria:
 

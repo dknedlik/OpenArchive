@@ -83,6 +83,23 @@ pub fn insert_derived_object(
     Ok(())
 }
 
+pub fn supersede_active_derived_objects(
+    client: &mut Client,
+    connection_string: &str,
+    artifact_id: &str,
+) -> StorageResult<()> {
+    client
+        .execute(
+            "UPDATE oa_derived_object \
+             SET object_status = 'superseded' \
+             WHERE artifact_id = $1 AND object_status = 'active'",
+            &[&artifact_id],
+        )
+        .map_err(|source| pg_error(connection_string, source))?;
+
+    Ok(())
+}
+
 pub fn insert_evidence_link(
     client: &mut Client,
     connection_string: &str,

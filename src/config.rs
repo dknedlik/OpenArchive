@@ -195,7 +195,7 @@ impl GeminiConfig {
             max_output_tokens: env::var("OA_GEMINI_MAX_OUTPUT_TOKENS")
                 .ok()
                 .and_then(|value| value.parse::<u32>().ok())
-                .unwrap_or(2000),
+                .unwrap_or(4000),
             standard_model: required_env("OA_GEMINI_STANDARD_MODEL")?,
             quality_model: optional_trimmed_env("OA_GEMINI_QUALITY_MODEL"),
         })
@@ -635,7 +635,7 @@ mod tests {
             config.base_url,
             "https://generativelanguage.googleapis.com/v1beta"
         );
-        assert_eq!(config.max_output_tokens, 2000);
+        assert_eq!(config.max_output_tokens, 4000);
         assert_eq!(config.standard_model, "gemini-2.5-flash-lite");
         assert_eq!(config.quality_model, None);
     }

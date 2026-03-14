@@ -150,6 +150,15 @@ The important concern boundaries are:
 - object store
 - inference provider
 
+Near-term hosted inference direction:
+
+- native Gemini provider
+- native OpenAI provider
+- native Anthropic provider
+- native Grok provider
+- OpenAI-compatible endpoints as a secondary mode layered on the OpenAI
+  provider shape, not the main abstraction
+
 It is acceptable for a higher-level data service to aggregate repositories from
 multiple providers.
 
@@ -196,3 +205,21 @@ The job system should support:
 - keep provider seams explicit without overbuilding extensibility
 - make local startup and contribution materially easier than the earlier
   OCI/Oracle path
+
+## Future User Setup Shape
+
+The current developer path is still Docker Compose plus env-driven config.
+That is acceptable for slice-one development, but it should not remain the
+primary onboarding experience once the core providers are stable.
+
+The intended user-facing direction is:
+
+- first-run setup flow inside the app
+- choose inference provider and enter API credentials
+- choose a Postgres target or accept an easy local default
+- allow any Postgres-compatible connection string instead of forcing a bundled
+  local stack
+
+Docker Compose should remain a strong development and local bootstrap path, but
+the product should eventually lead with guided configuration rather than manual
+`.env` editing.

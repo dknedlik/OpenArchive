@@ -165,6 +165,14 @@ impl DerivedMetadataHarness for OracleHarness {
         ).expect("derived count").0
     }
 
+    fn count_derived_objects_for_run_with_status(&self, derivation_run_id: &str, status: &str) -> i64 {
+        let conn = open_archive::db::connect(&self.0).expect("connect");
+        conn.query_row_as::<(i64,)>(
+            "SELECT COUNT(*) FROM oa_derived_object WHERE derivation_run_id = :1 AND object_status = :2",
+            &[&derivation_run_id, &status],
+        ).expect("derived count with status").0
+    }
+
     fn count_evidence_links_for_objects(&self, derived_object_ids: &[String]) -> i64 {
         let conn = open_archive::db::connect(&self.0).expect("connect");
         let [a, b, c] = derived_object_ids else { panic!("expected 3 object ids") };
@@ -206,6 +214,14 @@ impl DerivedMetadataHarness for OracleHarness {
             &[&derived_object_id],
         ).expect("evidence count").0
     }
+
+    fn count_derived_objects_for_artifact_with_status(&self, artifact_id: &str, status: &str) -> i64 {
+        let conn = open_archive::db::connect(&self.0).expect("connect");
+        conn.query_row_as::<(i64,)>(
+            "SELECT COUNT(*) FROM oa_derived_object WHERE artifact_id = :1 AND object_status = :2",
+            &[&artifact_id, &status],
+        ).expect("artifact derived count with status").0
+    }
 }
 
 #[test]
@@ -227,4 +243,11 @@ fn rejects_cross_artifact_evidence_links_without_writing_rows() {
 fn rolls_back_partial_writes_when_evidence_insert_fails() {
     let Some(harness) = harness() else { return };
     support::contract_rolls_back_partial_writes_when_evidence_insert_fails(&harness);
+}
+
+#[test]
+#[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+fn rerun_supersedes_previous_active_objects() {
+    let Some(harness) = harness() else { return };
+    support::contract_rerun_supersedes_previous_active_objects(&harness);
 }

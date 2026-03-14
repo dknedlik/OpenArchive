@@ -260,6 +260,11 @@ impl DerivedMetadataWriteStore for PostgresDerivedMetadataStore {
                 &self.config.connection_string,
                 &attempt,
             )?;
+            derivation::supersede_active_derived_objects(
+                &mut client,
+                &self.config.connection_string,
+                &attempt.run.artifact_id,
+            )?;
             derivation::insert_derivation_run(
                 &mut client,
                 &self.config.connection_string,

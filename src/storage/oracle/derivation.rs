@@ -91,6 +91,24 @@ pub fn insert_derived_object(conn: &Connection, object: &NewDerivedObject) -> St
     Ok(())
 }
 
+pub fn supersede_active_derived_objects(
+    conn: &Connection,
+    artifact_id: &str,
+) -> StorageResult<()> {
+    conn.execute(
+        "UPDATE oa_derived_object \
+         SET object_status = 'superseded' \
+         WHERE artifact_id = :1 AND object_status = 'active'",
+        &[&artifact_id],
+    )
+    .map_err(|source| StorageError::UpdateDerivedObjectStatus {
+        artifact_id: artifact_id.to_string(),
+        source,
+    })?;
+
+    Ok(())
+}
+
 pub fn insert_evidence_link(conn: &Connection, link: &NewEvidenceLink) -> StorageResult<()> {
     let evidence_role = link.evidence_role.as_str();
     let support_strength = link.support_strength.as_str();

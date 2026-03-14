@@ -286,6 +286,7 @@ impl DerivedMetadataWriteStore for OracleDerivedMetadataStore {
         derivation::validate_derivation_attempt(&tx.conn, &attempt)?;
 
         let result = (|| {
+            derivation::supersede_active_derived_objects(&tx.conn, &attempt.run.artifact_id)?;
             derivation::insert_derivation_run(&tx.conn, &attempt.run)?;
 
             let mut derived_object_ids = Vec::with_capacity(attempt.objects.len());

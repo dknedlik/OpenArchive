@@ -384,6 +384,13 @@ pub enum StorageError {
         source: oracle::Error,
     },
 
+    #[error("failed to update derived object status for artifact {artifact_id}")]
+    UpdateDerivedObjectStatus {
+        artifact_id: String,
+        #[source]
+        source: oracle::Error,
+    },
+
     #[error(
         "failed to insert evidence link {evidence_link_id} for derived object {derived_object_id}"
     )]

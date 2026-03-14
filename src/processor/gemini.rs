@@ -9,7 +9,7 @@ use crate::storage::types::EnrichmentTier;
 
 use super::{
     structured_output_schema, ArtifactProcessor, ArtifactProcessorFactory,
-    ARTIFACT_EXTRACTION_SYSTEM_PROMPT, GEMINI_PROMPT_VERSION, HostedArtifactProcessor,
+    GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, GEMINI_PROMPT_VERSION, HostedArtifactProcessor,
     InferenceClient, InferenceResult, InferenceUsage, ProcessorError,
 };
 
@@ -48,7 +48,7 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
             pipeline_name: "gemini_enrichment",
             provider_name: "gemini",
             prompt_version: GEMINI_PROMPT_VERSION,
-            system_prompt: ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+            system_prompt: GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
         }))
     }
 }
