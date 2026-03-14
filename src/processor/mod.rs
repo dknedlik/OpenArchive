@@ -152,6 +152,16 @@ pub trait ArtifactProcessorFactory: Send + Sync {
     fn build(&self, tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError>;
 }
 
+trait EnrichmentStrategy: Send + Sync {
+    fn prompt_version(&self) -> &'static str;
+    fn system_prompt(&self) -> &'static str;
+    fn process(
+        &self,
+        processor: &HostedArtifactProcessor,
+        input: &ArtifactProcessorInput,
+    ) -> Result<ArtifactProcessorOutput, ProcessorError>;
+}
+
 #[derive(Debug, Default)]
 pub struct StubProcessorFactory;
 
@@ -171,8 +181,7 @@ struct HostedArtifactProcessor {
     model: String,
     pipeline_name: &'static str,
     provider_name: &'static str,
-    prompt_version: &'static str,
-    system_prompt: &'static str,
+    strategy: Arc<dyn EnrichmentStrategy>,
 }
 
 impl ArtifactProcessor for HostedArtifactProcessor {
@@ -181,19 +190,26 @@ impl ArtifactProcessor for HostedArtifactProcessor {
         input: &ArtifactProcessorInput,
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
         validate_input(input)?;
-        let prompt = build_user_prompt(input)?;
-        match self.process_once(input, &prompt) {
+        self.strategy.process(self, input)
+    }
+}
+
+impl HostedArtifactProcessor {
+    fn run_prompt(
+        &self,
+        input: &ArtifactProcessorInput,
+        user_prompt: &str,
+    ) -> Result<ArtifactProcessorOutput, ProcessorError> {
+        match self.process_once(input, user_prompt) {
             Ok(output) => Ok(output),
             Err(error) if should_retry_with_repair(&error) => {
-                let repair_prompt = build_repair_prompt(&prompt, &error);
+                let repair_prompt = build_repair_prompt(user_prompt, &error);
                 self.process_once(input, &repair_prompt)
             }
             Err(error) => Err(error),
         }
     }
-}
 
-impl HostedArtifactProcessor {
     fn process_once(
         &self,
         input: &ArtifactProcessorInput,
@@ -201,7 +217,7 @@ impl HostedArtifactProcessor {
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
         let inference_result = self
             .client
-            .complete_json(&self.model, self.system_prompt, user_prompt)?;
+            .complete_json(&self.model, self.strategy.system_prompt(), user_prompt)?;
         let parsed: ModelArtifactOutput =
             serde_json::from_str(&inference_result.output_text).map_err(|source| {
                 ProcessorError::ParseModelJson {
@@ -217,8 +233,69 @@ impl HostedArtifactProcessor {
             inference_result.usage,
             self.pipeline_name,
             self.provider_name,
-            self.prompt_version,
+            self.strategy.prompt_version(),
         ))
+    }
+}
+
+struct ConversationEnrichmentStrategy {
+    prompt_version: &'static str,
+    system_prompt: &'static str,
+}
+
+impl ConversationEnrichmentStrategy {
+    fn openrouter_default() -> Arc<dyn EnrichmentStrategy> {
+        Arc::new(Self {
+            prompt_version: OPENROUTER_PROMPT_VERSION,
+            system_prompt: ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+        })
+    }
+
+    fn gemini_default() -> Arc<dyn EnrichmentStrategy> {
+        Arc::new(Self {
+            prompt_version: GEMINI_PROMPT_VERSION,
+            system_prompt: GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+        })
+    }
+}
+
+impl EnrichmentStrategy for ConversationEnrichmentStrategy {
+    fn prompt_version(&self) -> &'static str {
+        self.prompt_version
+    }
+
+    fn system_prompt(&self) -> &'static str {
+        self.system_prompt
+    }
+
+    fn process(
+        &self,
+        processor: &HostedArtifactProcessor,
+        input: &ArtifactProcessorInput,
+    ) -> Result<ArtifactProcessorOutput, ProcessorError> {
+        if !should_shape_conversation_input(input) {
+            let prompt = build_conversation_user_prompt(input)?;
+            return processor.run_prompt(input, &prompt);
+        }
+
+        let windows = build_conversation_windows(input);
+        let mut chunk_outputs = Vec::with_capacity(windows.len());
+        for (index, window) in windows.iter().enumerate() {
+            let chunk_prompt =
+                build_conversation_chunk_prompt(input, window, index + 1, windows.len())?;
+            let chunk_input = ArtifactProcessorInput {
+                artifact_id: input.artifact_id.clone(),
+                import_id: input.import_id.clone(),
+                source_type: input.source_type,
+                title: input.title.clone(),
+                participants: input.participants.clone(),
+                segments: window.segments.clone(),
+            };
+            chunk_outputs.push(processor.run_prompt(&chunk_input, &chunk_prompt)?);
+        }
+
+        let synthesis_prompt = build_conversation_synthesis_prompt(input, &chunk_outputs)?;
+        processor.run_prompt(input, &synthesis_prompt)
     }
 }
 
@@ -269,8 +346,7 @@ impl ArtifactProcessorFactory for OpenRouterProcessorFactory {
             model,
             pipeline_name: "openrouter_enrichment",
             provider_name: "openrouter",
-            prompt_version: OPENROUTER_PROMPT_VERSION,
-            system_prompt: ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+            strategy: ConversationEnrichmentStrategy::openrouter_default(),
         }))
     }
 }
@@ -891,7 +967,7 @@ fn normalize_optional_text(value: String) -> Option<String> {
     }
 }
 
-fn build_user_prompt(input: &ArtifactProcessorInput) -> Result<String, ProcessorError> {
+fn build_conversation_user_prompt(input: &ArtifactProcessorInput) -> Result<String, ProcessorError> {
     #[derive(Serialize)]
     struct PromptSegment<'a> {
         evidence_ref: String,
@@ -938,6 +1014,198 @@ fn build_user_prompt(input: &ArtifactProcessorInput) -> Result<String, Processor
         source_type = input.source_type.as_str(),
         title = input.title.as_deref().unwrap_or(""),
         segments_json = segments_json,
+    ))
+}
+
+#[derive(Debug, Clone)]
+struct ConversationWindow {
+    segments: Vec<LoadedSegment>,
+}
+
+fn should_shape_conversation_input(input: &ArtifactProcessorInput) -> bool {
+    let char_count: usize = input
+        .segments
+        .iter()
+        .map(|segment| segment.text_content.len())
+        .sum();
+    input.segments.len() >= 60 || char_count > 100_000
+}
+
+fn build_conversation_windows(input: &ArtifactProcessorInput) -> Vec<ConversationWindow> {
+    const WINDOW_SIZE: usize = 36;
+    const OVERLAP: usize = 6;
+
+    if input.segments.len() <= WINDOW_SIZE {
+        return vec![ConversationWindow {
+            segments: input.segments.clone(),
+        }];
+    }
+
+    let mut windows = Vec::new();
+    let mut start = 0usize;
+    while start < input.segments.len() {
+        let end = usize::min(start + WINDOW_SIZE, input.segments.len());
+        windows.push(ConversationWindow {
+            segments: input.segments[start..end].to_vec(),
+        });
+        if end == input.segments.len() {
+            break;
+        }
+        start = end.saturating_sub(OVERLAP);
+    }
+
+    windows
+}
+
+fn build_conversation_chunk_prompt(
+    input: &ArtifactProcessorInput,
+    window: &ConversationWindow,
+    chunk_index: usize,
+    chunk_count: usize,
+) -> Result<String, ProcessorError> {
+    #[derive(Serialize)]
+    struct PromptSegment<'a> {
+        evidence_ref: String,
+        participant_role: &'a str,
+        text: &'a str,
+    }
+
+    let prompt_segments: Vec<_> = window
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| PromptSegment {
+            evidence_ref: segment_alias(index),
+            participant_role: segment
+                .participant_role
+                .map(|role| role.as_str())
+                .unwrap_or("unknown"),
+            text: segment.text_content.as_str(),
+        })
+        .collect();
+
+    let segments_json = serde_json::to_string_pretty(&prompt_segments)
+        .map_err(|source| ProcessorError::SerializePrompt { source })?;
+
+    Ok(format!(
+        "Input artifact chunk:\n\
+         artifact_id: {artifact_id}\n\
+         source_type: {source_type}\n\
+         title: {title}\n\
+         chunk_index: {chunk_index}\n\
+         chunk_count: {chunk_count}\n\
+         \n\
+         segments:\n\
+         {segments_json}\n\
+         \n\
+         Output guidance:\n\
+         - focus on durable information from this chunk only\n\
+         - summarize the important local content without trying to cover the entire artifact\n\
+         - classifications: prefer 0 or 1\n\
+         - memories: capture distinct durable facts present in this chunk\n\
+         - evidence_segment_ids must use only the evidence_ref values shown in this chunk\n\
+         - cite the minimum evidence needed; prefer 1-2 refs per item\n\
+         - memory_scope_value must be {artifact_id}\n\
+         ",
+        artifact_id = input.artifact_id,
+        source_type = input.source_type.as_str(),
+        title = input.title.as_deref().unwrap_or(""),
+        chunk_index = chunk_index,
+        chunk_count = chunk_count,
+        segments_json = segments_json,
+    ))
+}
+
+fn build_conversation_synthesis_prompt(
+    input: &ArtifactProcessorInput,
+    chunk_outputs: &[ArtifactProcessorOutput],
+) -> Result<String, ProcessorError> {
+    #[derive(Serialize)]
+    struct ChunkSummary<'a> {
+        chunk_index: usize,
+        summary_title: Option<&'a str>,
+        summary_body_text: &'a str,
+        summary_evidence_segment_ids: &'a [String],
+        classifications: Vec<ChunkClassification<'a>>,
+        memories: Vec<ChunkMemory<'a>>,
+        importance_score: u8,
+    }
+
+    #[derive(Serialize)]
+    struct ChunkClassification<'a> {
+        classification_type: &'a str,
+        classification_value: &'a str,
+        title: Option<&'a str>,
+        body_text: Option<&'a str>,
+        evidence_segment_ids: &'a [String],
+    }
+
+    #[derive(Serialize)]
+    struct ChunkMemory<'a> {
+        memory_type: &'a str,
+        title: Option<&'a str>,
+        body_text: &'a str,
+        evidence_segment_ids: &'a [String],
+    }
+
+    let chunk_summaries: Vec<_> = chunk_outputs
+        .iter()
+        .enumerate()
+        .map(|(index, output)| ChunkSummary {
+            chunk_index: index + 1,
+            summary_title: output.summary.title.as_deref(),
+            summary_body_text: output.summary.body_text.as_str(),
+            summary_evidence_segment_ids: &output.summary.evidence_segment_ids,
+            classifications: output
+                .classifications
+                .iter()
+                .map(|classification| ChunkClassification {
+                    classification_type: classification.classification_type.as_str(),
+                    classification_value: classification.classification_value.as_str(),
+                    title: classification.title.as_deref(),
+                    body_text: classification.body_text.as_deref(),
+                    evidence_segment_ids: &classification.evidence_segment_ids,
+                })
+                .collect(),
+            memories: output
+                .memories
+                .iter()
+                .map(|memory| ChunkMemory {
+                    memory_type: memory.memory_type.as_str(),
+                    title: memory.title.as_deref(),
+                    body_text: memory.body_text.as_str(),
+                    evidence_segment_ids: &memory.evidence_segment_ids,
+                })
+                .collect(),
+            importance_score: output.importance_score,
+        })
+        .collect();
+
+    let chunk_json = serde_json::to_string_pretty(&chunk_summaries)
+        .map_err(|source| ProcessorError::SerializePrompt { source })?;
+
+    Ok(format!(
+        "Synthesize a final artifact enrichment from these chunk findings.\n\
+         artifact_id: {artifact_id}\n\
+         source_type: {source_type}\n\
+         title: {title}\n\
+         \n\
+         chunk_findings:\n\
+         {chunk_json}\n\
+         \n\
+         Output guidance:\n\
+         - produce the final artifact-level summary, classifications, and memories\n\
+         - merge duplicate or overlapping chunk findings into broader artifact-level outputs\n\
+         - preserve important distinct subtopics when they materially add retrieval value\n\
+         - evidence_segment_ids must use only the real segment ids shown in the chunk findings\n\
+         - prefer 3-5 distinct memories on rich artifacts when well supported\n\
+         - classifications: prefer 0 or 1\n\
+         - memory_scope_value must be {artifact_id}\n\
+         ",
+        artifact_id = input.artifact_id,
+        source_type = input.source_type.as_str(),
+        title = input.title.as_deref().unwrap_or(""),
+        chunk_json = chunk_json,
     ))
 }
 

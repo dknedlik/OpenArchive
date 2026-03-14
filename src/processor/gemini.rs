@@ -9,8 +9,8 @@ use crate::storage::types::EnrichmentTier;
 
 use super::{
     structured_output_schema, ArtifactProcessor, ArtifactProcessorFactory,
-    GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, GEMINI_PROMPT_VERSION, HostedArtifactProcessor,
-    InferenceClient, InferenceResult, InferenceUsage, ProcessorError,
+    ConversationEnrichmentStrategy, HostedArtifactProcessor, InferenceClient, InferenceResult,
+    InferenceUsage, ProcessorError,
 };
 
 pub struct GeminiProcessorFactory {
@@ -47,8 +47,7 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
             model,
             pipeline_name: "gemini_enrichment",
             provider_name: "gemini",
-            prompt_version: GEMINI_PROMPT_VERSION,
-            system_prompt: GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+            strategy: ConversationEnrichmentStrategy::gemini_default(),
         }))
     }
 }
