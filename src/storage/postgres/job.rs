@@ -113,6 +113,213 @@ pub fn claim_next_job(
     }))
 }
 
+pub fn claim_matching_jobs(
+    client: &mut postgres::Client,
+    worker_id: &str,
+    template_job: &ClaimedJob,
+    limit: usize,
+) -> StorageResult<Vec<ClaimedJob>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let required_capabilities = serde_json::to_string(&template_job.required_capabilities)
+        .expect("required capabilities serializable");
+    client.batch_execute("BEGIN").map_err(map_pg_storage_err)?;
+    let mut claimed = Vec::new();
+
+    for _ in 0..limit {
+        let row = client
+            .query_opt(
+                "SELECT job_id, artifact_id, job_type, enrichment_tier, spawned_by_job_id, \
+                        attempt_count, max_attempts, required_capabilities::text, payload_json::text \
+                 FROM oa_enrichment_job \
+                 WHERE job_status IN ('pending', 'retryable') \
+                   AND available_at <= NOW() \
+                   AND job_type = $1 \
+                   AND enrichment_tier = $2 \
+                   AND required_capabilities::text = $3 \
+                 ORDER BY priority_no ASC, available_at ASC \
+                 FOR UPDATE SKIP LOCKED \
+                 LIMIT 1",
+                &[
+                    &template_job.job_type.as_str(),
+                    &template_job.enrichment_tier.as_str(),
+                    &required_capabilities,
+                ],
+            )
+            .map_err(map_pg_storage_err)?;
+
+        let Some(row) = row else {
+            break;
+        };
+
+        let job_id: String = row.get(0);
+        let artifact_id: String = row.get(1);
+        let job_type_str: String = row.get(2);
+        let tier_str: String = row.get(3);
+        let spawned_by_job_id: Option<String> = row.get(4);
+        let attempt_count: i32 = row.get(5);
+        let max_attempts: i32 = row.get(6);
+        let required_capabilities_json: String = row.get(7);
+        let payload_json: String = row.get(8);
+
+        let job_type = JobType::from_str(&job_type_str).ok_or_else(|| {
+            crate::error::StorageError::InvalidJobType {
+                job_id: job_id.clone(),
+                job_type: job_type_str.clone(),
+            }
+        })?;
+        let enrichment_tier = EnrichmentTier::from_str(&tier_str).ok_or_else(|| {
+            crate::error::StorageError::InvalidEnrichmentTier {
+                job_id: job_id.clone(),
+                value: tier_str.clone(),
+            }
+        })?;
+        let required_capabilities: Vec<String> = serde_json::from_str(&required_capabilities_json)
+            .map_err(|err| crate::error::StorageError::InvalidJobCapabilities {
+                job_id: job_id.clone(),
+                detail: err.to_string(),
+            })?;
+
+        client
+            .execute(
+                "UPDATE oa_enrichment_job \
+                 SET job_status = $1, \
+                     claimed_by = $2, \
+                     claimed_at = NOW(), \
+                     attempt_count = attempt_count + 1 \
+                 WHERE job_id = $3",
+                &[&JobStatus::Running.as_str(), &worker_id, &job_id],
+            )
+            .map_err(map_pg_storage_err)?;
+
+        claimed.push(ClaimedJob {
+            job_id,
+            artifact_id,
+            job_type,
+            enrichment_tier,
+            spawned_by_job_id,
+            attempt_count: attempt_count + 1,
+            max_attempts,
+            required_capabilities,
+            payload_json,
+        });
+    }
+
+    client.batch_execute("COMMIT").map_err(map_pg_storage_err)?;
+    Ok(claimed)
+}
+
+pub fn claim_jobs_by_type(
+    client: &mut postgres::Client,
+    worker_id: &str,
+    job_type: JobType,
+    enrichment_tier: Option<EnrichmentTier>,
+    limit: usize,
+) -> StorageResult<Vec<ClaimedJob>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    client.batch_execute("BEGIN").map_err(map_pg_storage_err)?;
+    let mut claimed = Vec::new();
+
+    for _ in 0..limit {
+        let row = if let Some(tier) = enrichment_tier {
+            client
+                .query_opt(
+                    "SELECT job_id, artifact_id, job_type, enrichment_tier, spawned_by_job_id, \
+                            attempt_count, max_attempts, required_capabilities::text, payload_json::text \
+                     FROM oa_enrichment_job \
+                     WHERE job_status IN ('pending', 'retryable') \
+                       AND available_at <= NOW() \
+                       AND job_type = $1 \
+                       AND enrichment_tier = $2 \
+                     ORDER BY priority_no ASC, available_at ASC \
+                     FOR UPDATE SKIP LOCKED \
+                     LIMIT 1",
+                    &[&job_type.as_str(), &tier.as_str()],
+                )
+                .map_err(map_pg_storage_err)?
+        } else {
+            client
+                .query_opt(
+                    "SELECT job_id, artifact_id, job_type, enrichment_tier, spawned_by_job_id, \
+                            attempt_count, max_attempts, required_capabilities::text, payload_json::text \
+                     FROM oa_enrichment_job \
+                     WHERE job_status IN ('pending', 'retryable') \
+                       AND available_at <= NOW() \
+                       AND job_type = $1 \
+                     ORDER BY priority_no ASC, available_at ASC \
+                     FOR UPDATE SKIP LOCKED \
+                     LIMIT 1",
+                    &[&job_type.as_str()],
+                )
+                .map_err(map_pg_storage_err)?
+        };
+
+        let Some(row) = row else {
+            break;
+        };
+
+        let job_id: String = row.get(0);
+        let artifact_id: String = row.get(1);
+        let job_type_str: String = row.get(2);
+        let tier_str: String = row.get(3);
+        let spawned_by_job_id: Option<String> = row.get(4);
+        let attempt_count: i32 = row.get(5);
+        let max_attempts: i32 = row.get(6);
+        let required_capabilities_json: String = row.get(7);
+        let payload_json: String = row.get(8);
+
+        let job_type = JobType::from_str(&job_type_str).ok_or_else(|| {
+            crate::error::StorageError::InvalidJobType {
+                job_id: job_id.clone(),
+                job_type: job_type_str.clone(),
+            }
+        })?;
+        let enrichment_tier = EnrichmentTier::from_str(&tier_str).ok_or_else(|| {
+            crate::error::StorageError::InvalidEnrichmentTier {
+                job_id: job_id.clone(),
+                value: tier_str.clone(),
+            }
+        })?;
+        let required_capabilities: Vec<String> = serde_json::from_str(&required_capabilities_json)
+            .map_err(|err| crate::error::StorageError::InvalidJobCapabilities {
+                job_id: job_id.clone(),
+                detail: err.to_string(),
+            })?;
+
+        client
+            .execute(
+                "UPDATE oa_enrichment_job \
+                 SET job_status = $1, \
+                     claimed_by = $2, \
+                     claimed_at = NOW(), \
+                     attempt_count = attempt_count + 1 \
+                 WHERE job_id = $3",
+                &[&JobStatus::Running.as_str(), &worker_id, &job_id],
+            )
+            .map_err(map_pg_storage_err)?;
+
+        claimed.push(ClaimedJob {
+            job_id,
+            artifact_id,
+            job_type,
+            enrichment_tier,
+            spawned_by_job_id,
+            attempt_count: attempt_count + 1,
+            max_attempts,
+            required_capabilities,
+            payload_json,
+        });
+    }
+
+    client.batch_execute("COMMIT").map_err(map_pg_storage_err)?;
+    Ok(claimed)
+}
+
 pub fn complete_job(
     client: &mut postgres::Client,
     worker_id: &str,

@@ -505,6 +505,49 @@ fn optional_usize_env(key: &'static str) -> ConfigResult<Option<usize>> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageConfig {
+    pub batch_size: usize,
+    pub max_concurrent_batches: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrichmentPipelineConfig {
+    pub poll_interval: Duration,
+    pub preprocess: StageConfig,
+    pub extract: StageConfig,
+    pub reconcile: StageConfig,
+    pub retrieve_context_workers: usize,
+    pub rate_limit_requests_per_minute: u32,
+}
+
+impl EnrichmentPipelineConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        Ok(Self {
+            poll_interval: optional_duration_env_ms("OA_ENRICHMENT_POLL_INTERVAL_MS")?
+                .unwrap_or(Duration::from_millis(2000)),
+            preprocess: StageConfig {
+                batch_size: positive_usize_env("OA_PREPROCESS_BATCH_SIZE")?.unwrap_or(3),
+                max_concurrent_batches: positive_usize_env("OA_PREPROCESS_MAX_CONCURRENT")?
+                    .unwrap_or(2),
+            },
+            extract: StageConfig {
+                batch_size: positive_usize_env("OA_EXTRACT_BATCH_SIZE")?.unwrap_or(5),
+                max_concurrent_batches: positive_usize_env("OA_EXTRACT_MAX_CONCURRENT")?
+                    .unwrap_or(3),
+            },
+            reconcile: StageConfig {
+                batch_size: positive_usize_env("OA_RECONCILE_BATCH_SIZE")?.unwrap_or(5),
+                max_concurrent_batches: positive_usize_env("OA_RECONCILE_MAX_CONCURRENT")?
+                    .unwrap_or(2),
+            },
+            retrieve_context_workers: positive_usize_env("OA_RETRIEVE_CONTEXT_WORKERS")?
+                .unwrap_or(2),
+            rate_limit_requests_per_minute: positive_u32_env("OA_RATE_LIMIT_RPM")?.unwrap_or(60),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

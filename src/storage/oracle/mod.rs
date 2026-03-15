@@ -323,6 +323,27 @@ impl EnrichmentJobLifecycleStore for OracleEnrichmentJobStore {
         job::claim_next_job(&conn, worker_id)
     }
 
+    fn claim_matching_jobs(
+        &self,
+        worker_id: &str,
+        template_job: &ClaimedJob,
+        limit: usize,
+    ) -> StorageResult<Vec<ClaimedJob>> {
+        let conn = db::connect(&self.config)?;
+        job::claim_matching_jobs(&conn, worker_id, template_job, limit)
+    }
+
+    fn claim_jobs_by_type(
+        &self,
+        worker_id: &str,
+        job_type: crate::storage::types::JobType,
+        enrichment_tier: Option<crate::storage::types::EnrichmentTier>,
+        limit: usize,
+    ) -> StorageResult<Vec<ClaimedJob>> {
+        let conn = db::connect(&self.config)?;
+        job::claim_jobs_by_type(&conn, worker_id, job_type, enrichment_tier, limit)
+    }
+
     fn complete_job(&self, worker_id: &str, job_id: &str) -> StorageResult<()> {
         let conn = db::connect(&self.config)?;
         job::complete_job(&conn, worker_id, job_id)

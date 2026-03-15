@@ -3,7 +3,8 @@ use clap::{command, Parser, Subcommand};
 use open_archive::app::ArchiveApplication;
 use open_archive::bootstrap::{build_service_bundle, require_oracle_db_config};
 use open_archive::config::AppConfig;
-use open_archive::enrichment_worker::start_enrichment_workers_with_factory;
+use open_archive::config::EnrichmentPipelineConfig;
+use open_archive::enrichment_worker::start_enrichment_pipeline;
 use open_archive::shutdown::ShutdownToken;
 use open_archive::{db, http, migrations};
 
@@ -97,10 +98,12 @@ fn serve() -> Result<(), anyhow::Error> {
     println!("request_workers={request_worker_count}");
     println!("enrichment_workers={enrichment_worker_count}");
 
+    let pipeline_config = EnrichmentPipelineConfig::from_env()
+        .context("failed to load enrichment pipeline configuration")?;
     let enrichment_workers = if enrichment_worker_count > 0 {
-        log::info!("Starting {} enrichment workers", enrichment_worker_count);
-        start_enrichment_workers_with_factory(
-            &http_config,
+        log::info!("Starting enrichment pipeline");
+        start_enrichment_pipeline(
+            &pipeline_config,
             Arc::clone(&services.enrichment_store),
             Arc::clone(&services.read_store),
             Arc::clone(&services.retrieval_store),

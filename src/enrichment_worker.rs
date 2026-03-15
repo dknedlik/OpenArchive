@@ -1,8 +1,8 @@
 use crate::domain::SourceTimestamp;
 use crate::processor::{
-    ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
-    ClassificationOutput, EntityOutput, MemoryOutput, ProcessorError, ReconciliationProcessorInput,
-    RelationshipOutput, StubProcessorFactory, SummaryOutput,
+    ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput, ClassificationOutput,
+    EntityOutput, MemoryOutput, PreprocessProcessorInput, ProcessorError,
+    ReconciliationProcessorInput, RelationshipOutput, StubProcessorFactory, SummaryOutput,
 };
 use crate::shutdown::ShutdownToken;
 use crate::storage::{
@@ -15,8 +15,12 @@ use crate::storage::{
     MemoryObjectJson, NewDerivationRun, NewDerivedObject, NewEnrichmentJob, NewEvidenceLink,
     ObjectStatus, OriginKind, ReconciliationDecision, ReconciliationDecisionKind,
     RelationshipObjectJson, RetrievalIntent, RetrievalResultSet, ScopeType, SummaryObjectJson,
-    SupportStrength, WriteDerivationAttempt, WriteDerivedObject,
+    SupportStrength, TopicThreadRef, WriteDerivationAttempt, WriteDerivedObject,
 };
+use crate::config::EnrichmentPipelineConfig;
+use crate::rate_limiter::RateLimiter;
+use crate::stage_poller::{stage_poller_loop, ExtractStage, PreprocessStage, ReconcileStage};
+use crate::storage::JobType;
 use anyhow::Result;
 use log::{debug, error, info};
 use rand::random;
@@ -57,7 +61,7 @@ fn enrichment_worker(
         match job_store.claim_next_job(&worker_id) {
             Ok(Some(claimed_job)) => {
                 debug!("Worker {} claimed job {}", worker_id, claimed_job.job_id);
-                if let Err(err) = process_claimed_job(
+                if let Err(err) = process_claimed_jobs(
                     &worker_id,
                     claimed_job,
                     job_store.as_ref(),
@@ -82,6 +86,95 @@ fn enrichment_worker(
     }
 }
 
+fn process_claimed_jobs(
+    worker_id: &str,
+    first_job: ClaimedJob,
+    job_store: &dyn EnrichmentJobLifecycleStore,
+    read_store: &dyn ArtifactReadStore,
+    retrieval_store: &dyn ArchiveRetrievalStore,
+    state_store: &dyn EnrichmentStateStore,
+    derived_store: &dyn DerivedMetadataWriteStore,
+    processor_factory: &dyn ArtifactProcessorFactory,
+) -> std::result::Result<(), String> {
+    match first_job.job_type {
+        crate::storage::JobType::ArtifactPreprocess => {
+            if let Some(batch_processor) = processor_factory
+                .build_preprocess_batch_processor(first_job.enrichment_tier)
+                .map_err(|err| fail_job(job_store, worker_id, &first_job.job_id, "Failed to build preprocess batch processor", err))?
+            {
+                let mut jobs = vec![first_job];
+                let additional = job_store
+                    .claim_matching_jobs(worker_id, &jobs[0], batch_processor.max_batch_jobs().saturating_sub(1))
+                    .map_err(|err| format!("failed to claim matching preprocess jobs: {err}"))?;
+                jobs.extend(additional);
+                return process_preprocess_job_batch(
+                    worker_id,
+                    jobs,
+                    job_store,
+                    read_store,
+                    processor_factory,
+                    batch_processor.as_ref(),
+                );
+            }
+        }
+        crate::storage::JobType::ArtifactExtract => {
+            if let Some(batch_processor) = processor_factory
+                .build_batch_processor(first_job.enrichment_tier)
+                .map_err(|err| fail_job(job_store, worker_id, &first_job.job_id, "Failed to build extraction batch processor", err))?
+            {
+                let mut jobs = vec![first_job];
+                let additional = job_store
+                    .claim_matching_jobs(worker_id, &jobs[0], batch_processor.max_batch_jobs().saturating_sub(1))
+                    .map_err(|err| format!("failed to claim matching extraction jobs: {err}"))?;
+                jobs.extend(additional);
+                return process_extract_job_batch(
+                    worker_id,
+                    jobs,
+                    job_store,
+                    read_store,
+                    state_store,
+                    processor_factory,
+                    batch_processor.as_ref(),
+                );
+            }
+        }
+        crate::storage::JobType::ArtifactReconcile => {
+            if let Some(batch_processor) = processor_factory
+                .build_reconciliation_batch_processor(first_job.enrichment_tier)
+                .map_err(|err| fail_job(job_store, worker_id, &first_job.job_id, "Failed to build reconciliation batch processor", err))?
+            {
+                let mut jobs = vec![first_job];
+                let additional = job_store
+                    .claim_matching_jobs(worker_id, &jobs[0], batch_processor.max_batch_jobs().saturating_sub(1))
+                    .map_err(|err| format!("failed to claim matching reconciliation jobs: {err}"))?;
+                jobs.extend(additional);
+                return process_reconcile_job_batch(
+                    worker_id,
+                    jobs,
+                    job_store,
+                    read_store,
+                    state_store,
+                    derived_store,
+                    processor_factory,
+                    batch_processor.as_ref(),
+                );
+            }
+        }
+        _ => {}
+    }
+
+    process_claimed_job(
+        worker_id,
+        first_job,
+        job_store,
+        read_store,
+        retrieval_store,
+        state_store,
+        derived_store,
+        processor_factory,
+    )
+}
+
 fn process_claimed_job(
     worker_id: &str,
     claimed_job: ClaimedJob,
@@ -94,7 +187,7 @@ fn process_claimed_job(
 ) -> std::result::Result<(), String> {
     match claimed_job.job_type {
         crate::storage::JobType::ArtifactPreprocess => {
-            process_preprocess_job(worker_id, &claimed_job, job_store, read_store)
+            process_preprocess_job(worker_id, &claimed_job, job_store, read_store, processor_factory)
         }
         crate::storage::JobType::ArtifactExtract => process_extract_job(
             worker_id,
@@ -123,11 +216,268 @@ fn process_claimed_job(
     }
 }
 
+fn process_extract_job_batch(
+    worker_id: &str,
+    claimed_jobs: Vec<ClaimedJob>,
+    job_store: &dyn EnrichmentJobLifecycleStore,
+    read_store: &dyn ArtifactReadStore,
+    state_store: &dyn EnrichmentStateStore,
+    processor_factory: &dyn ArtifactProcessorFactory,
+    batch_processor: &dyn crate::processor::ArtifactBatchProcessor,
+) -> std::result::Result<(), String> {
+    let mut batchable = Vec::new();
+    let mut fallbacks = Vec::new();
+
+    for claimed_job in claimed_jobs {
+        let payload = match ArtifactExtractPayload::from_json(&claimed_job.payload_json) {
+            Ok(payload) => payload,
+            Err(err) => {
+                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to parse extract payload JSON", err);
+                continue;
+            }
+        };
+        let Some(source_type) = crate::storage::SourceType::from_str(&payload.source_type) else {
+            fail_job_message(job_store, worker_id, &claimed_job.job_id, format!("Invalid artifact source_type in extract payload: {}", payload.source_type));
+            continue;
+        };
+        let loaded = match read_store.load_artifact_for_enrichment(&claimed_job.artifact_id) {
+            Ok(Some(loaded)) => loaded,
+            Ok(None) => {
+                fail_job_message(job_store, worker_id, &claimed_job.job_id, format!("Artifact {} not found for extraction", claimed_job.artifact_id));
+                continue;
+            }
+            Err(err) => {
+                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to load artifact for extraction", err);
+                continue;
+            }
+        };
+        let input = ArtifactProcessorInput {
+            artifact_id: loaded.artifact.artifact_id.clone(),
+            import_id: payload.import_id.clone(),
+            source_type,
+            title: loaded.artifact.title.clone(),
+            participants: loaded.participants,
+            segments: loaded.segments,
+        };
+        if payload.topic_threads.is_empty()
+            && payload.conversation_windows.len() <= 1
+            && batch_processor.can_process(&input)
+        {
+            batchable.push((claimed_job, payload, input));
+        } else {
+            fallbacks.push(claimed_job);
+        }
+    }
+
+    if !batchable.is_empty() {
+        let inputs: Vec<_> = batchable.iter().map(|(_, _, input)| input.clone()).collect();
+        let results = batch_processor.process_batch(&inputs);
+        for ((claimed_job, payload, input), result) in batchable.into_iter().zip(results.into_iter()) {
+            match result {
+                Ok(output) => {
+                    let extraction_result = build_extraction_result(&claimed_job, &input, &output, payload.conversation_windows);
+                    if let Err(err) = state_store.save_extraction_result(&extraction_result) {
+                        let _ = fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to persist extraction result", err);
+                        continue;
+                    }
+                    let retrieve_job = NewEnrichmentJob {
+                        job_id: new_id("job"),
+                        artifact_id: claimed_job.artifact_id.clone(),
+                        job_type: crate::storage::JobType::ArtifactRetrieveContext,
+                        enrichment_tier: claimed_job.enrichment_tier,
+                        spawned_by_job_id: Some(claimed_job.job_id.clone()),
+                        job_status: crate::storage::JobStatus::Pending,
+                        max_attempts: 3,
+                        priority_no: 100,
+                        required_capabilities: vec!["archive_retrieval".to_string()],
+                        payload_json: ArtifactRetrieveContextPayload::new_v1(
+                            &claimed_job.artifact_id,
+                            &payload.import_id,
+                            input.source_type,
+                            &extraction_result.extraction_result_id,
+                        )
+                        .to_json(),
+                    };
+                    if let Err(err) = job_store.enqueue_jobs(&[retrieve_job]) {
+                        let _ = fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to enqueue retrieval-context job", err);
+                        continue;
+                    }
+                    complete_job(job_store, worker_id, &claimed_job.job_id)?;
+                }
+                Err(err) => {
+                    let _ = handle_processor_error(job_store, worker_id, &claimed_job.job_id, err);
+                }
+            }
+        }
+    }
+
+    for claimed_job in fallbacks {
+        process_extract_job(
+            worker_id,
+            &claimed_job,
+            job_store,
+            read_store,
+            state_store,
+            processor_factory,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn process_reconcile_job_batch(
+    worker_id: &str,
+    claimed_jobs: Vec<ClaimedJob>,
+    job_store: &dyn EnrichmentJobLifecycleStore,
+    read_store: &dyn ArtifactReadStore,
+    state_store: &dyn EnrichmentStateStore,
+    derived_store: &dyn DerivedMetadataWriteStore,
+    processor_factory: &dyn ArtifactProcessorFactory,
+    batch_processor: &dyn crate::processor::ReconciliationBatchProcessor,
+) -> std::result::Result<(), String> {
+    let mut batchable = Vec::new();
+    let mut fallbacks = Vec::new();
+
+    for claimed_job in claimed_jobs {
+        let payload = match ArtifactReconcilePayload::from_json(&claimed_job.payload_json) {
+            Ok(payload) => payload,
+            Err(err) => {
+                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to parse reconcile payload JSON", err);
+                continue;
+            }
+        };
+        let loaded = match read_store.load_artifact_for_enrichment(&claimed_job.artifact_id) {
+            Ok(Some(loaded)) => loaded,
+            Ok(None) => {
+                fail_job_message(job_store, worker_id, &claimed_job.job_id, format!("Artifact {} not found for reconciliation", claimed_job.artifact_id));
+                continue;
+            }
+            Err(err) => {
+                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to load artifact for reconciliation", err);
+                continue;
+            }
+        };
+        let extraction_result = match state_store.load_extraction_result(&payload.extraction_result_id) {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                fail_job_message(job_store, worker_id, &claimed_job.job_id, format!("Extraction result {} not found", payload.extraction_result_id));
+                continue;
+            }
+            Err(err) => {
+                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to load extraction result for reconciliation", err);
+                continue;
+            }
+        };
+        let retrieval_result_set = match state_store.load_retrieval_result_set(&payload.retrieval_result_set_id) {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                fail_job_message(job_store, worker_id, &claimed_job.job_id, format!("Retrieval result set {} not found", payload.retrieval_result_set_id));
+                continue;
+            }
+            Err(err) => {
+                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to load retrieval result set for reconciliation", err);
+                continue;
+            }
+        };
+        let input = match build_reconciliation_input(
+            &claimed_job.artifact_id,
+            &payload.source_type,
+            &extraction_result,
+            &retrieval_result_set,
+        ) {
+            Ok(input) => input,
+            Err(err) => {
+                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to build reconciliation input", err);
+                continue;
+            }
+        };
+        if batch_processor.estimate_size_bytes(&input).unwrap_or(usize::MAX) <= batch_processor.max_batch_bytes() {
+            batchable.push((claimed_job, loaded, extraction_result, retrieval_result_set, input));
+        } else {
+            fallbacks.push(claimed_job);
+        }
+    }
+
+    if !batchable.is_empty() {
+        let inputs: Vec<_> = batchable.iter().map(|(_, _, _, _, input)| input.clone()).collect();
+        let results = batch_processor.process_batch(&inputs);
+        for ((claimed_job, loaded, extraction_result, retrieval_result_set, _), result) in
+            batchable.into_iter().zip(results.into_iter())
+        {
+            match result {
+                Ok(outputs) => {
+                    let decisions = if extraction_result.memories.is_empty()
+                        && extraction_result.relationships.is_empty()
+                    {
+                        vec![ReconciliationDecision {
+                            reconciliation_decision_id: new_id("reconcile"),
+                            artifact_id: extraction_result.artifact_id.clone(),
+                            job_id: claimed_job.job_id.clone(),
+                            extraction_result_id: extraction_result.extraction_result_id.clone(),
+                            retrieval_result_set_id: retrieval_result_set.retrieval_result_set_id.clone(),
+                            pipeline_name: "artifact_reconciliation".to_string(),
+                            pipeline_version: "v1".to_string(),
+                            decision_kind: ReconciliationDecisionKind::InsufficientEvidence,
+                            target_kind: "artifact".to_string(),
+                            target_key: extraction_result.artifact_id.clone(),
+                            matched_object_id: None,
+                            rationale: "No candidate memories or relationships were extracted for reconciliation.".to_string(),
+                            evidence_segment_ids: extraction_result.summary_evidence_segment_ids.clone(),
+                            status: "completed".to_string(),
+                            error_message: None,
+                        }]
+                    } else {
+                        build_reconciliation_decisions(
+                            &claimed_job,
+                            &extraction_result,
+                            &retrieval_result_set,
+                            outputs,
+                        )
+                    };
+                    if let Err(err) = state_store.save_reconciliation_decisions(&decisions) {
+                        let _ = fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to persist reconciliation decisions", err);
+                        continue;
+                    }
+                    let attempt = build_derivation_attempt(
+                        &claimed_job,
+                        &loaded.artifact.artifact_id,
+                        &extraction_result,
+                        &decisions,
+                    );
+                    if let Err(err) = derived_store.write_derivation_attempt(attempt) {
+                        let _ = fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to persist derivation output", err);
+                        continue;
+                    }
+                    complete_job(job_store, worker_id, &claimed_job.job_id)?;
+                }
+                Err(err) => {
+                    let _ = handle_processor_error(job_store, worker_id, &claimed_job.job_id, err);
+                }
+            }
+        }
+    }
+
+    for claimed_job in fallbacks {
+        process_reconcile_job(
+            worker_id,
+            &claimed_job,
+            job_store,
+            read_store,
+            state_store,
+            derived_store,
+            processor_factory,
+        )?;
+    }
+
+    Ok(())
+}
+
 fn process_preprocess_job(
     worker_id: &str,
     claimed_job: &ClaimedJob,
     job_store: &dyn EnrichmentJobLifecycleStore,
     read_store: &dyn ArtifactReadStore,
+    processor_factory: &dyn ArtifactProcessorFactory,
 ) -> std::result::Result<(), String> {
     let payload =
         ArtifactPreprocessPayload::from_json(&claimed_job.payload_json).map_err(|err| {
@@ -175,7 +525,25 @@ fn process_preprocess_job(
         ));
     };
 
-    let windows = build_preprocess_windows(&claimed_job.artifact_id, &loaded.segments);
+    let processor = processor_factory
+        .build_preprocess_processor(claimed_job.enrichment_tier)
+        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to build preprocess processor", err))?;
+    let processor_input = PreprocessProcessorInput {
+        artifact_id: loaded.artifact.artifact_id.clone(),
+        import_id: payload.import_id.clone(),
+        source_type,
+        title: loaded.artifact.title.clone(),
+        participants: loaded.participants,
+        segments: loaded.segments,
+    };
+    let preprocess_output = processor
+        .segment(&processor_input)
+        .map_err(|err| handle_processor_error(job_store, worker_id, &claimed_job.job_id, err))?;
+    let coverage_windows = build_preprocess_coverage_windows(
+        &claimed_job.artifact_id,
+        &processor_input.segments,
+        &preprocess_output.topic_threads,
+    );
     let extract_job = NewEnrichmentJob {
         job_id: new_id("job"),
         artifact_id: claimed_job.artifact_id.clone(),
@@ -190,7 +558,8 @@ fn process_preprocess_job(
             &claimed_job.artifact_id,
             &payload.import_id,
             source_type,
-            windows,
+            coverage_windows,
+            preprocess_output.topic_threads,
         )
         .to_json(),
     };
@@ -206,6 +575,105 @@ fn process_preprocess_job(
     })?;
 
     complete_job(job_store, worker_id, &claimed_job.job_id)?;
+    Ok(())
+}
+
+fn process_preprocess_job_batch(
+    worker_id: &str,
+    claimed_jobs: Vec<ClaimedJob>,
+    job_store: &dyn EnrichmentJobLifecycleStore,
+    read_store: &dyn ArtifactReadStore,
+    processor_factory: &dyn ArtifactProcessorFactory,
+    batch_processor: &dyn crate::processor::PreprocessBatchProcessor,
+) -> std::result::Result<(), String> {
+    let mut batchable = Vec::new();
+    let mut fallbacks = Vec::new();
+
+    for claimed_job in claimed_jobs {
+        let payload = match ArtifactPreprocessPayload::from_json(&claimed_job.payload_json) {
+            Ok(payload) => payload,
+            Err(err) => {
+                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to parse preprocess payload JSON", err);
+                continue;
+            }
+        };
+        let Some(source_type) = crate::storage::SourceType::from_str(&payload.source_type) else {
+            fail_job_message(job_store, worker_id, &claimed_job.job_id, format!("Invalid artifact source_type in preprocess payload: {}", payload.source_type));
+            continue;
+        };
+        let loaded = match read_store.load_artifact_for_enrichment(&claimed_job.artifact_id) {
+            Ok(Some(loaded)) => loaded,
+            Ok(None) => {
+                fail_job_message(job_store, worker_id, &claimed_job.job_id, format!("Artifact {} not found for preprocessing", claimed_job.artifact_id));
+                continue;
+            }
+            Err(err) => {
+                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to load artifact for preprocessing", err);
+                continue;
+            }
+        };
+        let input = PreprocessProcessorInput {
+            artifact_id: loaded.artifact.artifact_id.clone(),
+            import_id: payload.import_id.clone(),
+            source_type,
+            title: loaded.artifact.title.clone(),
+            participants: loaded.participants,
+            segments: loaded.segments,
+        };
+        if batch_processor.estimate_size_bytes(&input).unwrap_or(usize::MAX) <= batch_processor.max_batch_bytes() {
+            batchable.push((claimed_job, payload, input));
+        } else {
+            fallbacks.push(claimed_job);
+        }
+    }
+
+    if !batchable.is_empty() {
+        let inputs: Vec<_> = batchable.iter().map(|(_, _, input)| input.clone()).collect();
+        let results = batch_processor.process_batch(&inputs);
+        for ((claimed_job, payload, input), result) in batchable.into_iter().zip(results.into_iter()) {
+            match result {
+                Ok(output) => {
+                    let coverage_windows = build_preprocess_coverage_windows(
+                        &claimed_job.artifact_id,
+                        &input.segments,
+                        &output.topic_threads,
+                    );
+                    let extract_job = NewEnrichmentJob {
+                        job_id: new_id("job"),
+                        artifact_id: claimed_job.artifact_id.clone(),
+                        job_type: crate::storage::JobType::ArtifactExtract,
+                        enrichment_tier: claimed_job.enrichment_tier,
+                        spawned_by_job_id: Some(claimed_job.job_id.clone()),
+                        job_status: crate::storage::JobStatus::Pending,
+                        max_attempts: 3,
+                        priority_no: 100,
+                        required_capabilities: vec!["text".to_string()],
+                        payload_json: ArtifactExtractPayload::new_v1(
+                            &claimed_job.artifact_id,
+                            &payload.import_id,
+                            input.source_type,
+                            coverage_windows,
+                            output.topic_threads,
+                        )
+                        .to_json(),
+                    };
+                    if let Err(err) = job_store.enqueue_jobs(&[extract_job]) {
+                        let _ = fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to enqueue extraction job from preprocess", err);
+                        continue;
+                    }
+                    complete_job(job_store, worker_id, &claimed_job.job_id)?;
+                }
+                Err(err) => {
+                    let _ = handle_processor_error(job_store, worker_id, &claimed_job.job_id, err);
+                }
+            }
+        }
+    }
+
+    for claimed_job in fallbacks {
+        process_preprocess_job(worker_id, &claimed_job, job_store, read_store, processor_factory)?;
+    }
+
     Ok(())
 }
 
@@ -284,7 +752,20 @@ fn process_extract_job(
             )
         })?;
 
-    let output = if payload.conversation_windows.len() > 1 {
+    let output = if !payload.topic_threads.is_empty() {
+        let mut chunk_outputs = Vec::new();
+        for chunk_input in build_topic_thread_inputs(
+            &processor_input,
+            &payload.topic_threads,
+            &payload.conversation_windows,
+        ) {
+            let chunk_output = processor.process(&chunk_input).map_err(|err| {
+                handle_processor_error(job_store, worker_id, &claimed_job.job_id, err)
+            })?;
+            chunk_outputs.push(chunk_output);
+        }
+        merge_chunk_outputs(&processor_input, &chunk_outputs)
+    } else if payload.conversation_windows.len() > 1 {
         let mut chunk_outputs = Vec::new();
         for chunk_input in build_chunk_inputs(&processor_input, &payload.conversation_windows) {
             let chunk_output = processor.process(&chunk_input).map_err(|err| {
@@ -656,7 +1137,32 @@ fn process_reconcile_job(
     Ok(())
 }
 
-fn build_preprocess_windows(
+fn build_preprocess_coverage_windows(
+    artifact_id: &str,
+    segments: &[crate::storage::LoadedSegment],
+    topic_threads: &[TopicThreadRef],
+) -> Vec<ConversationWindowRef> {
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    let covered: HashSet<i32> = topic_threads
+        .iter()
+        .flat_map(|thread| thread.spans.iter())
+        .flat_map(|span| span.start_sequence_no..=span.end_sequence_no)
+        .collect();
+    let uncovered: Vec<_> = segments
+        .iter()
+        .filter(|segment| !covered.contains(&segment.sequence_no))
+        .cloned()
+        .collect();
+    if uncovered.is_empty() {
+        return Vec::new();
+    }
+
+    build_contiguous_windows(artifact_id, &uncovered)
+}
+
+fn build_contiguous_windows(
     artifact_id: &str,
     segments: &[crate::storage::LoadedSegment],
 ) -> Vec<ConversationWindowRef> {
@@ -666,15 +1172,9 @@ fn build_preprocess_windows(
     if segments.len() <= PREPROCESS_WINDOW_SEGMENTS {
         return vec![ConversationWindowRef {
             window_id: format!("{artifact_id}:window:0"),
-            label: "full conversation".to_string(),
-            start_sequence_no: segments
-                .first()
-                .map(|segment| segment.sequence_no)
-                .unwrap_or(0),
-            end_sequence_no: segments
-                .last()
-                .map(|segment| segment.sequence_no)
-                .unwrap_or(0),
+            label: "coverage fallback".to_string(),
+            start_sequence_no: segments.first().map(|segment| segment.sequence_no).unwrap_or(0),
+            end_sequence_no: segments.last().map(|segment| segment.sequence_no).unwrap_or(0),
         }];
     }
 
@@ -804,6 +1304,76 @@ fn build_chunk_inputs(
         .collect()
 }
 
+fn build_topic_thread_inputs(
+    input: &ArtifactProcessorInput,
+    topic_threads: &[TopicThreadRef],
+    coverage_windows: &[ConversationWindowRef],
+) -> Vec<ArtifactProcessorInput> {
+    let mut inputs = Vec::new();
+    let mut covered = HashSet::new();
+
+    for thread in topic_threads {
+        let segments: Vec<_> = input
+            .segments
+            .iter()
+            .filter(|segment| {
+                thread
+                    .spans
+                    .iter()
+                    .any(|span| segment.sequence_no >= span.start_sequence_no && segment.sequence_no <= span.end_sequence_no)
+            })
+            .cloned()
+            .collect();
+        if segments.is_empty() {
+            continue;
+        }
+        for segment in &segments {
+            covered.insert(segment.sequence_no);
+        }
+        inputs.push(ArtifactProcessorInput {
+            artifact_id: input.artifact_id.clone(),
+            import_id: input.import_id.clone(),
+            source_type: input.source_type,
+            title: Some(match &input.title {
+                Some(title) => format!("{title} [{}]", thread.label),
+                None => thread.label.clone(),
+            }),
+            participants: input.participants.clone(),
+            segments,
+        });
+    }
+
+    for window in coverage_windows {
+        let segments: Vec<_> = input
+            .segments
+            .iter()
+            .filter(|segment| {
+                !covered.contains(&segment.sequence_no)
+                    && segment.sequence_no >= window.start_sequence_no
+                    && segment.sequence_no <= window.end_sequence_no
+            })
+            .cloned()
+            .collect();
+        if segments.is_empty() {
+            continue;
+        }
+        inputs.push(ArtifactProcessorInput {
+            artifact_id: input.artifact_id.clone(),
+            import_id: input.import_id.clone(),
+            source_type: input.source_type,
+            title: input.title.clone(),
+            participants: input.participants.clone(),
+            segments,
+        });
+    }
+
+    if inputs.is_empty() {
+        vec![input.clone()]
+    } else {
+        inputs
+    }
+}
+
 fn merge_chunk_outputs(
     input: &ArtifactProcessorInput,
     outputs: &[ArtifactProcessorOutput],
@@ -847,32 +1417,46 @@ fn merge_chunk_outputs(
         }
 
         for classification in &output.classifications {
-            classifications
-                .entry((
-                    classification.classification_type.clone(),
-                    classification.classification_value.clone(),
-                ))
-                .or_insert_with(|| classification.clone());
+            let key = (
+                classification.classification_type.clone(),
+                classification.classification_value.clone(),
+            );
+            if let Some(existing) = classifications.get_mut(&key) {
+                merge_classification_output(existing, classification);
+            } else {
+                classifications.insert(key, classification.clone());
+            }
         }
         for memory in &output.memories {
-            memories
-                .entry(memory_target_key_from_output(memory))
-                .or_insert_with(|| memory.clone());
+            let key = memory_target_key_from_output(memory);
+            if let Some(existing) = memories.get_mut(&key) {
+                merge_memory_output(existing, memory);
+            } else {
+                memories.insert(key, memory.clone());
+            }
         }
         for entity in &output.entities {
-            entities
-                .entry(entity.entity_key.clone())
-                .or_insert_with(|| entity.clone());
+            if let Some(existing) = entities.get_mut(&entity.entity_key) {
+                merge_entity_output(existing, entity);
+            } else {
+                entities.insert(entity.entity_key.clone(), entity.clone());
+            }
         }
         for relationship in &output.relationships {
-            relationships
-                .entry(relationship_target_key_from_output(relationship))
-                .or_insert_with(|| relationship.clone());
+            let key = relationship_target_key_from_output(relationship);
+            if let Some(existing) = relationships.get_mut(&key) {
+                merge_relationship_output(existing, relationship);
+            } else {
+                relationships.insert(key, relationship.clone());
+            }
         }
         for intent in &output.retrieval_intents {
-            retrieval_intents
-                .entry((intent.intent_type.clone(), intent.query_text.clone()))
-                .or_insert_with(|| intent.clone());
+            let key = (intent.intent_type.clone(), intent.query_text.clone());
+            if let Some(existing) = retrieval_intents.get_mut(&key) {
+                merge_retrieval_intent(existing, intent);
+            } else {
+                retrieval_intents.insert(key, intent.clone());
+            }
         }
     }
 
@@ -1011,6 +1595,75 @@ fn extend_unique(target: &mut Vec<String>, values: &[String]) {
         if !target.contains(value) {
             target.push(value.clone());
         }
+    }
+}
+
+fn merge_classification_output(target: &mut ClassificationOutput, incoming: &ClassificationOutput) {
+    target.title = prefer_richer_optional_text(target.title.take(), incoming.title.clone());
+    target.body_text = prefer_richer_optional_text(target.body_text.take(), incoming.body_text.clone());
+    extend_unique(&mut target.evidence_segment_ids, &incoming.evidence_segment_ids);
+}
+
+fn merge_memory_output(target: &mut MemoryOutput, incoming: &MemoryOutput) {
+    target.title = prefer_richer_optional_text(target.title.take(), incoming.title.clone());
+    if incoming.body_text.len() > target.body_text.len() {
+        target.body_text = incoming.body_text.clone();
+    }
+    extend_unique(&mut target.evidence_segment_ids, &incoming.evidence_segment_ids);
+}
+
+fn merge_entity_output(target: &mut EntityOutput, incoming: &EntityOutput) {
+    if incoming.display_name.len() > target.display_name.len() {
+        target.display_name = incoming.display_name.clone();
+    }
+    if incoming.entity_type.len() > target.entity_type.len() {
+        target.entity_type = incoming.entity_type.clone();
+    }
+    extend_unique(&mut target.evidence_segment_ids, &incoming.evidence_segment_ids);
+}
+
+fn merge_relationship_output(target: &mut RelationshipOutput, incoming: &RelationshipOutput) {
+    target.title = prefer_richer_optional_text(target.title.take(), incoming.title.clone());
+    if incoming.body_text.len() > target.body_text.len() {
+        target.body_text = incoming.body_text.clone();
+    }
+    if confidence_rank(&incoming.confidence_label) > confidence_rank(&target.confidence_label) {
+        target.confidence_label = incoming.confidence_label.clone();
+    }
+    extend_unique(&mut target.evidence_segment_ids, &incoming.evidence_segment_ids);
+}
+
+fn merge_retrieval_intent(target: &mut RetrievalIntent, incoming: &RetrievalIntent) {
+    if incoming.question.len() > target.question.len() {
+        target.question = incoming.question.clone();
+    }
+    if incoming.query_text.len() > target.query_text.len() {
+        target.query_text = incoming.query_text.clone();
+    }
+    extend_unique(&mut target.evidence_segment_ids, &incoming.evidence_segment_ids);
+}
+
+fn prefer_richer_optional_text(current: Option<String>, incoming: Option<String>) -> Option<String> {
+    match (current, incoming) {
+        (Some(current), Some(incoming)) => {
+            if incoming.len() > current.len() {
+                Some(incoming)
+            } else {
+                Some(current)
+            }
+        }
+        (Some(current), None) => Some(current),
+        (None, Some(incoming)) => Some(incoming),
+        (None, None) => None,
+    }
+}
+
+fn confidence_rank(label: &str) -> i32 {
+    match label {
+        "high" => 3,
+        "medium" => 2,
+        "low" => 1,
+        _ => 0,
     }
 }
 
@@ -1407,4 +2060,242 @@ pub fn start_enrichment_workers_with_factory(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(workers)
+}
+
+// ---------------------------------------------------------------------------
+// Per-stage pipeline startup (replaces uniform worker pool)
+// ---------------------------------------------------------------------------
+
+/// Start the enrichment pipeline with per-stage pollers and dedicated
+/// retrieve-context workers.
+///
+/// Spawns:
+/// - 1 preprocess poller thread
+/// - 1 extract poller thread
+/// - 1 reconcile poller thread
+/// - N retrieve_context worker threads
+///
+/// All batch-stage pollers share a single rate limiter per provider.
+pub fn start_enrichment_pipeline(
+    config: &EnrichmentPipelineConfig,
+    job_store: Arc<dyn EnrichmentJobLifecycleStore>,
+    read_store: Arc<dyn ArtifactReadStore>,
+    retrieval_store: Arc<dyn ArchiveRetrievalStore>,
+    state_store: Arc<dyn EnrichmentStateStore>,
+    derived_store: Arc<dyn DerivedMetadataWriteStore>,
+    shutdown: ShutdownToken,
+    processor_factory: Arc<dyn ArtifactProcessorFactory>,
+) -> Result<Vec<thread::JoinHandle<()>>> {
+    let pid = std::process::id();
+    let rate_limiter = Arc::new(RateLimiter::new(config.rate_limit_requests_per_minute));
+    let poll_interval = config.poll_interval;
+    let mut handles = Vec::new();
+
+    // Stage pollers — submitters are built inside the spawned thread so they
+    // never cross thread boundaries (no Send bound needed on submitter traits).
+
+    // Preprocess poller
+    {
+        let worker_id = format!("enrichment:{}:preprocess", pid);
+        let job_store = Arc::clone(&job_store);
+        let read_store = Arc::clone(&read_store);
+        let state_store = Arc::clone(&state_store);
+        let derived_store = Arc::clone(&derived_store);
+        let processor_factory = Arc::clone(&processor_factory);
+        let rate_limiter = Arc::clone(&rate_limiter);
+        let shutdown = shutdown.clone();
+        let batch_size = config.preprocess.batch_size;
+        let max_concurrent = config.preprocess.max_concurrent_batches;
+
+        let h = thread::Builder::new()
+            .name("preprocess-poller".to_string())
+            .spawn(move || {
+                let submitter = processor_factory
+                    .build_preprocess_submitter(crate::storage::EnrichmentTier::Standard)
+                    .ok()
+                    .flatten();
+                let Some(submitter) = submitter else {
+                    info!("No preprocess batch submitter available; preprocess poller exiting");
+                    return;
+                };
+                let stage = PreprocessStage::new(submitter, crate::storage::EnrichmentTier::Standard, batch_size, max_concurrent);
+                stage_poller_loop(
+                    &stage,
+                    worker_id,
+                    job_store.as_ref(),
+                    read_store.as_ref(),
+                    state_store.as_ref(),
+                    derived_store.as_ref(),
+                    &rate_limiter,
+                    poll_interval,
+                    shutdown,
+                );
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to spawn preprocess poller: {}", e))?;
+        handles.push(h);
+    }
+
+    // Extract poller
+    {
+        let worker_id = format!("enrichment:{}:extract", pid);
+        let job_store = Arc::clone(&job_store);
+        let read_store = Arc::clone(&read_store);
+        let state_store = Arc::clone(&state_store);
+        let derived_store = Arc::clone(&derived_store);
+        let processor_factory = Arc::clone(&processor_factory);
+        let rate_limiter = Arc::clone(&rate_limiter);
+        let shutdown = shutdown.clone();
+        let batch_size = config.extract.batch_size;
+        let max_concurrent = config.extract.max_concurrent_batches;
+
+        let h = thread::Builder::new()
+            .name("extract-poller".to_string())
+            .spawn(move || {
+                let submitter = processor_factory
+                    .build_extraction_submitter(crate::storage::EnrichmentTier::Standard)
+                    .ok()
+                    .flatten();
+                let Some(submitter) = submitter else {
+                    info!("No extraction batch submitter available; extract poller exiting");
+                    return;
+                };
+                let stage = ExtractStage::new(submitter, crate::storage::EnrichmentTier::Standard, batch_size, max_concurrent);
+                stage_poller_loop(
+                    &stage,
+                    worker_id,
+                    job_store.as_ref(),
+                    read_store.as_ref(),
+                    state_store.as_ref(),
+                    derived_store.as_ref(),
+                    &rate_limiter,
+                    poll_interval,
+                    shutdown,
+                );
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to spawn extract poller: {}", e))?;
+        handles.push(h);
+    }
+
+    // Reconcile poller
+    {
+        let worker_id = format!("enrichment:{}:reconcile", pid);
+        let job_store = Arc::clone(&job_store);
+        let read_store = Arc::clone(&read_store);
+        let state_store = Arc::clone(&state_store);
+        let derived_store = Arc::clone(&derived_store);
+        let processor_factory = Arc::clone(&processor_factory);
+        let rate_limiter = Arc::clone(&rate_limiter);
+        let shutdown = shutdown.clone();
+        let batch_size = config.reconcile.batch_size;
+        let max_concurrent = config.reconcile.max_concurrent_batches;
+
+        let h = thread::Builder::new()
+            .name("reconcile-poller".to_string())
+            .spawn(move || {
+                let submitter = processor_factory
+                    .build_reconciliation_submitter(crate::storage::EnrichmentTier::Standard)
+                    .ok()
+                    .flatten();
+                let Some(submitter) = submitter else {
+                    info!("No reconciliation batch submitter available; reconcile poller exiting");
+                    return;
+                };
+                let stage = ReconcileStage::new(submitter, crate::storage::EnrichmentTier::Standard, batch_size, max_concurrent);
+                stage_poller_loop(
+                    &stage,
+                    worker_id,
+                    job_store.as_ref(),
+                    read_store.as_ref(),
+                    state_store.as_ref(),
+                    derived_store.as_ref(),
+                    &rate_limiter,
+                    poll_interval,
+                    shutdown,
+                );
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to spawn reconcile poller: {}", e))?;
+        handles.push(h);
+    }
+
+    // RetrieveContext workers (traditional blocking workers)
+    for i in 0..config.retrieve_context_workers {
+        let worker_id = format!("enrichment:{}:retrieve:{}", pid, i);
+        let job_store = Arc::clone(&job_store);
+        let retrieval_store = Arc::clone(&retrieval_store);
+        let state_store = Arc::clone(&state_store);
+        let shutdown = shutdown.clone();
+
+        let h = thread::Builder::new()
+            .name(format!("retrieve-context-{}", i))
+            .spawn(move || {
+                retrieve_context_worker_loop(
+                    worker_id,
+                    job_store.as_ref(),
+                    retrieval_store.as_ref(),
+                    state_store.as_ref(),
+                    poll_interval,
+                    shutdown,
+                );
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to spawn retrieve-context worker: {}", e))?;
+        handles.push(h);
+    }
+
+    info!(
+        "Enrichment pipeline started: 3 stage pollers + {} retrieve-context workers",
+        config.retrieve_context_workers
+    );
+    Ok(handles)
+}
+
+/// Dedicated worker loop for RetrieveContext jobs.
+///
+/// Claims one job at a time, processes it synchronously, and sleeps when
+/// no jobs are available. This stage does local/DB retrieval, not provider
+/// API calls, so a traditional blocking worker is appropriate.
+fn retrieve_context_worker_loop(
+    worker_id: String,
+    job_store: &dyn EnrichmentJobLifecycleStore,
+    retrieval_store: &dyn ArchiveRetrievalStore,
+    state_store: &dyn EnrichmentStateStore,
+    poll_interval: Duration,
+    shutdown: ShutdownToken,
+) {
+    info!("Retrieve-context worker {} starting", worker_id);
+
+    loop {
+        if shutdown.is_shutdown() {
+            info!("Retrieve-context worker {} shutting down", worker_id);
+            break;
+        }
+
+        match job_store.claim_jobs_by_type(
+            &worker_id,
+            JobType::ArtifactRetrieveContext,
+            None, // tier-agnostic: retrieve_context does DB lookups, not model calls
+            1,
+        ) {
+            Ok(jobs) if !jobs.is_empty() => {
+                let job = &jobs[0];
+                debug!("Worker {} claimed retrieve-context job {}", worker_id, job.job_id);
+                if let Err(err) = process_retrieve_context_job(
+                    &worker_id,
+                    job,
+                    job_store,
+                    retrieval_store,
+                    state_store,
+                ) {
+                    error!(
+                        "Worker {} failed to process retrieve-context job: {}",
+                        worker_id, err
+                    );
+                }
+            }
+            Ok(_) => thread::sleep(poll_interval),
+            Err(err) => {
+                error!("Worker {} failed to claim job: {}", worker_id, err);
+                thread::sleep(poll_interval);
+            }
+        }
+    }
 }

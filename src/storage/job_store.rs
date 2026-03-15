@@ -1,6 +1,6 @@
 use crate::error::StorageResult;
 
-use crate::storage::types::{ClaimedJob, NewEnrichmentJob, RetryOutcome};
+use crate::storage::types::{ClaimedJob, EnrichmentTier, JobType, NewEnrichmentJob, RetryOutcome};
 use crate::storage::StorageTx;
 
 /// Stores asynchronous enrichment jobs (insert-time, used during import).
@@ -52,6 +52,35 @@ pub trait EnrichmentJobLifecycleStore: Sync + Send {
     ///
     /// Returns `None` if no eligible job exists.
     fn claim_next_job(&self, worker_id: &str) -> StorageResult<Option<ClaimedJob>>;
+
+    /// Claim additional jobs that match an already-claimed template job.
+    ///
+    /// Implementations should only return eligible jobs with the same
+    /// `job_type`, `enrichment_tier`, and equivalent required capabilities as
+    /// `template_job`, up to `limit`.
+    fn claim_matching_jobs(
+        &self,
+        worker_id: &str,
+        template_job: &ClaimedJob,
+        limit: usize,
+    ) -> StorageResult<Vec<ClaimedJob>>;
+
+    /// Claim up to `limit` eligible jobs of a specific type and optional tier.
+    ///
+    /// Like `claim_next_job` but filtered to a single `job_type` and
+    /// returning multiple jobs. Used by per-stage pollers to claim a
+    /// small batch of same-stage work.
+    ///
+    /// When `enrichment_tier` is `Some`, only jobs of that tier are claimed.
+    /// When `None`, jobs of any tier are eligible (useful for tier-agnostic
+    /// stages like retrieve_context).
+    fn claim_jobs_by_type(
+        &self,
+        worker_id: &str,
+        job_type: JobType,
+        enrichment_tier: Option<EnrichmentTier>,
+        limit: usize,
+    ) -> StorageResult<Vec<ClaimedJob>>;
 
     /// Mark a running job as successfully completed by the claiming worker.
     ///

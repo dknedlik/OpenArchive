@@ -12,7 +12,9 @@ pub mod object_store;
 pub mod parser;
 pub mod postgres_db;
 pub mod processor;
+pub mod rate_limiter;
 pub mod shutdown;
+pub mod stage_poller;
 pub mod storage;
 
 pub use domain::{ParticipantRole, SourceTimestamp, VisibilityStatus};

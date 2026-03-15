@@ -58,7 +58,8 @@ pub use types::{
     NewEnrichmentJob, NewEvidenceLink, NewImport, NewImportObjectRef, NewParticipant, NewSegment,
     ObjectStatus, OriginKind, PayloadFormat, ReconciliationDecision, ReconciliationDecisionKind,
     RelationshipObjectJson, RetrievalIntent, RetrievalResultSet, RetrievedContextItem,
-    RetryOutcome, ScopeType, SegmentType, SourceType, SummaryObjectJson, SupportStrength,
+    RetryOutcome, ScopeType, SegmentSpanRef, SegmentType, SourceType, SummaryObjectJson,
+    SupportStrength, TopicThreadRef,
 };
 
 use crate::error::StorageResult;

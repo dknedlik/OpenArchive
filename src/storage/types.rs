@@ -732,6 +732,21 @@ pub struct ConversationWindowRef {
     pub end_sequence_no: i32,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SegmentSpanRef {
+    pub start_sequence_no: i32,
+    pub end_sequence_no: i32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TopicThreadRef {
+    pub thread_id: String,
+    pub label: String,
+    pub summary: String,
+    pub confidence_label: String,
+    pub spans: Vec<SegmentSpanRef>,
+}
+
 /// Documented contract for the `artifact_preprocess` job payload.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ArtifactPreprocessPayload {
@@ -768,6 +783,8 @@ pub struct ArtifactExtractPayload {
     pub source_type: String,
     #[serde(default)]
     pub conversation_windows: Vec<ConversationWindowRef>,
+    #[serde(default)]
+    pub topic_threads: Vec<TopicThreadRef>,
 }
 
 impl ArtifactExtractPayload {
@@ -776,6 +793,7 @@ impl ArtifactExtractPayload {
         import_id: &str,
         source_type: SourceType,
         conversation_windows: Vec<ConversationWindowRef>,
+        topic_threads: Vec<TopicThreadRef>,
     ) -> Self {
         Self {
             schema_version: "1".to_string(),
@@ -783,6 +801,7 @@ impl ArtifactExtractPayload {
             import_id: import_id.to_string(),
             source_type: source_type.as_str().to_string(),
             conversation_windows,
+            topic_threads,
         }
     }
 
