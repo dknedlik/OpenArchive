@@ -169,14 +169,6 @@ mod tests {
         ) -> crate::error::StorageResult<Option<crate::storage::LoadedArtifactForEnrichment>> {
             Ok(None)
         }
-
-        fn load_brain_context_candidates(
-            &self,
-            _exclude_artifact_id: &str,
-            _limit: usize,
-        ) -> crate::error::StorageResult<Vec<crate::storage::BrainContextCandidate>> {
-            Ok(Vec::new())
-        }
     }
 
     impl ObjectStore for MockStore {

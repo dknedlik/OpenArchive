@@ -197,7 +197,7 @@ fn run_model(
         reasoning_effort_override: base_config.reasoning_effort_override,
         standard_model: model.to_string(),
         quality_model: Some(model.to_string()),
-    }, None)
+    })
     .map_err(|err| anyhow!("failed to build OpenAI factory: {err}"))?;
 
     let processor = factory

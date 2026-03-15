@@ -7,7 +7,7 @@ use crate::config::GrokConfig;
 use crate::storage::types::EnrichmentTier;
 
 use super::{
-    ArtifactProcessor, ArtifactProcessorFactory, BrainContextProvider, ConversationEnrichmentStrategy,
+    ArtifactProcessor, ArtifactProcessorFactory, ConversationEnrichmentStrategy,
     HostedArtifactProcessor, InferenceClient, InferenceResult, InferenceUsage,
     OpenRouterResponsesContentItem, OpenRouterResponsesInputItem,
     OpenRouterResponsesReasoningConfig, OpenRouterResponsesRequest, OpenRouterResponsesResponse,
@@ -18,14 +18,10 @@ pub struct GrokProcessorFactory {
     client: Arc<dyn InferenceClient>,
     standard_model: String,
     quality_model: String,
-    brain_context_provider: Option<Arc<dyn BrainContextProvider>>,
 }
 
 impl GrokProcessorFactory {
-    pub fn new(
-        config: GrokConfig,
-        brain_context_provider: Option<Arc<dyn BrainContextProvider>>,
-    ) -> Result<Self, String> {
+    pub fn new(config: GrokConfig) -> Result<Self, String> {
         let client = GrokClient::new(&config).map_err(|err| err.to_string())?;
         let quality_model = config
             .quality_model
@@ -36,7 +32,6 @@ impl GrokProcessorFactory {
             client: Arc::new(client),
             standard_model: config.standard_model,
             quality_model,
-            brain_context_provider,
         })
     }
 }
@@ -54,7 +49,6 @@ impl ArtifactProcessorFactory for GrokProcessorFactory {
             pipeline_name: "grok_enrichment",
             provider_name: "grok",
             strategy: ConversationEnrichmentStrategy::openai_default(),
-            brain_context_provider: self.brain_context_provider.clone(),
         }))
     }
 }

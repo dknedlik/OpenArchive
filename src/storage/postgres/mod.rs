@@ -10,8 +10,13 @@ use crate::postgres_db;
 use crate::storage::derivation_store::{
     DerivationWriteResult, DerivedMetadataWriteStore, WriteDerivationAttempt,
 };
+use crate::storage::enrichment_state_store::EnrichmentStateStore;
 use crate::storage::job_store::EnrichmentJobLifecycleStore;
-use crate::storage::types::{ClaimedJob, RetryOutcome};
+use crate::storage::archive_retrieval_store::ArchiveRetrievalStore;
+use crate::storage::types::{
+    ArtifactExtractionResult, ClaimedJob, ReconciliationDecision, RetrievalIntent,
+    RetrievalResultSet, RetrievedContextItem, RetryOutcome,
+};
 use crate::storage::{
     ArtifactIngestResult, ArtifactReadStore, ImportWriteResult, ImportWriteStore, ImportedArtifact,
     StorageTx, WriteImportSet,
@@ -54,15 +59,6 @@ impl ArtifactReadStore for PostgresImportWriteStore {
     ) -> StorageResult<Option<crate::storage::types::LoadedArtifactForEnrichment>> {
         let mut client = postgres_db::connect(&self.config)?;
         artifact::load_artifact_for_enrichment(&mut client, artifact_id)
-    }
-
-    fn load_brain_context_candidates(
-        &self,
-        exclude_artifact_id: &str,
-        limit: usize,
-    ) -> StorageResult<Vec<crate::storage::types::BrainContextCandidate>> {
-        let mut client = postgres_db::connect(&self.config)?;
-        artifact::load_brain_context_candidates(&mut client, exclude_artifact_id, limit)
     }
 }
 
@@ -213,6 +209,229 @@ pub struct PostgresDerivedMetadataStore {
 impl PostgresDerivedMetadataStore {
     pub fn new(config: PostgresConfig) -> Self {
         Self { config }
+    }
+}
+
+impl ArchiveRetrievalStore for PostgresImportWriteStore {
+    fn retrieve_for_intents(
+        &self,
+        artifact_id: &str,
+        intents: &[RetrievalIntent],
+        limit_per_intent: usize,
+    ) -> StorageResult<Vec<RetrievedContextItem>> {
+        let mut client = postgres_db::connect(&self.config)?;
+        let mut items = Vec::new();
+        for intent in intents {
+            let like_pattern = format!("%{}%", intent.query_text.to_ascii_lowercase());
+            let rows = client
+                .query(
+                    "SELECT d.derived_object_type,
+                            d.derived_object_id,
+                            d.artifact_id,
+                            d.title,
+                            d.body_text,
+                            COALESCE(array_agg(e.segment_id ORDER BY e.evidence_rank)
+                                FILTER (WHERE e.segment_id IS NOT NULL), ARRAY[]::text[]) AS segment_ids
+                     FROM oa_derived_object d
+                     LEFT JOIN oa_evidence_link e ON e.derived_object_id = d.derived_object_id
+                     WHERE d.artifact_id <> $1
+                       AND d.object_status = 'active'
+                       AND (
+                            lower(COALESCE(d.title, '')) LIKE $2
+                            OR lower(COALESCE(d.body_text, '')) LIKE $2
+                            OR lower(COALESCE(d.object_json::text, '')) LIKE $2
+                       )
+                     GROUP BY d.derived_object_type, d.derived_object_id, d.artifact_id, d.title, d.body_text
+                     ORDER BY
+                       CASE
+                         WHEN lower(COALESCE(d.title, '')) LIKE $2 THEN 3
+                         WHEN lower(COALESCE(d.body_text, '')) LIKE $2 THEN 2
+                         ELSE 1
+                       END DESC,
+                       d.derived_object_id
+                     LIMIT $3",
+                    &[&artifact_id, &like_pattern, &(limit_per_intent as i64)],
+                )
+                .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                    connection_string: self.config.connection_string.clone(),
+                    source,
+                }))?;
+            for row in rows {
+                let matched_title = row.get::<_, Option<String>>(3);
+                let matched_body = row.get::<_, Option<String>>(4);
+                let mut matched_fields = Vec::new();
+                if matched_title
+                    .as_deref()
+                    .map(|title| title.to_ascii_lowercase().contains(&intent.query_text.to_ascii_lowercase()))
+                    .unwrap_or(false)
+                {
+                    matched_fields.push("title".to_string());
+                }
+                if matched_body
+                    .as_deref()
+                    .map(|body| body.to_ascii_lowercase().contains(&intent.query_text.to_ascii_lowercase()))
+                    .unwrap_or(false)
+                {
+                    matched_fields.push("body_text".to_string());
+                }
+                items.push(RetrievedContextItem {
+                    item_type: row.get::<_, String>(0),
+                    object_id: row.get(1),
+                    artifact_id: row.get(2),
+                    title: matched_title,
+                    body_text: matched_body,
+                    supporting_segment_ids: row.get::<_, Vec<String>>(5),
+                    retrieval_reason: intent.question.clone(),
+                    matched_fields,
+                    rank_score: 100 - (items.len() as i32),
+                });
+            }
+        }
+        Ok(items)
+    }
+}
+
+impl EnrichmentStateStore for PostgresDerivedMetadataStore {
+    fn save_extraction_result(&self, result: &ArtifactExtractionResult) -> StorageResult<()> {
+        let mut client = postgres_db::connect(&self.config)?;
+        client
+            .execute(
+                "INSERT INTO oa_artifact_extraction_result
+                 (extraction_result_id, artifact_id, job_id, pipeline_name, pipeline_version, result_json)
+                 VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                 ON CONFLICT (extraction_result_id) DO UPDATE
+                 SET result_json = EXCLUDED.result_json,
+                     pipeline_name = EXCLUDED.pipeline_name,
+                     pipeline_version = EXCLUDED.pipeline_version",
+                &[
+                    &result.extraction_result_id,
+                    &result.artifact_id,
+                    &result.job_id,
+                    &result.pipeline_name,
+                    &result.pipeline_version,
+                    &serde_json::to_string(result).expect("extraction result serializable"),
+                ],
+            )
+            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                connection_string: self.config.connection_string.clone(),
+                source,
+            }))?;
+        Ok(())
+    }
+
+    fn load_extraction_result(
+        &self,
+        extraction_result_id: &str,
+    ) -> StorageResult<Option<ArtifactExtractionResult>> {
+        let mut client = postgres_db::connect(&self.config)?;
+        let row = client
+            .query_opt(
+                "SELECT result_json::text
+                 FROM oa_artifact_extraction_result
+                 WHERE extraction_result_id = $1",
+                &[&extraction_result_id],
+            )
+            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                connection_string: self.config.connection_string.clone(),
+                source,
+            }))?;
+        row.map(|row| serde_json::from_str::<ArtifactExtractionResult>(&row.get::<_, String>(0)))
+            .transpose()
+            .map_err(|err| crate::error::StorageError::InvalidDerivationWrite {
+                detail: format!("failed to deserialize extraction result {extraction_result_id}: {err}"),
+            })
+    }
+
+    fn save_retrieval_result_set(&self, result_set: &RetrievalResultSet) -> StorageResult<()> {
+        let mut client = postgres_db::connect(&self.config)?;
+        client
+            .execute(
+                "INSERT INTO oa_retrieval_result_set
+                 (retrieval_result_set_id, artifact_id, job_id, extraction_result_id, pipeline_name, pipeline_version, result_json)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                 ON CONFLICT (retrieval_result_set_id) DO UPDATE
+                 SET result_json = EXCLUDED.result_json,
+                     pipeline_name = EXCLUDED.pipeline_name,
+                     pipeline_version = EXCLUDED.pipeline_version",
+                &[
+                    &result_set.retrieval_result_set_id,
+                    &result_set.artifact_id,
+                    &result_set.job_id,
+                    &result_set.extraction_result_id,
+                    &result_set.pipeline_name,
+                    &result_set.pipeline_version,
+                    &serde_json::to_string(result_set).expect("retrieval result set serializable"),
+                ],
+            )
+            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                connection_string: self.config.connection_string.clone(),
+                source,
+            }))?;
+        Ok(())
+    }
+
+    fn load_retrieval_result_set(
+        &self,
+        retrieval_result_set_id: &str,
+    ) -> StorageResult<Option<RetrievalResultSet>> {
+        let mut client = postgres_db::connect(&self.config)?;
+        let row = client
+            .query_opt(
+                "SELECT result_json::text
+                 FROM oa_retrieval_result_set
+                 WHERE retrieval_result_set_id = $1",
+                &[&retrieval_result_set_id],
+            )
+            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                connection_string: self.config.connection_string.clone(),
+                source,
+            }))?;
+        row.map(|row| serde_json::from_str::<RetrievalResultSet>(&row.get::<_, String>(0)))
+            .transpose()
+            .map_err(|err| crate::error::StorageError::InvalidDerivationWrite {
+                detail: format!("failed to deserialize retrieval result set {retrieval_result_set_id}: {err}"),
+            })
+    }
+
+    fn save_reconciliation_decisions(
+        &self,
+        decisions: &[ReconciliationDecision],
+    ) -> StorageResult<()> {
+        let mut client = postgres_db::connect(&self.config)?;
+        for decision in decisions {
+            client
+                .execute(
+                    "INSERT INTO oa_reconciliation_decision
+                     (reconciliation_decision_id, artifact_id, job_id, extraction_result_id, retrieval_result_set_id,
+                      pipeline_name, pipeline_version, decision_kind, target_kind, target_key, matched_object_id,
+                      rationale, evidence_segment_ids_json, decision_json)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb)
+                     ON CONFLICT (reconciliation_decision_id) DO UPDATE
+                     SET decision_json = EXCLUDED.decision_json,
+                         rationale = EXCLUDED.rationale",
+                    &[
+                        &decision.reconciliation_decision_id,
+                        &decision.artifact_id,
+                        &decision.job_id,
+                        &decision.extraction_result_id,
+                        &decision.retrieval_result_set_id,
+                        &decision.pipeline_name,
+                        &decision.pipeline_version,
+                        &serde_json::to_string(&decision.decision_kind).expect("decision kind serializable"),
+                        &decision.target_kind,
+                        &decision.target_key,
+                        &decision.matched_object_id,
+                        &decision.rationale,
+                        &serde_json::to_string(&decision.evidence_segment_ids).expect("evidence ids serializable"),
+                        &serde_json::to_string(decision).expect("decision serializable"),
+                    ],
+                )
+                .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                    connection_string: self.config.connection_string.clone(),
+                    source,
+                }))?;
+        }
+        Ok(())
     }
 }
 

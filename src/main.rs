@@ -102,6 +102,8 @@ fn serve() -> Result<(), anyhow::Error> {
             &http_config,
             Arc::clone(&services.enrichment_store),
             Arc::clone(&services.read_store),
+            Arc::clone(&services.retrieval_store),
+            Arc::clone(&services.state_store),
             Arc::clone(&services.derived_store),
             shutdown.clone(),
             Arc::clone(&services.processor_factory),
@@ -243,15 +245,6 @@ mod tests {
             Option<open_archive::storage::LoadedArtifactForEnrichment>,
         > {
             Ok(None)
-        }
-
-        fn load_brain_context_candidates(
-            &self,
-            _exclude_artifact_id: &str,
-            _limit: usize,
-        ) -> open_archive::error::StorageResult<Vec<open_archive::storage::BrainContextCandidate>>
-        {
-            Ok(Vec::new())
         }
     }
 

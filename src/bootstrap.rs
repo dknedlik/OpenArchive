@@ -10,12 +10,12 @@ use crate::error::{ConfigError, ConfigResult};
 use crate::object_store::{LocalFsObjectStore, ObjectStore, S3CompatibleObjectStore};
 use crate::processor::{
     AnthropicProcessorFactory, ArtifactProcessorFactory, GeminiProcessorFactory,
-    GrokProcessorFactory, OpenAiProcessorFactory, StoreBackedBrainContextProvider,
-    StubProcessorFactory,
+    GrokProcessorFactory, OpenAiProcessorFactory, StubProcessorFactory,
 };
 use crate::storage::{
-    ArtifactReadStore, EnrichmentJobLifecycleStore, ImportWriteStore, OracleEnrichmentJobStore,
-    OracleImportWriteStore, PostgresEnrichmentJobStore, PostgresImportWriteStore,
+    ArchiveRetrievalStore, ArtifactReadStore, EnrichmentJobLifecycleStore, EnrichmentStateStore,
+    ImportWriteStore, OracleDerivedMetadataStore, OracleEnrichmentJobStore, OracleImportWriteStore,
+    PostgresDerivedMetadataStore, PostgresEnrichmentJobStore, PostgresImportWriteStore,
 };
 
 pub trait ArchiveStore: ImportWriteStore + ArtifactReadStore + Send + Sync {}
@@ -55,15 +55,6 @@ impl ArtifactReadStore for DelegatingArchiveAppService {
     ) -> crate::error::StorageResult<Option<crate::storage::LoadedArtifactForEnrichment>> {
         self.archive_store.load_artifact_for_enrichment(artifact_id)
     }
-
-    fn load_brain_context_candidates(
-        &self,
-        exclude_artifact_id: &str,
-        limit: usize,
-    ) -> crate::error::StorageResult<Vec<crate::storage::BrainContextCandidate>> {
-        self.archive_store
-            .load_brain_context_candidates(exclude_artifact_id, limit)
-    }
 }
 
 impl ObjectStore for DelegatingArchiveAppService {
@@ -92,7 +83,9 @@ impl ObjectStore for DelegatingArchiveAppService {
 pub struct ServiceBundle {
     pub archive_service: Arc<dyn ArchiveAppService>,
     pub read_store: Arc<dyn ArtifactReadStore>,
+    pub retrieval_store: Arc<dyn ArchiveRetrievalStore>,
     pub enrichment_store: Arc<dyn EnrichmentJobLifecycleStore>,
+    pub state_store: Arc<dyn EnrichmentStateStore>,
     pub derived_store: Arc<dyn crate::storage::DerivedMetadataWriteStore>,
     pub processor_factory: Arc<dyn ArtifactProcessorFactory>,
 }
@@ -109,29 +102,29 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
 
     match &config.relational_store {
         RelationalStoreConfig::Postgres(pg_config) => {
-            let archive_store: Arc<dyn ArchiveStore> =
-                Arc::new(PostgresImportWriteStore::new(pg_config.clone()));
-            let brain_context_provider =
-                Some(StoreBackedBrainContextProvider::new(Arc::clone(&archive_store) as Arc<dyn ArtifactReadStore>));
+            let archive_store_impl = Arc::new(PostgresImportWriteStore::new(pg_config.clone()));
+            let archive_store: Arc<dyn ArchiveStore> = archive_store_impl.clone();
+            let read_store: Arc<dyn ArtifactReadStore> = archive_store_impl.clone();
+            let retrieval_store: Arc<dyn ArchiveRetrievalStore> = archive_store_impl.clone();
             let processor_factory: Arc<dyn ArtifactProcessorFactory> = match &config.inference {
                 InferenceConfig::Stub => Arc::new(StubProcessorFactory),
                 InferenceConfig::OpenAi(openai) => Arc::new(
-                    OpenAiProcessorFactory::new(openai.clone(), brain_context_provider.clone()).map_err(|message| {
+                    OpenAiProcessorFactory::new(openai.clone()).map_err(|message| {
                         ConfigError::InvalidInferenceConfig { message }
                     })?,
                 ),
                 InferenceConfig::Gemini(gemini) => Arc::new(
-                    GeminiProcessorFactory::new(gemini.clone(), brain_context_provider.clone()).map_err(|message| {
+                    GeminiProcessorFactory::new(gemini.clone()).map_err(|message| {
                         ConfigError::InvalidInferenceConfig { message }
                     })?,
                 ),
                 InferenceConfig::Anthropic(anthropic) => Arc::new(
-                    AnthropicProcessorFactory::new(anthropic.clone(), brain_context_provider.clone()).map_err(|message| {
+                    AnthropicProcessorFactory::new(anthropic.clone()).map_err(|message| {
                         ConfigError::InvalidInferenceConfig { message }
                     })?,
                 ),
                 InferenceConfig::Grok(grok) => Arc::new(
-                    GrokProcessorFactory::new(grok.clone(), brain_context_provider.clone()).map_err(|message| {
+                    GrokProcessorFactory::new(grok.clone()).map_err(|message| {
                         ConfigError::InvalidInferenceConfig { message }
                     })?,
                 ),
@@ -141,38 +134,38 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                     archive_store: Arc::clone(&archive_store),
                     object_store,
                 }),
-                read_store: archive_store,
+                read_store,
+                retrieval_store,
                 enrichment_store: Arc::new(PostgresEnrichmentJobStore::new(pg_config.clone())),
-                derived_store: Arc::new(crate::storage::PostgresDerivedMetadataStore::new(
-                    pg_config.clone(),
-                )),
+                state_store: Arc::new(PostgresDerivedMetadataStore::new(pg_config.clone())),
+                derived_store: Arc::new(PostgresDerivedMetadataStore::new(pg_config.clone())),
                 processor_factory,
             })
         }
         RelationalStoreConfig::Oracle(db_config) => {
-            let archive_store: Arc<dyn ArchiveStore> =
-                Arc::new(OracleImportWriteStore::new(db_config.clone()));
-            let brain_context_provider =
-                Some(StoreBackedBrainContextProvider::new(Arc::clone(&archive_store) as Arc<dyn ArtifactReadStore>));
+            let archive_store_impl = Arc::new(OracleImportWriteStore::new(db_config.clone()));
+            let archive_store: Arc<dyn ArchiveStore> = archive_store_impl.clone();
+            let read_store: Arc<dyn ArtifactReadStore> = archive_store_impl.clone();
+            let retrieval_store: Arc<dyn ArchiveRetrievalStore> = archive_store_impl.clone();
             let processor_factory: Arc<dyn ArtifactProcessorFactory> = match &config.inference {
                 InferenceConfig::Stub => Arc::new(StubProcessorFactory),
                 InferenceConfig::OpenAi(openai) => Arc::new(
-                    OpenAiProcessorFactory::new(openai.clone(), brain_context_provider.clone()).map_err(|message| {
+                    OpenAiProcessorFactory::new(openai.clone()).map_err(|message| {
                         ConfigError::InvalidInferenceConfig { message }
                     })?,
                 ),
                 InferenceConfig::Gemini(gemini) => Arc::new(
-                    GeminiProcessorFactory::new(gemini.clone(), brain_context_provider.clone()).map_err(|message| {
+                    GeminiProcessorFactory::new(gemini.clone()).map_err(|message| {
                         ConfigError::InvalidInferenceConfig { message }
                     })?,
                 ),
                 InferenceConfig::Anthropic(anthropic) => Arc::new(
-                    AnthropicProcessorFactory::new(anthropic.clone(), brain_context_provider.clone()).map_err(|message| {
+                    AnthropicProcessorFactory::new(anthropic.clone()).map_err(|message| {
                         ConfigError::InvalidInferenceConfig { message }
                     })?,
                 ),
                 InferenceConfig::Grok(grok) => Arc::new(
-                    GrokProcessorFactory::new(grok.clone(), brain_context_provider.clone()).map_err(|message| {
+                    GrokProcessorFactory::new(grok.clone()).map_err(|message| {
                         ConfigError::InvalidInferenceConfig { message }
                     })?,
                 ),
@@ -182,11 +175,11 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                     archive_store: Arc::clone(&archive_store),
                     object_store,
                 }),
-                read_store: archive_store,
+                read_store,
+                retrieval_store,
                 enrichment_store: Arc::new(OracleEnrichmentJobStore::new(db_config.clone())),
-                derived_store: Arc::new(crate::storage::OracleDerivedMetadataStore::new(
-                    db_config.clone(),
-                )),
+                state_store: Arc::new(OracleDerivedMetadataStore::new(db_config.clone())),
+                derived_store: Arc::new(OracleDerivedMetadataStore::new(db_config.clone())),
                 processor_factory,
             })
         }

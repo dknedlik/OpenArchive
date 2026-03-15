@@ -7,8 +7,14 @@ pub mod segment;
 use crate::config::OracleConfig;
 use crate::db;
 use crate::error::{StorageError, StorageResult};
+use crate::storage::archive_retrieval_store::ArchiveRetrievalStore;
 use crate::storage::derivation_store::{
     DerivationWriteResult, DerivedMetadataWriteStore, WriteDerivationAttempt,
+};
+use crate::storage::enrichment_state_store::EnrichmentStateStore;
+use crate::storage::types::{
+    ArtifactExtractionResult, ReconciliationDecision, RetrievalIntent, RetrievalResultSet,
+    RetrievedContextItem,
 };
 use crate::storage::types::ImportStatus;
 use crate::storage::{
@@ -61,14 +67,55 @@ impl ArtifactReadStore for OracleImportWriteStore {
         let conn = db::connect(&self.config)?;
         artifact::load_artifact_for_enrichment(&conn, artifact_id)
     }
+}
 
-    fn load_brain_context_candidates(
+impl ArchiveRetrievalStore for OracleImportWriteStore {
+    fn retrieve_for_intents(
         &self,
-        exclude_artifact_id: &str,
-        limit: usize,
-    ) -> StorageResult<Vec<crate::storage::types::BrainContextCandidate>> {
+        artifact_id: &str,
+        intents: &[RetrievalIntent],
+        limit_per_intent: usize,
+    ) -> StorageResult<Vec<RetrievedContextItem>> {
         let conn = db::connect(&self.config)?;
-        artifact::load_brain_context_candidates(&conn, exclude_artifact_id, limit)
+        let mut items = Vec::new();
+        for intent in intents {
+            let like_pattern = format!("%{}%", intent.query_text.to_ascii_lowercase());
+            let rows = conn
+                .query(
+                    "SELECT * FROM (
+                        SELECT d.derived_object_type,
+                               d.derived_object_id,
+                               d.artifact_id,
+                               d.title,
+                               d.body_text
+                          FROM oa_derived_object d
+                         WHERE d.artifact_id <> :1
+                           AND d.object_status = 'active'
+                           AND (
+                                LOWER(NVL(d.title, '')) LIKE :2
+                                OR LOWER(NVL(d.body_text, '')) LIKE :2
+                                OR LOWER(NVL(d.object_json, '')) LIKE :2
+                           )
+                    ) WHERE ROWNUM <= :3",
+                    &[&artifact_id, &like_pattern, &(limit_per_intent as i64)],
+                )
+                .map_err(|source| StorageError::ListArtifacts { source })?;
+            for row_result in rows {
+                let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
+                items.push(RetrievedContextItem {
+                    item_type: row.get::<_, String>(0).unwrap_or_default(),
+                    object_id: row.get::<_, String>(1).unwrap_or_default(),
+                    artifact_id: row.get::<_, String>(2).unwrap_or_default(),
+                    title: row.get::<_, Option<String>>(3).unwrap_or(None),
+                    body_text: row.get::<_, Option<String>>(4).unwrap_or(None),
+                    supporting_segment_ids: Vec::new(),
+                    retrieval_reason: intent.question.clone(),
+                    matched_fields: vec!["title_or_body_text".to_string()],
+                    rank_score: 100 - (items.len() as i32),
+                });
+            }
+        }
+        Ok(items)
     }
 }
 
@@ -347,6 +394,203 @@ impl DerivedMetadataWriteStore for OracleDerivedMetadataStore {
                 Err(error)
             }
         }
+    }
+}
+
+impl EnrichmentStateStore for OracleDerivedMetadataStore {
+    fn save_extraction_result(&self, result: &ArtifactExtractionResult) -> StorageResult<()> {
+        let conn = db::connect(&self.config)?;
+        conn.execute(
+            "MERGE INTO oa_artifact_extraction_result t
+             USING (
+                SELECT :1 AS extraction_result_id,
+                       :2 AS artifact_id,
+                       :3 AS job_id,
+                       :4 AS pipeline_name,
+                       :5 AS pipeline_version,
+                       :6 AS result_json
+                  FROM dual
+             ) s
+             ON (t.extraction_result_id = s.extraction_result_id)
+             WHEN MATCHED THEN UPDATE SET
+                 t.pipeline_name = s.pipeline_name,
+                 t.pipeline_version = s.pipeline_version,
+                 t.result_json = s.result_json
+             WHEN NOT MATCHED THEN INSERT
+                 (extraction_result_id, artifact_id, job_id, pipeline_name, pipeline_version, result_json)
+                 VALUES (s.extraction_result_id, s.artifact_id, s.job_id, s.pipeline_name, s.pipeline_version, s.result_json)",
+            &[
+                &result.extraction_result_id,
+                &result.artifact_id,
+                &result.job_id,
+                &result.pipeline_name,
+                &result.pipeline_version,
+                &serde_json::to_string(result).expect("extraction result serializable"),
+            ],
+        )
+        .map_err(|source| StorageError::ListArtifacts { source })?;
+        conn.commit().map_err(|source| StorageError::Commit {
+            operation: "save extraction result",
+            source,
+        })?;
+        Ok(())
+    }
+
+    fn load_extraction_result(
+        &self,
+        extraction_result_id: &str,
+    ) -> StorageResult<Option<ArtifactExtractionResult>> {
+        let conn = db::connect(&self.config)?;
+        let row = conn
+            .query_row_as::<(String,)>(
+                "SELECT result_json
+                 FROM oa_artifact_extraction_result
+                 WHERE extraction_result_id = :1",
+                &[&extraction_result_id],
+            )
+            .map(|(json,)| json)
+            .or_else(|source| match source.kind() {
+                oracle::ErrorKind::NoDataFound => Ok(String::new()),
+                _ => Err(StorageError::ListArtifacts { source }),
+            })?;
+        if row.is_empty() {
+            return Ok(None);
+        }
+        serde_json::from_str(&row)
+            .map(Some)
+            .map_err(|err| StorageError::InvalidDerivationWrite {
+                detail: format!("failed to deserialize extraction result {extraction_result_id}: {err}"),
+            })
+    }
+
+    fn save_retrieval_result_set(&self, result_set: &RetrievalResultSet) -> StorageResult<()> {
+        let conn = db::connect(&self.config)?;
+        conn.execute(
+            "MERGE INTO oa_retrieval_result_set t
+             USING (
+                SELECT :1 AS retrieval_result_set_id,
+                       :2 AS artifact_id,
+                       :3 AS job_id,
+                       :4 AS extraction_result_id,
+                       :5 AS pipeline_name,
+                       :6 AS pipeline_version,
+                       :7 AS result_json
+                  FROM dual
+             ) s
+             ON (t.retrieval_result_set_id = s.retrieval_result_set_id)
+             WHEN MATCHED THEN UPDATE SET
+                 t.pipeline_name = s.pipeline_name,
+                 t.pipeline_version = s.pipeline_version,
+                 t.result_json = s.result_json
+             WHEN NOT MATCHED THEN INSERT
+                 (retrieval_result_set_id, artifact_id, job_id, extraction_result_id, pipeline_name, pipeline_version, result_json)
+                 VALUES (s.retrieval_result_set_id, s.artifact_id, s.job_id, s.extraction_result_id, s.pipeline_name, s.pipeline_version, s.result_json)",
+            &[
+                &result_set.retrieval_result_set_id,
+                &result_set.artifact_id,
+                &result_set.job_id,
+                &result_set.extraction_result_id,
+                &result_set.pipeline_name,
+                &result_set.pipeline_version,
+                &serde_json::to_string(result_set).expect("retrieval result set serializable"),
+            ],
+        )
+        .map_err(|source| StorageError::ListArtifacts { source })?;
+        conn.commit().map_err(|source| StorageError::Commit {
+            operation: "save retrieval result set",
+            source,
+        })?;
+        Ok(())
+    }
+
+    fn load_retrieval_result_set(
+        &self,
+        retrieval_result_set_id: &str,
+    ) -> StorageResult<Option<RetrievalResultSet>> {
+        let conn = db::connect(&self.config)?;
+        let row = conn
+            .query_row_as::<(String,)>(
+                "SELECT result_json
+                 FROM oa_retrieval_result_set
+                 WHERE retrieval_result_set_id = :1",
+                &[&retrieval_result_set_id],
+            )
+            .map(|(json,)| json)
+            .or_else(|source| match source.kind() {
+                oracle::ErrorKind::NoDataFound => Ok(String::new()),
+                _ => Err(StorageError::ListArtifacts { source }),
+            })?;
+        if row.is_empty() {
+            return Ok(None);
+        }
+        serde_json::from_str(&row)
+            .map(Some)
+            .map_err(|err| StorageError::InvalidDerivationWrite {
+                detail: format!("failed to deserialize retrieval result set {retrieval_result_set_id}: {err}"),
+            })
+    }
+
+    fn save_reconciliation_decisions(
+        &self,
+        decisions: &[ReconciliationDecision],
+    ) -> StorageResult<()> {
+        let conn = db::connect(&self.config)?;
+        for decision in decisions {
+            conn.execute(
+                "MERGE INTO oa_reconciliation_decision t
+                 USING (
+                    SELECT :1 AS reconciliation_decision_id,
+                           :2 AS artifact_id,
+                           :3 AS job_id,
+                           :4 AS extraction_result_id,
+                           :5 AS retrieval_result_set_id,
+                           :6 AS pipeline_name,
+                           :7 AS pipeline_version,
+                           :8 AS decision_kind,
+                           :9 AS target_kind,
+                           :10 AS target_key,
+                           :11 AS matched_object_id,
+                           :12 AS rationale,
+                           :13 AS evidence_segment_ids_json,
+                           :14 AS decision_json
+                      FROM dual
+                 ) s
+                 ON (t.reconciliation_decision_id = s.reconciliation_decision_id)
+                 WHEN MATCHED THEN UPDATE SET
+                     t.rationale = s.rationale,
+                     t.decision_json = s.decision_json
+                 WHEN NOT MATCHED THEN INSERT
+                     (reconciliation_decision_id, artifact_id, job_id, extraction_result_id, retrieval_result_set_id,
+                      pipeline_name, pipeline_version, decision_kind, target_kind, target_key, matched_object_id,
+                      rationale, evidence_segment_ids_json, decision_json)
+                     VALUES (s.reconciliation_decision_id, s.artifact_id, s.job_id, s.extraction_result_id,
+                             s.retrieval_result_set_id, s.pipeline_name, s.pipeline_version, s.decision_kind,
+                             s.target_kind, s.target_key, s.matched_object_id, s.rationale,
+                             s.evidence_segment_ids_json, s.decision_json)",
+                &[
+                    &decision.reconciliation_decision_id,
+                    &decision.artifact_id,
+                    &decision.job_id,
+                    &decision.extraction_result_id,
+                    &decision.retrieval_result_set_id,
+                    &decision.pipeline_name,
+                    &decision.pipeline_version,
+                    &serde_json::to_string(&decision.decision_kind).expect("decision kind serializable"),
+                    &decision.target_kind,
+                    &decision.target_key,
+                    &decision.matched_object_id,
+                    &decision.rationale,
+                    &serde_json::to_string(&decision.evidence_segment_ids).expect("evidence ids serializable"),
+                    &serde_json::to_string(decision).expect("decision serializable"),
+                ],
+            )
+            .map_err(|source| StorageError::ListArtifacts { source })?;
+        }
+        conn.commit().map_err(|source| StorageError::Commit {
+            operation: "save reconciliation decisions",
+            source,
+        })?;
+        Ok(())
     }
 }
 

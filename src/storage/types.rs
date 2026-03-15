@@ -182,14 +182,18 @@ impl SegmentType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobType {
     ArtifactPreprocess,
-    ArtifactEnrichment,
+    ArtifactExtract,
+    ArtifactRetrieveContext,
+    ArtifactReconcile,
 }
 
 impl JobType {
     pub fn as_str(&self) -> &'static str {
         match self {
             JobType::ArtifactPreprocess => "artifact_preprocess",
-            JobType::ArtifactEnrichment => "artifact_enrichment",
+            JobType::ArtifactExtract => "artifact_extract",
+            JobType::ArtifactRetrieveContext => "artifact_retrieve_context",
+            JobType::ArtifactReconcile => "artifact_reconcile",
         }
     }
 }
@@ -198,7 +202,9 @@ impl JobType {
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "artifact_preprocess" => Some(Self::ArtifactPreprocess),
-            "artifact_enrichment" => Some(Self::ArtifactEnrichment),
+            "artifact_extract" => Some(Self::ArtifactExtract),
+            "artifact_retrieve_context" => Some(Self::ArtifactRetrieveContext),
+            "artifact_reconcile" => Some(Self::ArtifactReconcile),
             _ => None,
         }
     }
@@ -267,22 +273,18 @@ impl JobStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DerivationRunType {
-    SummaryExtraction,
-    ClassificationExtraction,
-    MemoryExtraction,
-    SummaryReduction,
-    MemoryReduction,
+    ArtifactExtraction,
+    ArchiveRetrieval,
+    ArtifactReconciliation,
     ContextPackAssembly,
 }
 
 impl DerivationRunType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            DerivationRunType::SummaryExtraction => "summary_extraction",
-            DerivationRunType::ClassificationExtraction => "classification_extraction",
-            DerivationRunType::MemoryExtraction => "memory_extraction",
-            DerivationRunType::SummaryReduction => "summary_reduction",
-            DerivationRunType::MemoryReduction => "memory_reduction",
+            DerivationRunType::ArtifactExtraction => "artifact_extraction",
+            DerivationRunType::ArchiveRetrieval => "archive_retrieval",
+            DerivationRunType::ArtifactReconciliation => "artifact_reconciliation",
             DerivationRunType::ContextPackAssembly => "context_pack_assembly",
         }
     }
@@ -328,6 +330,7 @@ pub enum DerivedObjectType {
     Summary,
     Classification,
     Memory,
+    Relationship,
 }
 
 impl DerivedObjectType {
@@ -336,6 +339,7 @@ impl DerivedObjectType {
             DerivedObjectType::Summary => "summary",
             DerivedObjectType::Classification => "classification",
             DerivedObjectType::Memory => "memory",
+            DerivedObjectType::Relationship => "relationship",
         }
     }
 
@@ -344,6 +348,7 @@ impl DerivedObjectType {
             "summary" => Some(Self::Summary),
             "classification" => Some(Self::Classification),
             "memory" => Some(Self::Memory),
+            "relationship" => Some(Self::Relationship),
             _ => None,
         }
     }
@@ -607,6 +612,16 @@ pub struct MemoryObjectJson {
     pub memory_scope_value: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RelationshipObjectJson {
+    pub relationship_type: String,
+    pub subject_key: String,
+    pub object_key: String,
+    pub support_label: String,
+    pub supersedes_relationship_object_id: Option<String>,
+    pub contradicts_relationship_object_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DerivedObjectPayload {
     Summary {
@@ -624,6 +639,11 @@ pub enum DerivedObjectPayload {
         body_text: String,
         object_json: MemoryObjectJson,
     },
+    Relationship {
+        title: Option<String>,
+        body_text: String,
+        object_json: RelationshipObjectJson,
+    },
 }
 
 impl DerivedObjectPayload {
@@ -632,6 +652,7 @@ impl DerivedObjectPayload {
             DerivedObjectPayload::Summary { .. } => DerivedObjectType::Summary,
             DerivedObjectPayload::Classification { .. } => DerivedObjectType::Classification,
             DerivedObjectPayload::Memory { .. } => DerivedObjectType::Memory,
+            DerivedObjectPayload::Relationship { .. } => DerivedObjectType::Relationship,
         }
     }
 
@@ -639,14 +660,16 @@ impl DerivedObjectPayload {
         match self {
             DerivedObjectPayload::Summary { title, .. }
             | DerivedObjectPayload::Classification { title, .. }
-            | DerivedObjectPayload::Memory { title, .. } => title.as_deref(),
+            | DerivedObjectPayload::Memory { title, .. }
+            | DerivedObjectPayload::Relationship { title, .. } => title.as_deref(),
         }
     }
 
     pub fn body_text(&self) -> Option<&str> {
         match self {
             DerivedObjectPayload::Summary { body_text, .. }
-            | DerivedObjectPayload::Memory { body_text, .. } => Some(body_text.as_str()),
+            | DerivedObjectPayload::Memory { body_text, .. }
+            | DerivedObjectPayload::Relationship { body_text, .. } => Some(body_text.as_str()),
             DerivedObjectPayload::Classification { body_text, .. } => body_text.as_deref(),
         }
     }
@@ -661,6 +684,9 @@ impl DerivedObjectPayload {
             ),
             DerivedObjectPayload::Memory { object_json, .. } => {
                 Some(serde_json::to_string(object_json).expect("memory payload serializable"))
+            }
+            DerivedObjectPayload::Relationship { object_json, .. } => {
+                Some(serde_json::to_string(object_json).expect("relationship payload serializable"))
             }
         }
     }
@@ -734,52 +760,107 @@ impl ArtifactPreprocessPayload {
     }
 }
 
-/// Documented contract for the `artifact_enrichment` job payload.
-///
-/// This is the exact shape stored in `oa_enrichment_job.payload_json`. The
-/// payload is self-contained: a future out-of-process worker can execute the
-/// job using only this payload, without hidden importer state.
-///
-/// ## Fields
-///
-/// * `schema_version` — `"1"` for slice one. Bump when the shape changes.
-/// * `artifact_id` — the artifact to enrich (FK to `oa_artifact`).
-/// * `import_id` — the import that created this artifact (for lineage).
-/// * `source_type` — e.g. `"chatgpt_export"`. Tells the worker which
-///   enrichment pipeline to apply.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct ArtifactEnrichmentPayload {
+pub struct ArtifactExtractPayload {
     pub schema_version: String,
     pub artifact_id: String,
     pub import_id: String,
     pub source_type: String,
     #[serde(default)]
-    pub conversation_window: Option<ConversationWindowRef>,
+    pub conversation_windows: Vec<ConversationWindowRef>,
 }
 
-impl ArtifactEnrichmentPayload {
-    /// Build a slice-one payload with `schema_version = "1"`.
+impl ArtifactExtractPayload {
     pub fn new_v1(
         artifact_id: &str,
         import_id: &str,
         source_type: SourceType,
-        conversation_window: Option<ConversationWindowRef>,
+        conversation_windows: Vec<ConversationWindowRef>,
     ) -> Self {
         Self {
             schema_version: "1".to_string(),
             artifact_id: artifact_id.to_string(),
             import_id: import_id.to_string(),
             source_type: source_type.as_str().to_string(),
-            conversation_window,
+            conversation_windows,
         }
     }
 
-    /// Serialize to a JSON string suitable for `oa_enrichment_job.payload_json`.
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).expect("ArtifactEnrichmentPayload is always serializable")
+        serde_json::to_string(self).expect("ArtifactExtractPayload is always serializable")
     }
 
-    /// Deserialize from the `payload_json` column.
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ArtifactRetrieveContextPayload {
+    pub schema_version: String,
+    pub artifact_id: String,
+    pub import_id: String,
+    pub source_type: String,
+    pub extraction_result_id: String,
+}
+
+impl ArtifactRetrieveContextPayload {
+    pub fn new_v1(
+        artifact_id: &str,
+        import_id: &str,
+        source_type: SourceType,
+        extraction_result_id: &str,
+    ) -> Self {
+        Self {
+            schema_version: "1".to_string(),
+            artifact_id: artifact_id.to_string(),
+            import_id: import_id.to_string(),
+            source_type: source_type.as_str().to_string(),
+            extraction_result_id: extraction_result_id.to_string(),
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("ArtifactRetrieveContextPayload is always serializable")
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ArtifactReconcilePayload {
+    pub schema_version: String,
+    pub artifact_id: String,
+    pub import_id: String,
+    pub source_type: String,
+    pub extraction_result_id: String,
+    pub retrieval_result_set_id: String,
+}
+
+impl ArtifactReconcilePayload {
+    pub fn new_v1(
+        artifact_id: &str,
+        import_id: &str,
+        source_type: SourceType,
+        extraction_result_id: &str,
+        retrieval_result_set_id: &str,
+    ) -> Self {
+        Self {
+            schema_version: "1".to_string(),
+            artifact_id: artifact_id.to_string(),
+            import_id: import_id.to_string(),
+            source_type: source_type.as_str().to_string(),
+            extraction_result_id: extraction_result_id.to_string(),
+            retrieval_result_set_id: retrieval_result_set_id.to_string(),
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("ArtifactReconcilePayload is always serializable")
+    }
+
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
@@ -861,11 +942,125 @@ pub struct LoadedArtifactForEnrichment {
     pub segments: Vec<LoadedSegment>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BrainContextCandidate {
-    pub artifact_id: String,
-    pub artifact_title: Option<String>,
-    pub derived_object_type: DerivedObjectType,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct CandidateEntity {
+    pub entity_key: String,
+    pub display_name: String,
+    pub entity_type: String,
+    pub evidence_segment_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct CandidateRelationship {
+    pub relationship_type: String,
+    pub subject_key: String,
+    pub object_key: String,
+    pub title: Option<String>,
+    pub body_text: String,
+    pub confidence_label: String,
+    pub evidence_segment_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ExtractedClassification {
     pub title: Option<String>,
     pub body_text: Option<String>,
+    pub classification_type: String,
+    pub classification_value: String,
+    pub evidence_segment_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ExtractedMemory {
+    pub title: Option<String>,
+    pub body_text: String,
+    pub memory_type: String,
+    pub memory_scope: ScopeType,
+    pub memory_scope_value: String,
+    pub evidence_segment_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RetrievalIntent {
+    pub intent_id: String,
+    pub question: String,
+    pub query_text: String,
+    pub intent_type: String,
+    pub evidence_segment_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ArtifactExtractionResult {
+    pub extraction_result_id: String,
+    pub artifact_id: String,
+    pub job_id: String,
+    pub pipeline_name: String,
+    pub pipeline_version: String,
+    pub summary_title: Option<String>,
+    pub summary_body_text: String,
+    pub summary_evidence_segment_ids: Vec<String>,
+    pub classifications: Vec<ExtractedClassification>,
+    pub memories: Vec<ExtractedMemory>,
+    pub entities: Vec<CandidateEntity>,
+    pub relationships: Vec<CandidateRelationship>,
+    pub retrieval_intents: Vec<RetrievalIntent>,
+    pub status: String,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RetrievedContextItem {
+    pub item_type: String,
+    pub object_id: String,
+    pub artifact_id: String,
+    pub title: Option<String>,
+    pub body_text: Option<String>,
+    pub supporting_segment_ids: Vec<String>,
+    pub retrieval_reason: String,
+    pub matched_fields: Vec<String>,
+    pub rank_score: i32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RetrievalResultSet {
+    pub retrieval_result_set_id: String,
+    pub artifact_id: String,
+    pub job_id: String,
+    pub extraction_result_id: String,
+    pub pipeline_name: String,
+    pub pipeline_version: String,
+    pub intents: Vec<RetrievalIntent>,
+    pub results: Vec<RetrievedContextItem>,
+    pub status: String,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationDecisionKind {
+    CreateNew,
+    AttachToExisting,
+    StrengthenExisting,
+    SupersedeExisting,
+    ContradictsExisting,
+    InsufficientEvidence,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ReconciliationDecision {
+    pub reconciliation_decision_id: String,
+    pub artifact_id: String,
+    pub job_id: String,
+    pub extraction_result_id: String,
+    pub retrieval_result_set_id: String,
+    pub pipeline_name: String,
+    pub pipeline_version: String,
+    pub decision_kind: ReconciliationDecisionKind,
+    pub target_kind: String,
+    pub target_key: String,
+    pub matched_object_id: Option<String>,
+    pub rationale: String,
+    pub evidence_segment_ids: Vec<String>,
+    pub status: String,
+    pub error_message: Option<String>,
 }

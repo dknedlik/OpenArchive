@@ -2,9 +2,8 @@ use crate::error::{StorageError, StorageResult};
 use oracle::Connection;
 
 use crate::storage::types::{
-    ArtifactListItem, BrainContextCandidate, DerivedObjectType, EnrichmentStatus,
-    LoadedArtifactForEnrichment, LoadedArtifactRecord, LoadedParticipant, LoadedSegment,
-    NewArtifact, NewParticipant, SourceType,
+    ArtifactListItem, EnrichmentStatus, LoadedArtifactForEnrichment, LoadedArtifactRecord,
+    LoadedParticipant, LoadedSegment, NewArtifact, NewParticipant, SourceType,
 };
 use crate::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 
@@ -275,46 +274,4 @@ pub fn load_artifact_for_enrichment(
         participants,
         segments,
     }))
-}
-
-pub fn load_brain_context_candidates(
-    conn: &Connection,
-    exclude_artifact_id: &str,
-    limit: usize,
-) -> StorageResult<Vec<BrainContextCandidate>> {
-    let rows = conn
-        .query(
-            "SELECT d.artifact_id, a.title, d.derived_object_type, d.title, d.body_text
-             FROM oa_derived_object d
-             JOIN oa_artifact a ON a.artifact_id = d.artifact_id
-             WHERE d.object_status = 'active'
-               AND d.artifact_id <> :1
-             ORDER BY d.created_at DESC
-             FETCH FIRST :2 ROWS ONLY",
-            &[&exclude_artifact_id, &(limit as i64)],
-        )
-        .map_err(|source| StorageError::ListArtifacts { source })?;
-
-    let mut candidates = Vec::new();
-    for row_result in rows {
-        let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
-        let artifact_id: String = row.get(0).map_err(|source| StorageError::ListArtifacts { source })?;
-        let derived_object_type: String =
-            row.get(2).map_err(|source| StorageError::ListArtifacts { source })?;
-        let derived_object_type = DerivedObjectType::from_str(&derived_object_type).ok_or_else(|| {
-            StorageError::InvalidDerivedObjectType {
-                artifact_id: artifact_id.clone(),
-                value: derived_object_type.clone(),
-            }
-        })?;
-        candidates.push(BrainContextCandidate {
-            artifact_id,
-            artifact_title: row.get(1).map_err(|source| StorageError::ListArtifacts { source })?,
-            derived_object_type,
-            title: row.get(3).map_err(|source| StorageError::ListArtifacts { source })?,
-            body_text: row.get(4).map_err(|source| StorageError::ListArtifacts { source })?,
-        });
-    }
-
-    Ok(candidates)
 }

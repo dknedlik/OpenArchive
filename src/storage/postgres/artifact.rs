@@ -1,8 +1,7 @@
 use crate::error::StorageResult;
 use crate::storage::types::{
-    ArtifactListItem, BrainContextCandidate, DerivedObjectType, EnrichmentStatus,
-    LoadedArtifactForEnrichment, LoadedArtifactRecord, LoadedParticipant, LoadedSegment,
-    NewArtifact, NewParticipant, SourceType,
+    ArtifactListItem, EnrichmentStatus, LoadedArtifactForEnrichment, LoadedArtifactRecord,
+    LoadedParticipant, LoadedSegment, NewArtifact, NewParticipant, SourceType,
 };
 use crate::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 
@@ -245,45 +244,6 @@ pub fn load_artifact_for_enrichment(
         participants,
         segments,
     }))
-}
-
-pub fn load_brain_context_candidates(
-    client: &mut postgres::Client,
-    exclude_artifact_id: &str,
-    limit: usize,
-) -> StorageResult<Vec<BrainContextCandidate>> {
-    let rows = client
-        .query(
-            "SELECT d.artifact_id, a.title, d.derived_object_type, d.title, d.body_text
-             FROM oa_derived_object d
-             JOIN oa_artifact a ON a.artifact_id = d.artifact_id
-             WHERE d.object_status = 'active'
-               AND d.artifact_id <> $1
-             ORDER BY d.created_at DESC
-             LIMIT $2",
-            &[&exclude_artifact_id, &(limit as i64)],
-        )
-        .map_err(map_pg_storage_err)?;
-
-    let mut candidates = Vec::with_capacity(rows.len());
-    for row in rows {
-        let derived_object_type: String = row.get(2);
-        let derived_object_type = DerivedObjectType::from_str(&derived_object_type).ok_or_else(|| {
-            crate::error::StorageError::InvalidDerivedObjectType {
-                artifact_id: row.get(0),
-                value: derived_object_type.clone(),
-            }
-        })?;
-        candidates.push(BrainContextCandidate {
-            artifact_id: row.get(0),
-            artifact_title: row.get(1),
-            derived_object_type,
-            title: row.get(3),
-            body_text: row.get(4),
-        });
-    }
-
-    Ok(candidates)
 }
 
 fn map_pg_storage_err(source: postgres::Error) -> crate::error::StorageError {

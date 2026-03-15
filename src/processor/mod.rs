@@ -9,7 +9,6 @@ use thiserror::Error;
 
 use crate::config::{OpenAiConfig, OpenAiReasoningEffort};
 use crate::storage::{
-    ArtifactReadStore,
     types::{EnrichmentTier, LoadedParticipant, LoadedSegment, ScopeType, SourceType},
 };
 
@@ -79,23 +78,6 @@ pub struct InferenceUsage {
     pub reasoning_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub reported_cost_micros: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BrainContextSnippet {
-    pub artifact_id: String,
-    pub artifact_title: Option<String>,
-    pub derived_object_type: String,
-    pub title: Option<String>,
-    pub body_text: String,
-}
-
-pub trait BrainContextProvider: Send + Sync {
-    fn snippets_for(
-        &self,
-        input: &ArtifactProcessorInput,
-        limit: usize,
-    ) -> Result<Vec<BrainContextSnippet>, ProcessorError>;
 }
 
 pub trait ArtifactProcessor {
@@ -218,81 +200,12 @@ impl ArtifactProcessorFactory for StubProcessorFactory {
     }
 }
 
-pub struct StoreBackedBrainContextProvider {
-    read_store: Arc<dyn ArtifactReadStore>,
-    candidate_limit: usize,
-}
-
-impl StoreBackedBrainContextProvider {
-    pub fn new(read_store: Arc<dyn ArtifactReadStore>) -> Arc<dyn BrainContextProvider> {
-        Arc::new(Self {
-            read_store,
-            candidate_limit: 256,
-        })
-    }
-}
-
-impl BrainContextProvider for StoreBackedBrainContextProvider {
-    fn snippets_for(
-        &self,
-        input: &ArtifactProcessorInput,
-        limit: usize,
-    ) -> Result<Vec<BrainContextSnippet>, ProcessorError> {
-        let candidates = self
-            .read_store
-            .load_brain_context_candidates(&input.artifact_id, self.candidate_limit)
-            .map_err(|err| ProcessorError::Message {
-                message: format!("failed to load brain context candidates: {err}"),
-            })?;
-        let keywords = extract_context_keywords(input);
-        if keywords.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut scored = candidates
-            .into_iter()
-            .filter_map(|candidate| {
-                let haystack = format!(
-                    "{}\n{}\n{}",
-                    candidate.artifact_title.clone().unwrap_or_default(),
-                    candidate.title.clone().unwrap_or_default(),
-                    candidate.body_text.clone().unwrap_or_default()
-                )
-                .to_ascii_lowercase();
-                let score = keywords
-                    .iter()
-                    .filter(|keyword| haystack.contains(keyword.as_str()))
-                    .count();
-                if score == 0 {
-                    return None;
-                }
-                Some((score, candidate))
-            })
-            .collect::<Vec<_>>();
-
-        scored.sort_by(|left, right| right.0.cmp(&left.0));
-        scored.truncate(limit);
-
-        Ok(scored
-            .into_iter()
-            .map(|(_, candidate)| BrainContextSnippet {
-                artifact_id: candidate.artifact_id,
-                artifact_title: candidate.artifact_title,
-                derived_object_type: candidate.derived_object_type.as_str().to_string(),
-                title: candidate.title,
-                body_text: candidate.body_text.unwrap_or_default(),
-            })
-            .collect())
-    }
-}
-
 struct HostedArtifactProcessor {
     client: Arc<dyn InferenceClient>,
     model: String,
     pipeline_name: &'static str,
     provider_name: &'static str,
     strategy: Arc<dyn EnrichmentStrategy>,
-    brain_context_provider: Option<Arc<dyn BrainContextProvider>>,
 }
 
 impl ArtifactProcessor for HostedArtifactProcessor {
@@ -306,16 +219,6 @@ impl ArtifactProcessor for HostedArtifactProcessor {
 }
 
 impl HostedArtifactProcessor {
-    fn load_brain_context(
-        &self,
-        input: &ArtifactProcessorInput,
-    ) -> Result<Vec<BrainContextSnippet>, ProcessorError> {
-        let Some(provider) = &self.brain_context_provider else {
-            return Ok(Vec::new());
-        };
-        provider.snippets_for(input, 5)
-    }
-
     fn run_prompt(
         &self,
         input: &ArtifactProcessorInput,
@@ -394,9 +297,8 @@ impl EnrichmentStrategy for ConversationEnrichmentStrategy {
         processor: &HostedArtifactProcessor,
         input: &ArtifactProcessorInput,
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
-        let context = processor.load_brain_context(input)?;
         if !should_shape_conversation_input(input) {
-            let prompt = build_conversation_user_prompt(input, &context)?;
+            let prompt = build_conversation_user_prompt(input)?;
             return processor.run_prompt(input, &prompt);
         }
 
@@ -404,7 +306,7 @@ impl EnrichmentStrategy for ConversationEnrichmentStrategy {
         let mut chunk_outputs = Vec::with_capacity(windows.len());
         for (index, window) in windows.iter().enumerate() {
             let chunk_prompt =
-                build_conversation_chunk_prompt(input, window, index + 1, windows.len(), &context)?;
+                build_conversation_chunk_prompt(input, window, index + 1, windows.len())?;
             let chunk_input = ArtifactProcessorInput {
                 artifact_id: input.artifact_id.clone(),
                 import_id: input.import_id.clone(),
@@ -416,7 +318,7 @@ impl EnrichmentStrategy for ConversationEnrichmentStrategy {
             chunk_outputs.push(processor.run_prompt(&chunk_input, &chunk_prompt)?);
         }
 
-        let synthesis_prompt = build_conversation_synthesis_prompt(input, &chunk_outputs, &context)?;
+        let synthesis_prompt = build_conversation_synthesis_prompt(input, &chunk_outputs)?;
         processor.run_prompt(input, &synthesis_prompt)
     }
 }
@@ -425,14 +327,10 @@ pub struct OpenAiProcessorFactory {
     client: Arc<dyn InferenceClient>,
     standard_model: String,
     quality_model: String,
-    brain_context_provider: Option<Arc<dyn BrainContextProvider>>,
 }
 
 impl OpenAiProcessorFactory {
-    pub fn new(
-        config: OpenAiConfig,
-        brain_context_provider: Option<Arc<dyn BrainContextProvider>>,
-    ) -> Result<Self, String> {
+    pub fn new(config: OpenAiConfig) -> Result<Self, String> {
         let client = OpenAiClient::new(&config).map_err(|err| err.to_string())?;
         let quality_model = config
             .quality_model
@@ -443,7 +341,6 @@ impl OpenAiProcessorFactory {
             client: Arc::new(client),
             standard_model: config.standard_model,
             quality_model,
-            brain_context_provider,
         })
     }
 
@@ -457,7 +354,6 @@ impl OpenAiProcessorFactory {
             client,
             standard_model: standard_model.into(),
             quality_model: quality_model.into(),
-            brain_context_provider: None,
         }
     }
 }
@@ -475,7 +371,6 @@ impl ArtifactProcessorFactory for OpenAiProcessorFactory {
             pipeline_name: "openai_enrichment",
             provider_name: "openai",
             strategy: ConversationEnrichmentStrategy::openai_default(),
-            brain_context_provider: self.brain_context_provider.clone(),
         }))
     }
 }
@@ -1095,7 +990,6 @@ fn normalize_optional_text(value: String) -> Option<String> {
 
 pub(crate) fn build_conversation_user_prompt(
     input: &ArtifactProcessorInput,
-    context: &[BrainContextSnippet],
 ) -> Result<String, ProcessorError> {
     #[derive(Serialize)]
     struct PromptSegment<'a> {
@@ -1120,16 +1014,12 @@ pub(crate) fn build_conversation_user_prompt(
 
     let segments_json =
         serde_json::to_string_pretty(&prompt_segments).map_err(|source| ProcessorError::SerializePrompt { source })?;
-    let context_block = format_brain_context(context);
 
     Ok(format!(
         "Input artifact:\n\
          artifact_id: {artifact_id}\n\
          source_type: {source_type}\n\
          title: {title}\n\
-         \n\
-         known_brain_context:\n\
-         {context_block}\n\
          \n\
          segments:\n\
          {segments_json}\n\
@@ -1146,66 +1036,8 @@ pub(crate) fn build_conversation_user_prompt(
         artifact_id = input.artifact_id,
         source_type = input.source_type.as_str(),
         title = input.title.as_deref().unwrap_or(""),
-        context_block = context_block,
         segments_json = segments_json,
     ))
-}
-
-fn format_brain_context(context: &[BrainContextSnippet]) -> String {
-    if context.is_empty() {
-        return "none".to_string();
-    }
-
-    context
-        .iter()
-        .enumerate()
-        .map(|(index, snippet)| {
-            format!(
-                "- ctx{index}: type={kind}; artifact_title={artifact_title}; title={title}; body={body}",
-                index = index + 1,
-                kind = snippet.derived_object_type,
-                artifact_title = snippet.artifact_title.as_deref().unwrap_or(""),
-                title = snippet.title.as_deref().unwrap_or(""),
-                body = snippet.body_text,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn extract_context_keywords(input: &ArtifactProcessorInput) -> Vec<String> {
-    let mut tokens = Vec::new();
-    if let Some(title) = &input.title {
-        tokens.extend(tokenize_for_context(title));
-    }
-    for segment in input.segments.iter().take(8) {
-        tokens.extend(tokenize_for_context(&segment.text_content));
-    }
-    tokens.sort();
-    tokens.dedup();
-    tokens.truncate(12);
-    tokens
-}
-
-fn tokenize_for_context(text: &str) -> Vec<String> {
-    text.split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter_map(|token| {
-            let lowered = token.to_ascii_lowercase();
-            if lowered.len() < 4 {
-                return None;
-            }
-            if matches!(
-                lowered.as_str(),
-                "that" | "this" | "with" | "from" | "have" | "what" | "where" | "when" | "your"
-                    | "about" | "into" | "they" | "them" | "were" | "will" | "just" | "does"
-                    | "would" | "there" | "their" | "should" | "could" | "which" | "using"
-                    | "through" | "because"
-            ) {
-                return None;
-            }
-            Some(lowered)
-        })
-        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -1253,7 +1085,6 @@ fn build_conversation_chunk_prompt(
     window: &ConversationWindow,
     chunk_index: usize,
     chunk_count: usize,
-    context: &[BrainContextSnippet],
 ) -> Result<String, ProcessorError> {
     #[derive(Serialize)]
     struct PromptSegment<'a> {
@@ -1278,8 +1109,6 @@ fn build_conversation_chunk_prompt(
 
     let segments_json = serde_json::to_string_pretty(&prompt_segments)
         .map_err(|source| ProcessorError::SerializePrompt { source })?;
-    let context_block = format_brain_context(context);
-
     Ok(format!(
         "Input artifact chunk:\n\
          artifact_id: {artifact_id}\n\
@@ -1287,9 +1116,6 @@ fn build_conversation_chunk_prompt(
          title: {title}\n\
          chunk_index: {chunk_index}\n\
          chunk_count: {chunk_count}\n\
-         \n\
-         known_brain_context:\n\
-         {context_block}\n\
          \n\
          segments:\n\
          {segments_json}\n\
@@ -1308,7 +1134,6 @@ fn build_conversation_chunk_prompt(
         title = input.title.as_deref().unwrap_or(""),
         chunk_index = chunk_index,
         chunk_count = chunk_count,
-        context_block = context_block,
         segments_json = segments_json,
     ))
 }
@@ -1316,7 +1141,6 @@ fn build_conversation_chunk_prompt(
 fn build_conversation_synthesis_prompt(
     input: &ArtifactProcessorInput,
     chunk_outputs: &[ArtifactProcessorOutput],
-    context: &[BrainContextSnippet],
 ) -> Result<String, ProcessorError> {
     #[derive(Serialize)]
     struct ChunkSummary<'a> {
@@ -1381,16 +1205,11 @@ fn build_conversation_synthesis_prompt(
 
     let chunk_json = serde_json::to_string_pretty(&chunk_summaries)
         .map_err(|source| ProcessorError::SerializePrompt { source })?;
-    let context_block = format_brain_context(context);
-
     Ok(format!(
         "Synthesize a final artifact enrichment from these chunk findings.\n\
          artifact_id: {artifact_id}\n\
          source_type: {source_type}\n\
          title: {title}\n\
-         \n\
-         known_brain_context:\n\
-         {context_block}\n\
          \n\
          chunk_findings:\n\
          {chunk_json}\n\
@@ -1407,7 +1226,6 @@ fn build_conversation_synthesis_prompt(
         artifact_id = input.artifact_id,
         source_type = input.source_type.as_str(),
         title = input.title.as_deref().unwrap_or(""),
-        context_block = context_block,
         chunk_json = chunk_json,
     ))
 }
