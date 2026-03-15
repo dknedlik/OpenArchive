@@ -9,7 +9,10 @@ use thiserror::Error;
 
 use crate::config::{OpenAiConfig, OpenAiReasoningEffort};
 use crate::storage::{
-    types::{EnrichmentTier, LoadedParticipant, LoadedSegment, ScopeType, SourceType},
+    types::{
+        EnrichmentTier, LoadedParticipant, LoadedSegment,
+        ReconciliationDecisionKind, RetrievalIntent, ScopeType, SourceType,
+    },
 };
 
 mod anthropic;
@@ -56,6 +59,25 @@ pub struct MemoryOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityOutput {
+    pub entity_key: String,
+    pub display_name: String,
+    pub entity_type: String,
+    pub evidence_segment_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationshipOutput {
+    pub relationship_type: String,
+    pub subject_key: String,
+    pub object_key: String,
+    pub title: Option<String>,
+    pub body_text: String,
+    pub confidence_label: String,
+    pub evidence_segment_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactProcessorOutput {
     pub pipeline_name: String,
     pub pipeline_version: String,
@@ -66,9 +88,32 @@ pub struct ArtifactProcessorOutput {
     pub summary: SummaryOutput,
     pub classifications: Vec<ClassificationOutput>,
     pub memories: Vec<MemoryOutput>,
+    pub entities: Vec<EntityOutput>,
+    pub relationships: Vec<RelationshipOutput>,
+    pub retrieval_intents: Vec<RetrievalIntent>,
     pub importance_score: u8,
     pub escalate_to_frontier: bool,
     pub escalation_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciliationProcessorInput {
+    pub artifact_id: String,
+    pub source_type: SourceType,
+    pub summary: SummaryOutput,
+    pub memories: Vec<MemoryOutput>,
+    pub relationships: Vec<RelationshipOutput>,
+    pub retrieval_results_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciliationDecisionOutput {
+    pub decision_kind: ReconciliationDecisionKind,
+    pub target_kind: String,
+    pub target_key: String,
+    pub matched_object_id: Option<String>,
+    pub rationale: String,
+    pub evidence_segment_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +130,13 @@ pub trait ArtifactProcessor {
         &self,
         input: &ArtifactProcessorInput,
     ) -> Result<ArtifactProcessorOutput, ProcessorError>;
+}
+
+pub trait ReconciliationProcessor {
+    fn reconcile(
+        &self,
+        input: &ReconciliationProcessorInput,
+    ) -> Result<Vec<ReconciliationDecisionOutput>, ProcessorError>;
 }
 
 #[derive(Debug, Default)]
@@ -142,10 +194,61 @@ impl ArtifactProcessor for StubProcessor {
                     "Stub memory for artifact {} derived from {} segments.",
                     input.artifact_id, segment_count
                 ),
-                memory_type: "artifact_fact".to_string(),
+                memory_type: "project_fact".to_string(),
                 memory_scope: ScopeType::Artifact,
                 memory_scope_value: input.artifact_id.clone(),
                 evidence_segment_ids,
+            }],
+            entities: input
+                .participants
+                .iter()
+                .enumerate()
+                .map(|(index, participant)| EntityOutput {
+                    entity_key: participant
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| format!("participant_{index}"))
+                        .to_ascii_lowercase()
+                        .replace(' ', "_"),
+                    display_name: participant
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| format!("Participant {index}")),
+                    entity_type: "participant".to_string(),
+                    evidence_segment_ids: vec![input.segments[0].segment_id.clone()],
+                })
+                .collect(),
+            relationships: if input.participants.len() >= 2 {
+                vec![RelationshipOutput {
+                    relationship_type: "participant_interaction".to_string(),
+                    subject_key: input
+                        .participants
+                        .first()
+                        .and_then(|p| p.display_name.clone())
+                        .unwrap_or_else(|| "participant_0".to_string())
+                        .to_ascii_lowercase()
+                        .replace(' ', "_"),
+                    object_key: input
+                        .participants
+                        .get(1)
+                        .and_then(|p| p.display_name.clone())
+                        .unwrap_or_else(|| "participant_1".to_string())
+                        .to_ascii_lowercase()
+                        .replace(' ', "_"),
+                    title: Some("Participant interaction".to_string()),
+                    body_text: "The artifact captures an interaction between two participants.".to_string(),
+                    confidence_label: "medium".to_string(),
+                    evidence_segment_ids: vec![input.segments[0].segment_id.clone()],
+                }]
+            } else {
+                Vec::new()
+            },
+            retrieval_intents: vec![RetrievalIntent {
+                intent_id: "intent-stub-1".to_string(),
+                question: "Find prior archive context related to the artifact memory.".to_string(),
+                query_text: title.clone(),
+                intent_type: "memory_match".to_string(),
+                evidence_segment_ids: vec![input.segments[0].segment_id.clone()],
             }],
             importance_score: 1,
             escalate_to_frontier: false,
@@ -154,8 +257,47 @@ impl ArtifactProcessor for StubProcessor {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct StubReconciliationProcessor;
+
+impl ReconciliationProcessor for StubReconciliationProcessor {
+    fn reconcile(
+        &self,
+        input: &ReconciliationProcessorInput,
+    ) -> Result<Vec<ReconciliationDecisionOutput>, ProcessorError> {
+        Ok(input
+            .memories
+            .iter()
+            .map(|memory| ReconciliationDecisionOutput {
+                decision_kind: ReconciliationDecisionKind::CreateNew,
+                target_kind: "memory".to_string(),
+                target_key: memory
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| memory.body_text.chars().take(64).collect()),
+                matched_object_id: None,
+                rationale: "Stub reconciliation defaults to create_new.".to_string(),
+                evidence_segment_ids: memory.evidence_segment_ids.clone(),
+            })
+            .chain(input.relationships.iter().map(|relationship| ReconciliationDecisionOutput {
+                decision_kind: ReconciliationDecisionKind::CreateNew,
+                target_kind: "relationship".to_string(),
+                target_key: format!("{}:{}:{}", relationship.relationship_type, relationship.subject_key, relationship.object_key),
+                matched_object_id: None,
+                rationale: "Stub reconciliation defaults to create_new.".to_string(),
+                evidence_segment_ids: relationship.evidence_segment_ids.clone(),
+            }))
+            .collect())
+    }
+}
+
 pub trait ArtifactProcessorFactory: Send + Sync {
     fn build(&self, tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError>;
+
+    fn build_reconciliation_processor(
+        &self,
+        tier: EnrichmentTier,
+    ) -> Result<Box<dyn ReconciliationProcessor>, ProcessorError>;
 
     fn build_batch_processor(
         &self,
@@ -198,6 +340,18 @@ impl ArtifactProcessorFactory for StubProcessorFactory {
             }),
         }
     }
+
+    fn build_reconciliation_processor(
+        &self,
+        tier: EnrichmentTier,
+    ) -> Result<Box<dyn ReconciliationProcessor>, ProcessorError> {
+        match tier {
+            EnrichmentTier::Standard => Ok(Box::new(StubReconciliationProcessor)),
+            unsupported => Err(ProcessorError::UnsupportedTier {
+                tier: unsupported.as_str().to_string(),
+            }),
+        }
+    }
 }
 
 struct HostedArtifactProcessor {
@@ -206,6 +360,12 @@ struct HostedArtifactProcessor {
     pipeline_name: &'static str,
     provider_name: &'static str,
     strategy: Arc<dyn EnrichmentStrategy>,
+}
+
+pub(crate) struct HostedReconciliationProcessor {
+    client: Arc<dyn InferenceClient>,
+    model: String,
+    system_prompt: &'static str,
 }
 
 impl ArtifactProcessor for HostedArtifactProcessor {
@@ -241,7 +401,12 @@ impl HostedArtifactProcessor {
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
         let inference_result = self
             .client
-            .complete_json(&self.model, self.strategy.system_prompt(), user_prompt)?;
+            .complete_json(
+                &self.model,
+                self.strategy.system_prompt(),
+                user_prompt,
+                &structured_output_schema_wrapper(),
+            )?;
         let parsed: ModelArtifactOutput =
             serde_json::from_str(&inference_result.output_text).map_err(|source| {
                 ProcessorError::ParseModelJson {
@@ -259,6 +424,49 @@ impl HostedArtifactProcessor {
             self.provider_name,
             self.strategy.prompt_version(),
         ))
+    }
+}
+
+impl HostedReconciliationProcessor {
+    fn reconcile_once(
+        &self,
+        input: &ReconciliationProcessorInput,
+        user_prompt: &str,
+    ) -> Result<Vec<ReconciliationDecisionOutput>, ProcessorError> {
+        let inference_result = self
+            .client
+            .complete_json(
+                &self.model,
+                self.system_prompt,
+                user_prompt,
+                &reconciliation_output_schema_wrapper(),
+            )?;
+        let parsed: ModelReconciliationOutput =
+            serde_json::from_str(&inference_result.output_text).map_err(|source| {
+                ProcessorError::ParseModelJson {
+                    source,
+                    body_preview: preview(&inference_result.output_text),
+                }
+            })?;
+        parsed.validate_against(input)?;
+        Ok(parsed.into_outputs())
+    }
+}
+
+impl ReconciliationProcessor for HostedReconciliationProcessor {
+    fn reconcile(
+        &self,
+        input: &ReconciliationProcessorInput,
+    ) -> Result<Vec<ReconciliationDecisionOutput>, ProcessorError> {
+        let prompt = build_reconciliation_prompt(input)?;
+        match self.reconcile_once(input, &prompt) {
+            Ok(output) => Ok(output),
+            Err(error) if should_retry_with_repair(&error) => {
+                let repair_prompt = build_repair_prompt(&prompt, &error);
+                self.reconcile_once(input, &repair_prompt)
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -297,29 +505,8 @@ impl EnrichmentStrategy for ConversationEnrichmentStrategy {
         processor: &HostedArtifactProcessor,
         input: &ArtifactProcessorInput,
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
-        if !should_shape_conversation_input(input) {
-            let prompt = build_conversation_user_prompt(input)?;
-            return processor.run_prompt(input, &prompt);
-        }
-
-        let windows = build_conversation_windows(input);
-        let mut chunk_outputs = Vec::with_capacity(windows.len());
-        for (index, window) in windows.iter().enumerate() {
-            let chunk_prompt =
-                build_conversation_chunk_prompt(input, window, index + 1, windows.len())?;
-            let chunk_input = ArtifactProcessorInput {
-                artifact_id: input.artifact_id.clone(),
-                import_id: input.import_id.clone(),
-                source_type: input.source_type,
-                title: input.title.clone(),
-                participants: input.participants.clone(),
-                segments: window.segments.clone(),
-            };
-            chunk_outputs.push(processor.run_prompt(&chunk_input, &chunk_prompt)?);
-        }
-
-        let synthesis_prompt = build_conversation_synthesis_prompt(input, &chunk_outputs)?;
-        processor.run_prompt(input, &synthesis_prompt)
+        let prompt = build_conversation_user_prompt(input)?;
+        processor.run_prompt(input, &prompt)
     }
 }
 
@@ -373,6 +560,21 @@ impl ArtifactProcessorFactory for OpenAiProcessorFactory {
             strategy: ConversationEnrichmentStrategy::openai_default(),
         }))
     }
+
+    fn build_reconciliation_processor(
+        &self,
+        tier: EnrichmentTier,
+    ) -> Result<Box<dyn ReconciliationProcessor>, ProcessorError> {
+        let model = match tier {
+            EnrichmentTier::Standard => self.standard_model.clone(),
+            EnrichmentTier::Quality => self.quality_model.clone(),
+        };
+        Ok(Box::new(HostedReconciliationProcessor {
+            client: Arc::clone(&self.client),
+            model,
+            system_prompt: RECONCILIATION_SYSTEM_PROMPT,
+        }))
+    }
 }
 
 trait InferenceClient: Send + Sync {
@@ -381,6 +583,7 @@ trait InferenceClient: Send + Sync {
         model: &str,
         system_prompt: &str,
         user_prompt: &str,
+        schema: &serde_json::Value,
     ) -> Result<InferenceResult, ProcessorError>;
 }
 
@@ -428,8 +631,9 @@ impl InferenceClient for OpenAiClient {
         model: &str,
         system_prompt: &str,
         user_prompt: &str,
+        schema: &serde_json::Value,
     ) -> Result<InferenceResult, ProcessorError> {
-        self.complete_via_responses(model, system_prompt, user_prompt)
+        self.complete_via_responses(model, system_prompt, user_prompt, schema)
     }
 }
 
@@ -439,6 +643,7 @@ impl OpenAiClient {
         model: &str,
         system_prompt: &str,
         user_prompt: &str,
+        schema: &serde_json::Value,
     ) -> Result<InferenceResult, ProcessorError> {
         let request = self.client.post(format!("{}/responses", self.base_url));
 
@@ -451,7 +656,7 @@ impl OpenAiClient {
                     .map(|effort| effort.as_str()),
             },
             text: OpenRouterResponsesTextConfig {
-                format: structured_output_schema_wrapper(),
+                format: schema.clone(),
             },
             input: vec![
                 OpenRouterResponsesInputItem {
@@ -713,6 +918,12 @@ struct ModelArtifactOutput {
     summary: ModelSummary,
     classifications: Vec<ModelClassification>,
     memories: Vec<ModelMemory>,
+    #[serde(default)]
+    entities: Vec<ModelEntity>,
+    #[serde(default)]
+    relationships: Vec<ModelRelationship>,
+    #[serde(default)]
+    retrieval_intents: Vec<ModelRetrievalIntent>,
     importance_score: u8,
     escalate_to_frontier: bool,
     escalation_reason: String,
@@ -744,6 +955,48 @@ struct ModelMemory {
     evidence_segment_ids: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ModelEntity {
+    entity_key: String,
+    display_name: String,
+    entity_type: String,
+    evidence_segment_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelRelationship {
+    relationship_type: String,
+    subject_key: String,
+    object_key: String,
+    title: String,
+    body_text: String,
+    confidence_label: String,
+    evidence_segment_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelRetrievalIntent {
+    question: String,
+    query_text: String,
+    intent_type: String,
+    evidence_segment_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelReconciliationOutput {
+    decisions: Vec<ModelReconciliationDecision>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelReconciliationDecision {
+    decision_kind: ReconciliationDecisionKind,
+    target_kind: String,
+    target_key: String,
+    matched_object_id: Option<String>,
+    rationale: String,
+    evidence_segment_ids: Vec<String>,
+}
+
 impl ModelArtifactOutput {
     fn resolve_evidence_aliases(mut self, input: &ArtifactProcessorInput) -> Self {
         let alias_map = build_segment_alias_map(input);
@@ -764,6 +1017,30 @@ impl ModelArtifactOutput {
 
         for memory in &mut self.memories {
             for segment_id in &mut memory.evidence_segment_ids {
+                if let Some(actual) = alias_map.get(segment_id.as_str()) {
+                    *segment_id = actual.clone();
+                }
+            }
+        }
+
+        for entity in &mut self.entities {
+            for segment_id in &mut entity.evidence_segment_ids {
+                if let Some(actual) = alias_map.get(segment_id.as_str()) {
+                    *segment_id = actual.clone();
+                }
+            }
+        }
+
+        for relationship in &mut self.relationships {
+            for segment_id in &mut relationship.evidence_segment_ids {
+                if let Some(actual) = alias_map.get(segment_id.as_str()) {
+                    *segment_id = actual.clone();
+                }
+            }
+        }
+
+        for intent in &mut self.retrieval_intents {
+            for segment_id in &mut intent.evidence_segment_ids {
                 if let Some(actual) = alias_map.get(segment_id.as_str()) {
                     *segment_id = actual.clone();
                 }
@@ -853,6 +1130,66 @@ impl ModelArtifactOutput {
             )?;
         }
 
+        for (index, entity) in self.entities.iter().enumerate() {
+            validate_text_field(&format!("entities[{index}].entity_key"), &entity.entity_key)?;
+            validate_text_field(&format!("entities[{index}].display_name"), &entity.display_name)?;
+            validate_text_field(&format!("entities[{index}].entity_type"), &entity.entity_type)?;
+            validate_evidence_ids(
+                &format!("entities[{index}].evidence_segment_ids"),
+                &entity.evidence_segment_ids,
+                &valid_segment_ids,
+            )?;
+        }
+
+        for (index, relationship) in self.relationships.iter().enumerate() {
+            validate_text_field(
+                &format!("relationships[{index}].relationship_type"),
+                &relationship.relationship_type,
+            )?;
+            validate_text_field(
+                &format!("relationships[{index}].subject_key"),
+                &relationship.subject_key,
+            )?;
+            validate_text_field(
+                &format!("relationships[{index}].object_key"),
+                &relationship.object_key,
+            )?;
+            validate_text_field(&format!("relationships[{index}].title"), &relationship.title)?;
+            validate_text_field(
+                &format!("relationships[{index}].body_text"),
+                &relationship.body_text,
+            )?;
+            validate_text_field(
+                &format!("relationships[{index}].confidence_label"),
+                &relationship.confidence_label,
+            )?;
+            validate_evidence_ids(
+                &format!("relationships[{index}].evidence_segment_ids"),
+                &relationship.evidence_segment_ids,
+                &valid_segment_ids,
+            )?;
+        }
+
+        for (index, intent) in self.retrieval_intents.iter().enumerate() {
+            validate_text_field(
+                &format!("retrieval_intents[{index}].question"),
+                &intent.question,
+            )?;
+            validate_text_field(
+                &format!("retrieval_intents[{index}].query_text"),
+                &intent.query_text,
+            )?;
+            validate_text_field(
+                &format!("retrieval_intents[{index}].intent_type"),
+                &intent.intent_type,
+            )?;
+            validate_evidence_ids(
+                &format!("retrieval_intents[{index}].evidence_segment_ids"),
+                &intent.evidence_segment_ids,
+                &valid_segment_ids,
+            )?;
+        }
+
         if !(1..=10).contains(&self.importance_score) {
             return Err(ProcessorError::InvalidModelOutput {
                 detail: format!(
@@ -930,10 +1267,121 @@ impl ModelArtifactOutput {
                     evidence_segment_ids: memory.evidence_segment_ids,
                 })
                 .collect(),
+            entities: self
+                .entities
+                .into_iter()
+                .map(|entity| EntityOutput {
+                    entity_key: entity.entity_key,
+                    display_name: entity.display_name,
+                    entity_type: entity.entity_type,
+                    evidence_segment_ids: entity.evidence_segment_ids,
+                })
+                .collect(),
+            relationships: self
+                .relationships
+                .into_iter()
+                .map(|relationship| RelationshipOutput {
+                    relationship_type: relationship.relationship_type,
+                    subject_key: relationship.subject_key,
+                    object_key: relationship.object_key,
+                    title: normalize_optional_text(relationship.title),
+                    body_text: relationship.body_text.trim().to_string(),
+                    confidence_label: relationship.confidence_label,
+                    evidence_segment_ids: relationship.evidence_segment_ids,
+                })
+                .collect(),
+            retrieval_intents: self
+                .retrieval_intents
+                .into_iter()
+                .enumerate()
+                .map(|(index, intent)| RetrievalIntent {
+                    intent_id: format!("intent-{}", index + 1),
+                    question: intent.question,
+                    query_text: intent.query_text,
+                    intent_type: intent.intent_type,
+                    evidence_segment_ids: intent.evidence_segment_ids,
+                })
+                .collect(),
             importance_score: self.importance_score,
             escalate_to_frontier: self.escalate_to_frontier,
             escalation_reason: normalize_optional_text(self.escalation_reason),
         }
+    }
+}
+
+impl ModelReconciliationOutput {
+    fn validate_against(&self, input: &ReconciliationProcessorInput) -> Result<(), ProcessorError> {
+        let valid_evidence_ids: HashSet<&str> = input
+            .summary
+            .evidence_segment_ids
+            .iter()
+            .chain(input.memories.iter().flat_map(|memory| memory.evidence_segment_ids.iter()))
+            .chain(
+                input.relationships
+                    .iter()
+                    .flat_map(|relationship| relationship.evidence_segment_ids.iter()),
+            )
+            .map(String::as_str)
+            .collect();
+        let valid_targets: HashSet<String> = input
+            .memories
+            .iter()
+            .map(|memory| memory.title.clone().unwrap_or_else(|| memory.body_text.chars().take(64).collect()))
+            .chain(input.relationships.iter().map(|relationship| {
+                format!("{}:{}:{}", relationship.relationship_type, relationship.subject_key, relationship.object_key)
+            }))
+            .collect();
+        let mut seen_targets = HashSet::new();
+
+        for (index, decision) in self.decisions.iter().enumerate() {
+            validate_text_field(&format!("decisions[{index}].target_kind"), &decision.target_kind)?;
+            validate_text_field(&format!("decisions[{index}].target_key"), &decision.target_key)?;
+            validate_text_field(&format!("decisions[{index}].rationale"), &decision.rationale)?;
+            if !valid_targets.contains(&decision.target_key) {
+                return Err(ProcessorError::InvalidModelOutput {
+                    detail: format!(
+                        "decisions[{index}].target_key {:?} does not match a candidate",
+                        decision.target_key
+                    ),
+                });
+            }
+            if !seen_targets.insert(decision.target_key.clone()) {
+                return Err(ProcessorError::InvalidModelOutput {
+                    detail: format!(
+                        "decisions[{index}].target_key {:?} is duplicated",
+                        decision.target_key
+                    ),
+                });
+            }
+            validate_evidence_ids(
+                &format!("decisions[{index}].evidence_segment_ids"),
+                &decision.evidence_segment_ids,
+                &valid_evidence_ids,
+            )?;
+        }
+
+        if seen_targets != valid_targets {
+            return Err(ProcessorError::InvalidModelOutput {
+                detail: "reconciliation output must provide exactly one decision for each candidate memory or relationship"
+                    .to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn into_outputs(self) -> Vec<ReconciliationDecisionOutput> {
+        self.decisions
+            .into_iter()
+            .map(|decision| ReconciliationDecisionOutput {
+                decision_kind: decision.decision_kind,
+                target_kind: decision.target_kind,
+                target_key: decision.target_key,
+                matched_object_id: decision.matched_object_id,
+                rationale: decision.rationale,
+                evidence_segment_ids: decision.evidence_segment_ids,
+            })
+            .collect()
     }
 }
 
@@ -1028,6 +1476,9 @@ pub(crate) fn build_conversation_user_prompt(
          - summary: 2-4 compact sentences\n\
          - classifications: prefer 0 or 1\n\
          - memories: only durable engineering facts or explicit next steps\n\
+         - entities: include only explicit named people, projects, systems, or organizations with durable retrieval value\n\
+         - relationships: include only explicit supported links between emitted entities or durable facts\n\
+         - retrieval_intents: ask archive-only follow-up questions when duplicate detection, prior-state matching, or contradiction checks matter\n\
          - importance: be conservative\n\
          - evidence_segment_ids must use only the evidence_ref values shown in segments (for example s1, s2)\n\
          - cite the minimum evidence needed; prefer 1-2 refs per item\n\
@@ -1040,11 +1491,6 @@ pub(crate) fn build_conversation_user_prompt(
     ))
 }
 
-#[derive(Debug, Clone)]
-struct ConversationWindow {
-    segments: Vec<LoadedSegment>,
-}
-
 pub(crate) fn should_shape_conversation_input(input: &ArtifactProcessorInput) -> bool {
     let char_count: usize = input
         .segments
@@ -1054,179 +1500,87 @@ pub(crate) fn should_shape_conversation_input(input: &ArtifactProcessorInput) ->
     input.segments.len() >= 60 || char_count > 100_000
 }
 
-fn build_conversation_windows(input: &ArtifactProcessorInput) -> Vec<ConversationWindow> {
-    const WINDOW_SIZE: usize = 36;
-    const OVERLAP: usize = 6;
-
-    if input.segments.len() <= WINDOW_SIZE {
-        return vec![ConversationWindow {
-            segments: input.segments.clone(),
-        }];
-    }
-
-    let mut windows = Vec::new();
-    let mut start = 0usize;
-    while start < input.segments.len() {
-        let end = usize::min(start + WINDOW_SIZE, input.segments.len());
-        windows.push(ConversationWindow {
-            segments: input.segments[start..end].to_vec(),
-        });
-        if end == input.segments.len() {
-            break;
-        }
-        start = end.saturating_sub(OVERLAP);
-    }
-
-    windows
-}
-
-fn build_conversation_chunk_prompt(
-    input: &ArtifactProcessorInput,
-    window: &ConversationWindow,
-    chunk_index: usize,
-    chunk_count: usize,
+pub(crate) fn build_reconciliation_prompt(
+    input: &ReconciliationProcessorInput,
 ) -> Result<String, ProcessorError> {
     #[derive(Serialize)]
-    struct PromptSegment<'a> {
-        evidence_ref: String,
-        participant_role: &'a str,
-        text: &'a str,
-    }
-
-    let prompt_segments: Vec<_> = window
-        .segments
-        .iter()
-        .enumerate()
-        .map(|(index, segment)| PromptSegment {
-            evidence_ref: segment_alias(index),
-            participant_role: segment
-                .participant_role
-                .map(|role| role.as_str())
-                .unwrap_or("unknown"),
-            text: segment.text_content.as_str(),
-        })
-        .collect();
-
-    let segments_json = serde_json::to_string_pretty(&prompt_segments)
-        .map_err(|source| ProcessorError::SerializePrompt { source })?;
-    Ok(format!(
-        "Input artifact chunk:\n\
-         artifact_id: {artifact_id}\n\
-         source_type: {source_type}\n\
-         title: {title}\n\
-         chunk_index: {chunk_index}\n\
-         chunk_count: {chunk_count}\n\
-         \n\
-         segments:\n\
-         {segments_json}\n\
-         \n\
-         Output guidance:\n\
-         - focus on durable information from this chunk only\n\
-         - summarize the important local content without trying to cover the entire artifact\n\
-         - classifications: prefer 0 or 1\n\
-         - memories: capture distinct durable facts present in this chunk\n\
-         - evidence_segment_ids must use only the evidence_ref values shown in this chunk\n\
-         - cite the minimum evidence needed; prefer 1-2 refs per item\n\
-         - memory_scope_value must be {artifact_id}\n\
-         ",
-        artifact_id = input.artifact_id,
-        source_type = input.source_type.as_str(),
-        title = input.title.as_deref().unwrap_or(""),
-        chunk_index = chunk_index,
-        chunk_count = chunk_count,
-        segments_json = segments_json,
-    ))
-}
-
-fn build_conversation_synthesis_prompt(
-    input: &ArtifactProcessorInput,
-    chunk_outputs: &[ArtifactProcessorOutput],
-) -> Result<String, ProcessorError> {
-    #[derive(Serialize)]
-    struct ChunkSummary<'a> {
-        chunk_index: usize,
-        summary_title: Option<&'a str>,
-        summary_body_text: &'a str,
-        summary_evidence_segment_ids: &'a [String],
-        classifications: Vec<ChunkClassification<'a>>,
-        memories: Vec<ChunkMemory<'a>>,
-        importance_score: u8,
-    }
-
-    #[derive(Serialize)]
-    struct ChunkClassification<'a> {
-        classification_type: &'a str,
-        classification_value: &'a str,
-        title: Option<&'a str>,
-        body_text: Option<&'a str>,
-        evidence_segment_ids: &'a [String],
-    }
-
-    #[derive(Serialize)]
-    struct ChunkMemory<'a> {
-        memory_type: &'a str,
+    struct CandidateMemory<'a> {
+        target_key: String,
         title: Option<&'a str>,
         body_text: &'a str,
         evidence_segment_ids: &'a [String],
     }
 
-    let chunk_summaries: Vec<_> = chunk_outputs
+    #[derive(Serialize)]
+    struct CandidateRelationship<'a> {
+        target_key: String,
+        relationship_type: &'a str,
+        subject_key: &'a str,
+        object_key: &'a str,
+        title: Option<&'a str>,
+        body_text: &'a str,
+        evidence_segment_ids: &'a [String],
+    }
+
+    let memories: Vec<_> = input
+        .memories
         .iter()
-        .enumerate()
-        .map(|(index, output)| ChunkSummary {
-            chunk_index: index + 1,
-            summary_title: output.summary.title.as_deref(),
-            summary_body_text: output.summary.body_text.as_str(),
-            summary_evidence_segment_ids: &output.summary.evidence_segment_ids,
-            classifications: output
-                .classifications
-                .iter()
-                .map(|classification| ChunkClassification {
-                    classification_type: classification.classification_type.as_str(),
-                    classification_value: classification.classification_value.as_str(),
-                    title: classification.title.as_deref(),
-                    body_text: classification.body_text.as_deref(),
-                    evidence_segment_ids: &classification.evidence_segment_ids,
-                })
-                .collect(),
-            memories: output
-                .memories
-                .iter()
-                .map(|memory| ChunkMemory {
-                    memory_type: memory.memory_type.as_str(),
-                    title: memory.title.as_deref(),
-                    body_text: memory.body_text.as_str(),
-                    evidence_segment_ids: &memory.evidence_segment_ids,
-                })
-                .collect(),
-            importance_score: output.importance_score,
+        .map(|memory| CandidateMemory {
+            target_key: memory
+                .title
+                .clone()
+                .unwrap_or_else(|| memory.body_text.chars().take(64).collect()),
+            title: memory.title.as_deref(),
+            body_text: memory.body_text.as_str(),
+            evidence_segment_ids: &memory.evidence_segment_ids,
+        })
+        .collect();
+    let relationships: Vec<_> = input
+        .relationships
+        .iter()
+        .map(|relationship| CandidateRelationship {
+            target_key: format!(
+                "{}:{}:{}",
+                relationship.relationship_type, relationship.subject_key, relationship.object_key
+            ),
+            relationship_type: relationship.relationship_type.as_str(),
+            subject_key: relationship.subject_key.as_str(),
+            object_key: relationship.object_key.as_str(),
+            title: relationship.title.as_deref(),
+            body_text: relationship.body_text.as_str(),
+            evidence_segment_ids: &relationship.evidence_segment_ids,
         })
         .collect();
 
-    let chunk_json = serde_json::to_string_pretty(&chunk_summaries)
-        .map_err(|source| ProcessorError::SerializePrompt { source })?;
+    let memories_json =
+        serde_json::to_string_pretty(&memories).map_err(|source| ProcessorError::SerializePrompt { source })?;
+    let relationships_json =
+        serde_json::to_string_pretty(&relationships).map_err(|source| ProcessorError::SerializePrompt { source })?;
+
     Ok(format!(
-        "Synthesize a final artifact enrichment from these chunk findings.\n\
+        "Reconcile extraction candidates against archive retrieval results.\n\
          artifact_id: {artifact_id}\n\
          source_type: {source_type}\n\
-         title: {title}\n\
+         summary: {summary}\n\
          \n\
-         chunk_findings:\n\
-         {chunk_json}\n\
+         candidate_memories:\n\
+         {memories_json}\n\
          \n\
-         Output guidance:\n\
-         - produce the final artifact-level summary, classifications, and memories\n\
-         - merge duplicate or overlapping chunk findings into broader artifact-level outputs\n\
-         - preserve important distinct subtopics when they materially add retrieval value\n\
-         - evidence_segment_ids must use only the real segment ids shown in the chunk findings\n\
-         - prefer 3-5 distinct memories on rich artifacts when well supported\n\
-         - classifications: prefer 0 or 1\n\
-         - memory_scope_value must be {artifact_id}\n\
-         ",
+         candidate_relationships:\n\
+         {relationships_json}\n\
+         \n\
+         retrieval_results:\n\
+         {retrieval_results_json}\n\
+         \n\
+         Output one decision per candidate memory or relationship.\n\
+         target_key must match a candidate target_key exactly.\n\
+         target_kind must be memory or relationship.\n",
         artifact_id = input.artifact_id,
         source_type = input.source_type.as_str(),
-        title = input.title.as_deref().unwrap_or(""),
-        chunk_json = chunk_json,
+        summary = input.summary.body_text,
+        memories_json = memories_json,
+        relationships_json = relationships_json,
+        retrieval_results_json = input.retrieval_results_json,
     ))
 }
 
@@ -1280,6 +1634,9 @@ pub(crate) fn structured_output_schema() -> serde_json::Value {
             "summary",
             "classifications",
             "memories",
+            "entities",
+            "relationships",
+            "retrieval_intents",
             "importance_score",
             "escalate_to_frontier",
             "escalation_reason"
@@ -1368,6 +1725,74 @@ pub(crate) fn structured_output_schema() -> serde_json::Value {
                     }
                 }
             },
+            "entities": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["entity_key", "display_name", "entity_type", "evidence_segment_ids"],
+                    "properties": {
+                        "entity_key": { "type": "string", "minLength": 1 },
+                        "display_name": { "type": "string", "minLength": 1 },
+                        "entity_type": { "type": "string", "minLength": 1 },
+                        "evidence_segment_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": { "type": "string", "minLength": 1 }
+                        }
+                    }
+                }
+            },
+            "relationships": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "relationship_type",
+                        "subject_key",
+                        "object_key",
+                        "title",
+                        "body_text",
+                        "confidence_label",
+                        "evidence_segment_ids"
+                    ],
+                    "properties": {
+                        "relationship_type": { "type": "string", "minLength": 1 },
+                        "subject_key": { "type": "string", "minLength": 1 },
+                        "object_key": { "type": "string", "minLength": 1 },
+                        "title": { "type": "string", "minLength": 1 },
+                        "body_text": { "type": "string", "minLength": 1 },
+                        "confidence_label": { "type": "string", "enum": ["low", "medium", "high"] },
+                        "evidence_segment_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": { "type": "string", "minLength": 1 }
+                        }
+                    }
+                }
+            },
+            "retrieval_intents": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["question", "query_text", "intent_type", "evidence_segment_ids"],
+                    "properties": {
+                        "question": { "type": "string", "minLength": 1 },
+                        "query_text": { "type": "string", "minLength": 1 },
+                        "intent_type": {
+                            "type": "string",
+                            "enum": ["topic_lookup", "memory_match", "entity_lookup", "relationship_lookup", "contradiction_check"]
+                        },
+                        "evidence_segment_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": { "type": "string", "minLength": 1 }
+                        }
+                    }
+                }
+            },
             "importance_score": {
                 "type": "integer",
                 "minimum": 1,
@@ -1379,12 +1804,62 @@ pub(crate) fn structured_output_schema() -> serde_json::Value {
     })
 }
 
+pub(crate) fn reconciliation_output_schema_wrapper() -> serde_json::Value {
+    json!({
+        "type": "json_schema",
+        "name": "openarchive_reconciliation",
+        "strict": true,
+        "schema": reconciliation_output_schema()
+    })
+}
+
+pub(crate) fn reconciliation_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["decisions"],
+        "properties": {
+            "decisions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["decision_kind", "target_kind", "target_key", "matched_object_id", "rationale", "evidence_segment_ids"],
+                    "properties": {
+                        "decision_kind": {
+                            "type": "string",
+                            "enum": [
+                                "create_new",
+                                "attach_to_existing",
+                                "strengthen_existing",
+                                "supersede_existing",
+                                "contradicts_existing",
+                                "insufficient_evidence"
+                            ]
+                        },
+                        "target_kind": { "type": "string", "enum": ["memory", "relationship"] },
+                        "target_key": { "type": "string", "minLength": 1 },
+                        "matched_object_id": { "type": ["string", "null"] },
+                        "rationale": { "type": "string", "minLength": 1 },
+                        "evidence_segment_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": { "type": "string", "minLength": 1 }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
 const OPENAI_PROMPT_VERSION: &str = "openai-strict-v1";
 pub(crate) const GEMINI_PROMPT_VERSION: &str = "gemini-strict-v5";
+const ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every summary, classification, memory, entity, relationship, and retrieval_intent must cite real evidence_segment_ids from the artifact.\n3. Do not use prior archive knowledge. Reason only from the provided artifact.\n4. Prefer explicit uncertainty over guessed continuity with prior brain state.\n5. Use retrieval_intents only for questions that require archive lookups to resolve ambiguity, duplicate detection, contradiction checks, or prior-state matching.\n6. Prefer fewer, stronger memories over weak ones.\n7. Emit entities only when there is explicit artifact support.\n8. Emit relationships only when the artifact explicitly supports the link.\n9. Memories must use only these memory_type values: preference, project_fact, identity_fact, ongoing_task, reference.\n10. relationship confidence_label must be low, medium, or high.\n11. retrieval_intent intent_type must be one of topic_lookup, memory_match, entity_lookup, relationship_lookup, contradiction_check.\n12. memory_scope is always artifact and memory_scope_value is the artifact_id.\n13. Summary must be 2-4 compact sentences focused on lasting engineering substance.\n14. Low-signal artifacts should usually have low importance and no classifications.\n15. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n16. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
-const ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every summary, classification, and memory must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, or commitments.\n4. Keep the output compact and machine-readable.\n5. Prefer fewer, stronger memories over weak ones.\n6. If the artifact contains durable engineering decisions, constraints, or explicit next steps, emit at least one memory.\n7. Classifications are optional. Prefer 0 or 1 classifications. Emit a second classification only if it adds a clearly distinct retrieval hook.\n8. Do not emit generic or redundant classifications.\n9. classification_type must be \"topic\" or \"intent\".\n10. topic must be a specific retrieval-useful subject phrase, not a generic label.\n11. intent must be a short concrete goal phrase in snake_case.\n12. Memories must use only these memory_type values: preference, project_fact, identity_fact, ongoing_task, reference.\n13. memory_scope is always \"artifact\" and memory_scope_value is the artifact_id.\n14. Summary must be 2-4 compact sentences focused on lasting engineering substance.\n15. importance_score measures long-term retrieval value, operational risk, or durable decision significance.\n16. Low-signal artifacts should usually have low importance and no classifications.\n17. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n18. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+pub(crate) const GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Gemini. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, or commitments.\n4. Keep the output compact, but do not overcompress rich artifacts.\n5. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n6. Do not guess prior continuity; emit retrieval_intents instead.\n7. Emit relationships only when the artifact explicitly supports the link.\n8. relationship confidence_label must be low, medium, or high.\n9. memory_scope is always artifact and memory_scope_value is the artifact_id.\n10. Low-signal artifacts should usually have low importance and no classifications.\n11. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n12. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
-pub(crate) const GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Gemini. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every summary, classification, and memory must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, or commitments.\n4. Keep the output compact, but do not overcompress rich artifacts.\n5. For dense artifacts, preserve the main topic plus the most important subtopics, decisions, or tensions instead of collapsing them into one generic idea.\n6. Prefer fewer, stronger memories over weak ones, but do not omit durable memories from rich artifacts.\n7. When several distinct durable facts exist, prefer memories that cover different aspects of the artifact instead of repeating one theme.\n8. Use memory_type precisely: preference for stable likes/dislikes or values stated by the user, identity_fact for self-description, ongoing_task for explicit unfinished work, project_fact for durable facts or decisions, reference for reusable external resources.\n9. Only use preference or identity_fact when the artifact directly supports them with first-person statements or clear stable values. Do not force those types when support is weak.\n10. Do not split one idea into several narrow project_fact memories. Prefer 3-5 distinct high-value memories over many small ones.\n11. Classifications are optional. Prefer 0 or 1 classifications. Emit a second classification only if it adds a clearly distinct retrieval hook.\n12. Do not emit generic or redundant classifications.\n13. classification_type must be \"topic\" or \"intent\".\n14. topic must be a specific retrieval-useful subject phrase, not a generic label.\n15. intent must be a short concrete goal phrase in snake_case.\n16. Classification body_text must be brief and should not restate the full summary.\n17. memory_scope is always \"artifact\" and memory_scope_value is the artifact_id.\n18. Summary must be 2-4 compact sentences, but should still cover the artifact's lasting substance.\n19. importance_score measures long-term retrieval value, operational risk, or durable decision significance.\n20. Routine advice, consumer guidance, troubleshooting, and general Q&A should usually stay in the 3-6 range.\n21. Use 7 or higher only for artifacts with durable life decisions, major technical direction, significant operational risk, or unusually reusable knowledge.\n22. Low-signal artifacts should usually have low importance and no classifications.\n23. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n24. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+pub(crate) const RECONCILIATION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict reconciliation engine. Use only the provided extraction candidates, retrieval results, and source evidence. Return ONLY valid JSON.\n\nRules:\n1. Prefer no merge over a weak merge.\n2. Choose create_new when the archive evidence is insufficient.\n3. Use attach_to_existing or strengthen_existing only when the retrieved object clearly matches the candidate.\n4. Use supersede_existing only when the new artifact clearly updates or replaces prior state.\n5. Use contradicts_existing only when the artifact clearly conflicts with retrieved prior state.\n6. Never merge identities, projects, or relationships on vague topical overlap.\n7. Every decision must cite real evidence_segment_ids from the extraction candidates.\n8. Output valid JSON only.";
 
 #[derive(Debug, Error)]
 pub enum ProcessorError {
@@ -1480,6 +1955,7 @@ mod tests {
             _model: &str,
             _system_prompt: &str,
             _user_prompt: &str,
+            _schema: &serde_json::Value,
         ) -> Result<InferenceResult, ProcessorError> {
             Ok(InferenceResult {
                 output_text: self.response.clone(),
@@ -1498,6 +1974,7 @@ mod tests {
             _model: &str,
             _system_prompt: &str,
             _user_prompt: &str,
+            _schema: &serde_json::Value,
         ) -> Result<InferenceResult, ProcessorError> {
             let mut responses = self.responses.lock().expect("sequence lock");
             if responses.is_empty() {
@@ -1570,6 +2047,9 @@ mod tests {
                         "evidence_segment_ids": ["seg-2"]
                     }
                 ],
+                "entities": [],
+                "relationships": [],
+                "retrieval_intents": [],
                 "importance_score": 8,
                 "escalate_to_frontier": true,
                 "escalation_reason": "High-value implementation direction with durable engineering impact."
@@ -1609,6 +2089,9 @@ mod tests {
                     }
                 ],
                 "memories": [],
+                "entities": [],
+                "relationships": [],
+                "retrieval_intents": [],
                 "importance_score": 5,
                 "escalate_to_frontier": false,
                 "escalation_reason": ""
@@ -1634,6 +2117,9 @@ mod tests {
                     },
                     "classifications": [],
                     "memories": [],
+                    "entities": [],
+                    "relationships": [],
+                    "retrieval_intents": [],
                     "importance_score": 5,
                     "escalate_to_frontier": false,
                     "escalation_reason": ""
@@ -1664,6 +2150,9 @@ mod tests {
                             "evidence_segment_ids": ["seg-2"]
                         }
                     ],
+                    "entities": [],
+                    "relationships": [],
+                    "retrieval_intents": [],
                     "importance_score": 7,
                     "escalate_to_frontier": false,
                     "escalation_reason": ""

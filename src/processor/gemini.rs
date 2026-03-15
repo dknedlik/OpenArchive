@@ -13,7 +13,8 @@ use super::{
     build_conversation_user_prompt, should_shape_conversation_input, structured_output_schema,
     ArtifactBatchProcessor, ArtifactProcessor, ArtifactProcessorFactory, ArtifactProcessorInput,
     ArtifactProcessorOutput, ConversationEnrichmentStrategy, GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
-    HostedArtifactProcessor, InferenceClient, InferenceResult, InferenceUsage, ProcessorError,
+    HostedArtifactProcessor, HostedReconciliationProcessor, InferenceClient, InferenceResult,
+    InferenceUsage, ProcessorError, RECONCILIATION_SYSTEM_PROMPT, ReconciliationProcessor,
 };
 
 pub struct GeminiProcessorFactory {
@@ -57,6 +58,21 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
             pipeline_name: "gemini_enrichment",
             provider_name: "gemini",
             strategy: ConversationEnrichmentStrategy::gemini_default(),
+        }))
+    }
+
+    fn build_reconciliation_processor(
+        &self,
+        tier: EnrichmentTier,
+    ) -> Result<Box<dyn ReconciliationProcessor>, ProcessorError> {
+        let model = match tier {
+            EnrichmentTier::Standard => self.standard_model.clone(),
+            EnrichmentTier::Quality => self.quality_model.clone(),
+        };
+        Ok(Box::new(HostedReconciliationProcessor {
+            client: Arc::clone(&self.client),
+            model,
+            system_prompt: RECONCILIATION_SYSTEM_PROMPT,
         }))
     }
 
@@ -224,6 +240,7 @@ impl GeminiClient {
         model: &str,
         system_prompt: &str,
         user_prompt: &str,
+        schema: &serde_json::Value,
     ) -> Result<InferenceResult, ProcessorError> {
         let endpoint = format!(
             "{}/{}:generateContent",
@@ -246,7 +263,7 @@ impl GeminiClient {
             }],
             generation_config: GeminiGenerationConfig {
                 response_mime_type: "application/json".to_string(),
-                response_json_schema: structured_output_schema(),
+                response_json_schema: schema.clone(),
                 max_output_tokens: self.max_output_tokens,
             },
         };
@@ -306,8 +323,9 @@ impl InferenceClient for GeminiClient {
         model: &str,
         system_prompt: &str,
         user_prompt: &str,
+        schema: &serde_json::Value,
     ) -> Result<InferenceResult, ProcessorError> {
-        self.complete_via_generate_content(model, system_prompt, user_prompt)
+        self.complete_via_generate_content(model, system_prompt, user_prompt, schema)
     }
 }
 

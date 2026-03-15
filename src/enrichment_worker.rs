@@ -1,7 +1,8 @@
 use crate::domain::SourceTimestamp;
 use crate::processor::{
-    ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput, ProcessorError,
-    StubProcessorFactory,
+    ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput, ClassificationOutput,
+    EntityOutput, MemoryOutput, ProcessorError, ReconciliationProcessorInput, RelationshipOutput,
+    StubProcessorFactory, SummaryOutput,
 };
 use crate::shutdown::ShutdownToken;
 use crate::storage::{
@@ -13,11 +14,12 @@ use crate::storage::{
     ExtractedMemory, InputScopeType, MemoryObjectJson, NewDerivationRun, NewDerivedObject,
     NewEnrichmentJob, NewEvidenceLink, ObjectStatus, OriginKind, ReconciliationDecision,
     ReconciliationDecisionKind, RetrievalIntent, RetrievalResultSet, ScopeType, SummaryObjectJson,
-    SupportStrength, WriteDerivationAttempt, WriteDerivedObject,
+    SupportStrength, WriteDerivationAttempt, WriteDerivedObject, RelationshipObjectJson,
 };
 use anyhow::Result;
 use log::{debug, error, info};
-use std::collections::HashSet;
+use rand::random;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -112,6 +114,7 @@ fn process_claimed_job(
             read_store,
             state_store,
             derived_store,
+            processor_factory,
         ),
     }
 }
@@ -247,9 +250,20 @@ fn process_extract_job(
         .build(claimed_job.enrichment_tier)
         .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to build extraction processor", err))?;
 
-    let output = processor
-        .process(&processor_input)
-        .map_err(|err| handle_processor_error(job_store, worker_id, &claimed_job.job_id, err))?;
+    let output = if payload.conversation_windows.len() > 1 {
+        let mut chunk_outputs = Vec::new();
+        for chunk_input in build_chunk_inputs(&processor_input, &payload.conversation_windows) {
+            let chunk_output = processor
+                .process(&chunk_input)
+                .map_err(|err| handle_processor_error(job_store, worker_id, &claimed_job.job_id, err))?;
+            chunk_outputs.push(chunk_output);
+        }
+        merge_chunk_outputs(&processor_input, &chunk_outputs)
+    } else {
+        processor
+            .process(&processor_input)
+            .map_err(|err| handle_processor_error(job_store, worker_id, &claimed_job.job_id, err))?
+    };
 
     let extraction_result = build_extraction_result(claimed_job, &processor_input, &output, payload.conversation_windows);
     state_store
@@ -384,6 +398,7 @@ fn process_reconcile_job(
     read_store: &dyn ArtifactReadStore,
     state_store: &dyn EnrichmentStateStore,
     derived_store: &dyn DerivedMetadataWriteStore,
+    processor_factory: &dyn ArtifactProcessorFactory,
 ) -> std::result::Result<(), String> {
     let payload = ArtifactReconcilePayload::from_json(&claimed_job.payload_json)
         .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to parse reconcile payload JSON", err))?;
@@ -422,7 +437,40 @@ fn process_reconcile_job(
             )
         })?;
 
-    let decisions = build_reconciliation_decisions(claimed_job, &extraction_result, &retrieval_result_set);
+    let decisions = if extraction_result.memories.is_empty() && extraction_result.relationships.is_empty() {
+        vec![ReconciliationDecision {
+            reconciliation_decision_id: new_id("reconcile"),
+            artifact_id: extraction_result.artifact_id.clone(),
+            job_id: claimed_job.job_id.clone(),
+            extraction_result_id: extraction_result.extraction_result_id.clone(),
+            retrieval_result_set_id: retrieval_result_set.retrieval_result_set_id.clone(),
+            pipeline_name: "artifact_reconciliation".to_string(),
+            pipeline_version: "v1".to_string(),
+            decision_kind: ReconciliationDecisionKind::InsufficientEvidence,
+            target_kind: "artifact".to_string(),
+            target_key: extraction_result.artifact_id.clone(),
+            matched_object_id: None,
+            rationale: "No candidate memories or relationships were extracted for reconciliation.".to_string(),
+            evidence_segment_ids: extraction_result.summary_evidence_segment_ids.clone(),
+            status: "completed".to_string(),
+            error_message: None,
+        }]
+    } else {
+        let processor = processor_factory
+            .build_reconciliation_processor(claimed_job.enrichment_tier)
+            .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to build reconciliation processor", err))?;
+        let input = build_reconciliation_input(
+            &claimed_job.artifact_id,
+            &payload.source_type,
+            &extraction_result,
+            &retrieval_result_set,
+        )
+        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to build reconciliation input", err))?;
+        let outputs = processor
+            .reconcile(&input)
+            .map_err(|err| handle_processor_error(job_store, worker_id, &claimed_job.job_id, err))?;
+        build_reconciliation_decisions(claimed_job, &extraction_result, &retrieval_result_set, outputs)
+    };
     state_store
         .save_reconciliation_decisions(&decisions)
         .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to persist reconciliation decisions", err))?;
@@ -484,56 +532,8 @@ fn build_extraction_result(
     claimed_job: &ClaimedJob,
     input: &ArtifactProcessorInput,
     output: &ArtifactProcessorOutput,
-    windows: Vec<ConversationWindowRef>,
+    _windows: Vec<ConversationWindowRef>,
 ) -> ArtifactExtractionResult {
-    let mut retrieval_intents = Vec::new();
-    for classification in &output.classifications {
-        retrieval_intents.push(RetrievalIntent {
-            intent_id: new_id("intent"),
-            question: format!(
-                "Find existing archive context related to classification {}",
-                classification.classification_value
-            ),
-            query_text: classification.classification_value.clone(),
-            intent_type: "topic_lookup".to_string(),
-            evidence_segment_ids: classification.evidence_segment_ids.clone(),
-        });
-    }
-    for memory in &output.memories {
-        let query_text = memory
-            .title
-            .clone()
-            .unwrap_or_else(|| memory.body_text.clone())
-            .chars()
-            .take(96)
-            .collect::<String>();
-        retrieval_intents.push(RetrievalIntent {
-            intent_id: new_id("intent"),
-            question: format!("Find prior archive support or duplicates for memory {}", query_text),
-            query_text,
-            intent_type: "memory_match".to_string(),
-            evidence_segment_ids: memory.evidence_segment_ids.clone(),
-        });
-    }
-    if retrieval_intents.is_empty() {
-        retrieval_intents.push(RetrievalIntent {
-            intent_id: new_id("intent"),
-            question: "Find nearby archive context for the artifact summary".to_string(),
-            query_text: output.summary.body_text.chars().take(96).collect(),
-            intent_type: "summary_context".to_string(),
-            evidence_segment_ids: output.summary.evidence_segment_ids.clone(),
-        });
-    }
-    if windows.len() > 1 {
-        retrieval_intents.push(RetrievalIntent {
-            intent_id: new_id("intent"),
-            question: "Find archive context that overlaps across large-artifact windows".to_string(),
-            query_text: input.title.clone().unwrap_or_else(|| input.artifact_id.clone()),
-            intent_type: "window_synthesis".to_string(),
-            evidence_segment_ids: output.summary.evidence_segment_ids.clone(),
-        });
-    }
-
     ArtifactExtractionResult {
         extraction_result_id: new_id("extract"),
         artifact_id: input.artifact_id.clone(),
@@ -566,96 +566,279 @@ fn build_extraction_result(
                 evidence_segment_ids: memory.evidence_segment_ids.clone(),
             })
             .collect(),
-        entities: Vec::<CandidateEntity>::new(),
-        relationships: Vec::<CandidateRelationship>::new(),
-        retrieval_intents,
+        entities: output
+            .entities
+            .iter()
+            .map(|entity| CandidateEntity {
+                entity_key: entity.entity_key.clone(),
+                display_name: entity.display_name.clone(),
+                entity_type: entity.entity_type.clone(),
+                evidence_segment_ids: entity.evidence_segment_ids.clone(),
+            })
+            .collect(),
+        relationships: output
+            .relationships
+            .iter()
+            .map(|relationship| CandidateRelationship {
+                relationship_type: relationship.relationship_type.clone(),
+                subject_key: relationship.subject_key.clone(),
+                object_key: relationship.object_key.clone(),
+                title: relationship.title.clone(),
+                body_text: relationship.body_text.clone(),
+                confidence_label: relationship.confidence_label.clone(),
+                evidence_segment_ids: relationship.evidence_segment_ids.clone(),
+            })
+            .collect(),
+        retrieval_intents: output
+            .retrieval_intents
+            .iter()
+            .map(|intent| RetrievalIntent {
+                intent_id: new_id("intent"),
+                question: intent.question.clone(),
+                query_text: intent.query_text.clone(),
+                intent_type: intent.intent_type.clone(),
+                evidence_segment_ids: intent.evidence_segment_ids.clone(),
+            })
+            .collect(),
         status: "completed".to_string(),
         error_message: None,
     }
+}
+
+fn build_chunk_inputs(
+    input: &ArtifactProcessorInput,
+    windows: &[ConversationWindowRef],
+) -> Vec<ArtifactProcessorInput> {
+    windows
+        .iter()
+        .map(|window| ArtifactProcessorInput {
+            artifact_id: input.artifact_id.clone(),
+            import_id: input.import_id.clone(),
+            source_type: input.source_type,
+            title: input.title.clone(),
+            participants: input.participants.clone(),
+            segments: input
+                .segments
+                .iter()
+                .filter(|segment| {
+                    segment.sequence_no >= window.start_sequence_no
+                        && segment.sequence_no <= window.end_sequence_no
+                })
+                .cloned()
+                .collect(),
+        })
+        .filter(|chunk| !chunk.segments.is_empty())
+        .collect()
+}
+
+fn merge_chunk_outputs(
+    input: &ArtifactProcessorInput,
+    outputs: &[ArtifactProcessorOutput],
+) -> ArtifactProcessorOutput {
+    let first = outputs
+        .first()
+        .cloned()
+        .expect("merge_chunk_outputs requires at least one chunk output");
+    if outputs.len() == 1 {
+        return first;
+    }
+
+    let mut summary_bodies = Vec::new();
+    let mut summary_titles = Vec::new();
+    let mut summary_evidence = Vec::new();
+    let mut classifications = BTreeMap::<(String, String), ClassificationOutput>::new();
+    let mut memories = BTreeMap::<String, MemoryOutput>::new();
+    let mut entities = BTreeMap::<String, EntityOutput>::new();
+    let mut relationships = BTreeMap::<String, RelationshipOutput>::new();
+    let mut retrieval_intents = BTreeMap::<(String, String), RetrievalIntent>::new();
+    let mut importance_score = 1u8;
+    let mut escalate_to_frontier = false;
+    let mut escalation_reasons = Vec::new();
+
+    for output in outputs {
+        if let Some(title) = &output.summary.title {
+            if !summary_titles.contains(title) {
+                summary_titles.push(title.clone());
+            }
+        }
+        if !summary_bodies.contains(&output.summary.body_text) {
+            summary_bodies.push(output.summary.body_text.clone());
+        }
+        extend_unique(&mut summary_evidence, &output.summary.evidence_segment_ids);
+        importance_score = importance_score.max(output.importance_score);
+        escalate_to_frontier |= output.escalate_to_frontier;
+        if let Some(reason) = &output.escalation_reason {
+            if !escalation_reasons.contains(reason) {
+                escalation_reasons.push(reason.clone());
+            }
+        }
+
+        for classification in &output.classifications {
+            classifications
+                .entry((
+                    classification.classification_type.clone(),
+                    classification.classification_value.clone(),
+                ))
+                .or_insert_with(|| classification.clone());
+        }
+        for memory in &output.memories {
+            memories
+                .entry(memory_target_key_from_output(memory))
+                .or_insert_with(|| memory.clone());
+        }
+        for entity in &output.entities {
+            entities
+                .entry(entity.entity_key.clone())
+                .or_insert_with(|| entity.clone());
+        }
+        for relationship in &output.relationships {
+            relationships
+                .entry(relationship_target_key_from_output(relationship))
+                .or_insert_with(|| relationship.clone());
+        }
+        for intent in &output.retrieval_intents {
+            retrieval_intents
+                .entry((intent.intent_type.clone(), intent.query_text.clone()))
+                .or_insert_with(|| intent.clone());
+        }
+    }
+
+    ArtifactProcessorOutput {
+        pipeline_name: first.pipeline_name,
+        pipeline_version: first.pipeline_version,
+        provider_name: first.provider_name,
+        model_name: first.model_name,
+        prompt_version: first.prompt_version,
+        usage: None,
+        summary: SummaryOutput {
+            title: summary_titles
+                .first()
+                .cloned()
+                .or_else(|| input.title.clone()),
+            body_text: summary_bodies.join(" "),
+            evidence_segment_ids: summary_evidence,
+        },
+        classifications: classifications.into_values().collect(),
+        memories: memories.into_values().collect(),
+        entities: entities.into_values().collect(),
+        relationships: relationships.into_values().collect(),
+        retrieval_intents: retrieval_intents.into_values().collect(),
+        importance_score,
+        escalate_to_frontier,
+        escalation_reason: if escalate_to_frontier && !escalation_reasons.is_empty() {
+            Some(escalation_reasons.join(" "))
+        } else {
+            None
+        },
+    }
+}
+
+fn build_reconciliation_input(
+    artifact_id: &str,
+    source_type: &str,
+    extraction_result: &ArtifactExtractionResult,
+    retrieval_result_set: &RetrievalResultSet,
+) -> Result<ReconciliationProcessorInput, serde_json::Error> {
+    Ok(ReconciliationProcessorInput {
+        artifact_id: artifact_id.to_string(),
+        source_type: crate::storage::SourceType::from_str(source_type)
+            .expect("validated source_type during payload parsing"),
+        summary: SummaryOutput {
+            title: extraction_result.summary_title.clone(),
+            body_text: extraction_result.summary_body_text.clone(),
+            evidence_segment_ids: extraction_result.summary_evidence_segment_ids.clone(),
+        },
+        memories: extraction_result
+            .memories
+            .iter()
+            .map(|memory| MemoryOutput {
+                title: memory.title.clone(),
+                body_text: memory.body_text.clone(),
+                memory_type: memory.memory_type.clone(),
+                memory_scope: memory.memory_scope,
+                memory_scope_value: memory.memory_scope_value.clone(),
+                evidence_segment_ids: memory.evidence_segment_ids.clone(),
+            })
+            .collect(),
+        relationships: extraction_result
+            .relationships
+            .iter()
+            .map(|relationship| RelationshipOutput {
+                relationship_type: relationship.relationship_type.clone(),
+                subject_key: relationship.subject_key.clone(),
+                object_key: relationship.object_key.clone(),
+                title: relationship.title.clone(),
+                body_text: relationship.body_text.clone(),
+                confidence_label: relationship.confidence_label.clone(),
+                evidence_segment_ids: relationship.evidence_segment_ids.clone(),
+            })
+            .collect(),
+        retrieval_results_json: serde_json::to_string_pretty(retrieval_result_set)?,
+    })
 }
 
 fn build_reconciliation_decisions(
     claimed_job: &ClaimedJob,
     extraction_result: &ArtifactExtractionResult,
     retrieval_result_set: &RetrievalResultSet,
+    outputs: Vec<crate::processor::ReconciliationDecisionOutput>,
 ) -> Vec<ReconciliationDecision> {
-    let mut decisions = Vec::new();
-    for memory in &extraction_result.memories {
-        let mut decision_kind = ReconciliationDecisionKind::CreateNew;
-        let mut matched_object_id = None;
-        let memory_text = memory
-            .title
-            .clone()
-            .unwrap_or_else(|| memory.body_text.clone())
-            .to_ascii_lowercase();
-        if let Some(item) = retrieval_result_set.results.iter().find(|item| {
-            item.item_type == "memory"
-                && item
-                    .title
-                    .as_deref()
-                    .map(|title| title.eq_ignore_ascii_case(memory.title.as_deref().unwrap_or("")))
-                    .unwrap_or(false)
-        }) {
-            decision_kind = ReconciliationDecisionKind::StrengthenExisting;
-            matched_object_id = Some(item.object_id.clone());
-        } else if let Some(item) = retrieval_result_set.results.iter().find(|item| {
-            item.item_type == "memory"
-                && item
-                    .body_text
-                    .as_deref()
-                    .map(|body| {
-                        let lowered = body.to_ascii_lowercase();
-                        lowered.contains(&memory_text) || memory_text.contains(&lowered)
-                    })
-                    .unwrap_or(false)
-        }) {
-            decision_kind = ReconciliationDecisionKind::AttachToExisting;
-            matched_object_id = Some(item.object_id.clone());
+    outputs
+        .into_iter()
+        .map(|output| ReconciliationDecision {
+            reconciliation_decision_id: new_id("reconcile"),
+            artifact_id: extraction_result.artifact_id.clone(),
+            job_id: claimed_job.job_id.clone(),
+            extraction_result_id: extraction_result.extraction_result_id.clone(),
+            retrieval_result_set_id: retrieval_result_set.retrieval_result_set_id.clone(),
+            pipeline_name: "artifact_reconciliation".to_string(),
+            pipeline_version: "v1".to_string(),
+            decision_kind: output.decision_kind,
+            target_kind: output.target_kind,
+            target_key: output.target_key,
+            matched_object_id: output.matched_object_id,
+            rationale: output.rationale,
+            evidence_segment_ids: output.evidence_segment_ids,
+            status: "completed".to_string(),
+            error_message: None,
+        })
+        .collect()
+}
+
+fn memory_target_key(memory: &ExtractedMemory) -> String {
+    memory
+        .title
+        .clone()
+        .unwrap_or_else(|| memory.body_text.chars().take(64).collect())
+}
+
+fn memory_target_key_from_output(memory: &MemoryOutput) -> String {
+    memory
+        .title
+        .clone()
+        .unwrap_or_else(|| memory.body_text.chars().take(64).collect())
+}
+
+fn relationship_target_key(relationship: &CandidateRelationship) -> String {
+    format!(
+        "{}:{}:{}",
+        relationship.relationship_type, relationship.subject_key, relationship.object_key
+    )
+}
+
+fn relationship_target_key_from_output(relationship: &RelationshipOutput) -> String {
+    format!(
+        "{}:{}:{}",
+        relationship.relationship_type, relationship.subject_key, relationship.object_key
+    )
+}
+
+fn extend_unique(target: &mut Vec<String>, values: &[String]) {
+    for value in values {
+        if !target.contains(value) {
+            target.push(value.clone());
         }
-
-        decisions.push(ReconciliationDecision {
-            reconciliation_decision_id: new_id("reconcile"),
-            artifact_id: extraction_result.artifact_id.clone(),
-            job_id: claimed_job.job_id.clone(),
-            extraction_result_id: extraction_result.extraction_result_id.clone(),
-            retrieval_result_set_id: retrieval_result_set.retrieval_result_set_id.clone(),
-            pipeline_name: "artifact_reconciliation".to_string(),
-            pipeline_version: "v1".to_string(),
-            decision_kind,
-            target_kind: "memory".to_string(),
-            target_key: memory
-                .title
-                .clone()
-                .unwrap_or_else(|| memory.body_text.chars().take(64).collect()),
-            matched_object_id,
-            rationale: "Deterministic reconciliation against archive retrieval candidates".to_string(),
-            evidence_segment_ids: memory.evidence_segment_ids.clone(),
-            status: "completed".to_string(),
-            error_message: None,
-        });
     }
-
-    if decisions.is_empty() {
-        decisions.push(ReconciliationDecision {
-            reconciliation_decision_id: new_id("reconcile"),
-            artifact_id: extraction_result.artifact_id.clone(),
-            job_id: claimed_job.job_id.clone(),
-            extraction_result_id: extraction_result.extraction_result_id.clone(),
-            retrieval_result_set_id: retrieval_result_set.retrieval_result_set_id.clone(),
-            pipeline_name: "artifact_reconciliation".to_string(),
-            pipeline_version: "v1".to_string(),
-            decision_kind: ReconciliationDecisionKind::InsufficientEvidence,
-            target_kind: "artifact".to_string(),
-            target_key: extraction_result.artifact_id.clone(),
-            matched_object_id: None,
-            rationale: "No durable memory candidates were available for reconciliation".to_string(),
-            evidence_segment_ids: extraction_result.summary_evidence_segment_ids.clone(),
-            status: "completed".to_string(),
-            error_message: None,
-        });
-    }
-
-    decisions
 }
 
 fn build_derivation_attempt(
@@ -723,10 +906,9 @@ fn build_derivation_attempt(
 
     let mut attached_existing = HashSet::new();
     for memory in &extraction_result.memories {
-        let decision = decisions.iter().find(|decision| {
-            decision.target_kind == "memory"
-                && decision.evidence_segment_ids == memory.evidence_segment_ids
-        });
+        let decision = decisions
+            .iter()
+            .find(|decision| decision.target_kind == "memory" && decision.target_key == memory_target_key(memory));
         if let Some(decision) = decision {
             if matches!(
                 decision.decision_kind,
@@ -750,7 +932,7 @@ fn build_derivation_attempt(
                 derived_object_id: derived_object_id.clone(),
                 artifact_id: artifact_id.to_string(),
                 derivation_run_id: derivation_run_id.clone(),
-                origin_kind: OriginKind::Deterministic,
+                origin_kind: OriginKind::Inferred,
                 object_status: ObjectStatus::Active,
                 confidence_score: None,
                 confidence_label: None,
@@ -768,6 +950,68 @@ fn build_derivation_attempt(
                 },
             },
             evidence_links: build_evidence_links(&derived_object_id, &memory.evidence_segment_ids),
+        });
+    }
+
+    for relationship in &extraction_result.relationships {
+        let decision = decisions.iter().find(|decision| {
+            decision.target_kind == "relationship"
+                && decision.target_key == relationship_target_key(relationship)
+        });
+        let Some(decision) = decision else {
+            continue;
+        };
+        if matches!(
+            decision.decision_kind,
+            ReconciliationDecisionKind::AttachToExisting
+                | ReconciliationDecisionKind::StrengthenExisting
+                | ReconciliationDecisionKind::InsufficientEvidence
+        ) {
+            if let Some(existing_id) = &decision.matched_object_id {
+                attached_existing.insert(existing_id.clone());
+            }
+            continue;
+        }
+
+        let derived_object_id = new_id("dobj");
+        let supersedes_derived_object_id = matches!(
+            decision.decision_kind,
+            ReconciliationDecisionKind::SupersedeExisting
+        )
+        .then(|| decision.matched_object_id.clone())
+        .flatten();
+        let contradicts_relationship_object_id = matches!(
+            decision.decision_kind,
+            ReconciliationDecisionKind::ContradictsExisting
+        )
+        .then(|| decision.matched_object_id.clone())
+        .flatten();
+        objects.push(WriteDerivedObject {
+            object: NewDerivedObject {
+                derived_object_id: derived_object_id.clone(),
+                artifact_id: artifact_id.to_string(),
+                derivation_run_id: derivation_run_id.clone(),
+                origin_kind: OriginKind::Inferred,
+                object_status: ObjectStatus::Active,
+                confidence_score: None,
+                confidence_label: Some(relationship.confidence_label.clone()),
+                scope_type: ScopeType::Artifact,
+                scope_id: artifact_id.to_string(),
+                supersedes_derived_object_id,
+                payload: DerivedObjectPayload::Relationship {
+                    title: relationship.title.clone(),
+                    body_text: relationship.body_text.clone(),
+                    object_json: RelationshipObjectJson {
+                        relationship_type: relationship.relationship_type.clone(),
+                        subject_key: relationship.subject_key.clone(),
+                        object_key: relationship.object_key.clone(),
+                        support_label: relationship.confidence_label.clone(),
+                        supersedes_relationship_object_id: None,
+                        contradicts_relationship_object_id,
+                    },
+                },
+            },
+            evidence_links: build_evidence_links(&derived_object_id, &relationship.evidence_segment_ids),
         });
     }
 
@@ -898,7 +1142,8 @@ fn new_id(prefix: &str) -> String {
         .unwrap_or_default()
         .as_nanos();
     let counter = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}-{nanos:x}-{counter:x}")
+    let entropy = random::<u64>();
+    format!("{prefix}-{nanos:x}-{counter:x}-{entropy:x}")
 }
 
 /// Start enrichment worker pool with shutdown capability.

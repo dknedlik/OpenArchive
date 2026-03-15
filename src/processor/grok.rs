@@ -8,10 +8,11 @@ use crate::storage::types::EnrichmentTier;
 
 use super::{
     ArtifactProcessor, ArtifactProcessorFactory, ConversationEnrichmentStrategy,
-    HostedArtifactProcessor, InferenceClient, InferenceResult, InferenceUsage,
-    OpenRouterResponsesContentItem, OpenRouterResponsesInputItem,
+    HostedArtifactProcessor, HostedReconciliationProcessor, InferenceClient, InferenceResult,
+    InferenceUsage, OpenRouterResponsesContentItem, OpenRouterResponsesInputItem,
     OpenRouterResponsesReasoningConfig, OpenRouterResponsesRequest, OpenRouterResponsesResponse,
-    OpenRouterResponsesTextConfig, ProcessorError, structured_output_schema_wrapper,
+    OpenRouterResponsesTextConfig, ProcessorError, RECONCILIATION_SYSTEM_PROMPT,
+    ReconciliationProcessor,
 };
 
 pub struct GrokProcessorFactory {
@@ -49,6 +50,21 @@ impl ArtifactProcessorFactory for GrokProcessorFactory {
             pipeline_name: "grok_enrichment",
             provider_name: "grok",
             strategy: ConversationEnrichmentStrategy::openai_default(),
+        }))
+    }
+
+    fn build_reconciliation_processor(
+        &self,
+        tier: EnrichmentTier,
+    ) -> Result<Box<dyn ReconciliationProcessor>, ProcessorError> {
+        let model = match tier {
+            EnrichmentTier::Standard => self.standard_model.clone(),
+            EnrichmentTier::Quality => self.quality_model.clone(),
+        };
+        Ok(Box::new(HostedReconciliationProcessor {
+            client: Arc::clone(&self.client),
+            model,
+            system_prompt: RECONCILIATION_SYSTEM_PROMPT,
         }))
     }
 }
@@ -89,6 +105,7 @@ impl InferenceClient for GrokClient {
         model: &str,
         system_prompt: &str,
         user_prompt: &str,
+        schema: &serde_json::Value,
     ) -> Result<InferenceResult, ProcessorError> {
         let request = self.client.post(format!("{}/responses", self.base_url));
         let body = OpenRouterResponsesRequest {
@@ -96,7 +113,7 @@ impl InferenceClient for GrokClient {
             max_output_tokens: self.max_output_tokens,
             reasoning: OpenRouterResponsesReasoningConfig { effort: None },
             text: OpenRouterResponsesTextConfig {
-                format: structured_output_schema_wrapper(),
+                format: schema.clone(),
             },
             input: vec![
                 OpenRouterResponsesInputItem {

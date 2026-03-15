@@ -22,4 +22,9 @@ pub trait EnrichmentStateStore: Send + Sync {
         &self,
         decisions: &[ReconciliationDecision],
     ) -> StorageResult<()>;
+
+    fn load_reconciliation_decisions(
+        &self,
+        extraction_result_id: &str,
+    ) -> StorageResult<Vec<ReconciliationDecision>>;
 }

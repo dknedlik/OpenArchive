@@ -80,25 +80,34 @@ impl ArchiveRetrievalStore for OracleImportWriteStore {
         let mut items = Vec::new();
         for intent in intents {
             let like_pattern = format!("%{}%", intent.query_text.to_ascii_lowercase());
+            let derived_type_filter = match intent.intent_type.as_str() {
+                "memory_match" => "AND d.derived_object_type = 'memory'",
+                "relationship_lookup" => "AND d.derived_object_type = 'relationship'",
+                "topic_lookup" => "AND d.derived_object_type IN ('classification', 'summary')",
+                "contradiction_check" => "AND d.derived_object_type IN ('memory', 'relationship')",
+                "entity_lookup" => "AND d.derived_object_type IN ('memory', 'relationship', 'classification', 'summary')",
+                _ => "",
+            };
+            let sql = format!(
+                "SELECT * FROM (
+                    SELECT d.derived_object_type,
+                           d.derived_object_id,
+                           d.artifact_id,
+                           d.title,
+                           d.body_text
+                      FROM oa_derived_object d
+                     WHERE d.artifact_id <> :1
+                       AND d.object_status = 'active'
+                       {derived_type_filter}
+                       AND (
+                            LOWER(NVL(d.title, '')) LIKE :2
+                            OR LOWER(NVL(d.body_text, '')) LIKE :2
+                            OR LOWER(NVL(d.object_json, '')) LIKE :2
+                       )
+                ) WHERE ROWNUM <= :3"
+            );
             let rows = conn
-                .query(
-                    "SELECT * FROM (
-                        SELECT d.derived_object_type,
-                               d.derived_object_id,
-                               d.artifact_id,
-                               d.title,
-                               d.body_text
-                          FROM oa_derived_object d
-                         WHERE d.artifact_id <> :1
-                           AND d.object_status = 'active'
-                           AND (
-                                LOWER(NVL(d.title, '')) LIKE :2
-                                OR LOWER(NVL(d.body_text, '')) LIKE :2
-                                OR LOWER(NVL(d.object_json, '')) LIKE :2
-                           )
-                    ) WHERE ROWNUM <= :3",
-                    &[&artifact_id, &like_pattern, &(limit_per_intent as i64)],
-                )
+                .query(&sql, &[&artifact_id, &like_pattern, &(limit_per_intent as i64)])
                 .map_err(|source| StorageError::ListArtifacts { source })?;
             for row_result in rows {
                 let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
@@ -591,6 +600,36 @@ impl EnrichmentStateStore for OracleDerivedMetadataStore {
             source,
         })?;
         Ok(())
+    }
+
+    fn load_reconciliation_decisions(
+        &self,
+        extraction_result_id: &str,
+    ) -> StorageResult<Vec<ReconciliationDecision>> {
+        let conn = db::connect(&self.config)?;
+        let rows = conn
+            .query(
+                "SELECT decision_json
+                 FROM oa_reconciliation_decision
+                 WHERE extraction_result_id = :1
+                 ORDER BY reconciliation_decision_id",
+                &[&extraction_result_id],
+            )
+            .map_err(|source| StorageError::ListArtifacts { source })?;
+        let mut decisions = Vec::new();
+        for row_result in rows {
+            let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
+            let decision_json = row.get::<_, String>(0).map_err(|source| StorageError::ListArtifacts { source })?;
+            let decision = serde_json::from_str::<ReconciliationDecision>(&decision_json).map_err(|err| {
+                StorageError::InvalidDerivationWrite {
+                    detail: format!(
+                        "failed to deserialize reconciliation decision for extraction result {extraction_result_id}: {err}"
+                    ),
+                }
+            })?;
+            decisions.push(decision);
+        }
+        Ok(decisions)
     }
 }
 

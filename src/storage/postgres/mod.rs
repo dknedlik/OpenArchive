@@ -223,35 +223,45 @@ impl ArchiveRetrievalStore for PostgresImportWriteStore {
         let mut items = Vec::new();
         for intent in intents {
             let like_pattern = format!("%{}%", intent.query_text.to_ascii_lowercase());
+            let derived_type_filter = match intent.intent_type.as_str() {
+                "memory_match" => "AND d.derived_object_type = 'memory'",
+                "relationship_lookup" => "AND d.derived_object_type = 'relationship'",
+                "topic_lookup" => "AND d.derived_object_type IN ('classification', 'summary')",
+                "contradiction_check" => "AND d.derived_object_type IN ('memory', 'relationship')",
+                "entity_lookup" => "AND d.derived_object_type IN ('memory', 'relationship', 'classification', 'summary')",
+                _ => "",
+            };
+            let sql = format!(
+                "SELECT d.derived_object_type,
+                        d.derived_object_id,
+                        d.artifact_id,
+                        d.title,
+                        d.body_text,
+                        COALESCE(array_agg(e.segment_id ORDER BY e.evidence_rank)
+                            FILTER (WHERE e.segment_id IS NOT NULL), ARRAY[]::text[]) AS segment_ids
+                 FROM oa_derived_object d
+                 LEFT JOIN oa_evidence_link e ON e.derived_object_id = d.derived_object_id
+                 WHERE d.artifact_id <> $1
+                   AND d.object_status = 'active'
+                   {derived_type_filter}
+                   AND (
+                        lower(COALESCE(d.title, '')) LIKE $2
+                        OR lower(COALESCE(d.body_text, '')) LIKE $2
+                        OR lower(COALESCE(d.object_json::text, '')) LIKE $2
+                   )
+                 GROUP BY d.derived_object_type, d.derived_object_id, d.artifact_id, d.title, d.body_text
+                 ORDER BY
+                   CASE
+                     WHEN lower(COALESCE(d.title, '')) LIKE $2 THEN 4
+                     WHEN lower(COALESCE(d.body_text, '')) LIKE $2 THEN 3
+                     WHEN lower(COALESCE(d.object_json::text, '')) LIKE $2 THEN 2
+                     ELSE 1
+                   END DESC,
+                   d.derived_object_id
+                 LIMIT $3"
+            );
             let rows = client
-                .query(
-                    "SELECT d.derived_object_type,
-                            d.derived_object_id,
-                            d.artifact_id,
-                            d.title,
-                            d.body_text,
-                            COALESCE(array_agg(e.segment_id ORDER BY e.evidence_rank)
-                                FILTER (WHERE e.segment_id IS NOT NULL), ARRAY[]::text[]) AS segment_ids
-                     FROM oa_derived_object d
-                     LEFT JOIN oa_evidence_link e ON e.derived_object_id = d.derived_object_id
-                     WHERE d.artifact_id <> $1
-                       AND d.object_status = 'active'
-                       AND (
-                            lower(COALESCE(d.title, '')) LIKE $2
-                            OR lower(COALESCE(d.body_text, '')) LIKE $2
-                            OR lower(COALESCE(d.object_json::text, '')) LIKE $2
-                       )
-                     GROUP BY d.derived_object_type, d.derived_object_id, d.artifact_id, d.title, d.body_text
-                     ORDER BY
-                       CASE
-                         WHEN lower(COALESCE(d.title, '')) LIKE $2 THEN 3
-                         WHEN lower(COALESCE(d.body_text, '')) LIKE $2 THEN 2
-                         ELSE 1
-                       END DESC,
-                       d.derived_object_id
-                     LIMIT $3",
-                    &[&artifact_id, &like_pattern, &(limit_per_intent as i64)],
-                )
+                .query(&sql, &[&artifact_id, &like_pattern, &(limit_per_intent as i64)])
                 .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
                     connection_string: self.config.connection_string.clone(),
                     source,
@@ -432,6 +442,36 @@ impl EnrichmentStateStore for PostgresDerivedMetadataStore {
                 }))?;
         }
         Ok(())
+    }
+
+    fn load_reconciliation_decisions(
+        &self,
+        extraction_result_id: &str,
+    ) -> StorageResult<Vec<ReconciliationDecision>> {
+        let mut client = postgres_db::connect(&self.config)?;
+        let rows = client
+            .query(
+                "SELECT decision_json::text
+                 FROM oa_reconciliation_decision
+                 WHERE extraction_result_id = $1
+                 ORDER BY reconciliation_decision_id",
+                &[&extraction_result_id],
+            )
+            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                connection_string: self.config.connection_string.clone(),
+                source,
+            }))?;
+        rows.into_iter()
+            .map(|row| {
+                serde_json::from_str::<ReconciliationDecision>(&row.get::<_, String>(0)).map_err(|err| {
+                    crate::error::StorageError::InvalidDerivationWrite {
+                        detail: format!(
+                            "failed to deserialize reconciliation decision for extraction result {extraction_result_id}: {err}"
+                        ),
+                    }
+                })
+            })
+            .collect()
     }
 }
 

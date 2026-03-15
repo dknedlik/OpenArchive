@@ -9,8 +9,8 @@ use crate::storage::types::EnrichmentTier;
 
 use super::{
     ArtifactProcessor, ArtifactProcessorFactory, ConversationEnrichmentStrategy,
-    HostedArtifactProcessor, InferenceClient, InferenceResult, InferenceUsage, ProcessorError,
-    structured_output_schema,
+    HostedArtifactProcessor, HostedReconciliationProcessor, InferenceClient, InferenceResult,
+    InferenceUsage, ProcessorError, RECONCILIATION_SYSTEM_PROMPT, ReconciliationProcessor,
 };
 
 pub struct AnthropicProcessorFactory {
@@ -48,6 +48,21 @@ impl ArtifactProcessorFactory for AnthropicProcessorFactory {
             pipeline_name: "anthropic_enrichment",
             provider_name: "anthropic",
             strategy: ConversationEnrichmentStrategy::openai_default(),
+        }))
+    }
+
+    fn build_reconciliation_processor(
+        &self,
+        tier: EnrichmentTier,
+    ) -> Result<Box<dyn ReconciliationProcessor>, ProcessorError> {
+        let model = match tier {
+            EnrichmentTier::Standard => self.standard_model.clone(),
+            EnrichmentTier::Quality => self.quality_model.clone(),
+        };
+        Ok(Box::new(HostedReconciliationProcessor {
+            client: Arc::clone(&self.client),
+            model,
+            system_prompt: RECONCILIATION_SYSTEM_PROMPT,
         }))
     }
 }
@@ -92,6 +107,7 @@ impl InferenceClient for AnthropicClient {
         model: &str,
         system_prompt: &str,
         user_prompt: &str,
+        schema: &serde_json::Value,
     ) -> Result<InferenceResult, ProcessorError> {
         let endpoint = format!("{}/messages", self.base_url);
         let body = AnthropicMessagesRequest {
@@ -105,7 +121,7 @@ impl InferenceClient for AnthropicClient {
             tools: vec![AnthropicToolDefinition {
                 name: "record_enrichment",
                 description: "Return the OpenArchive enrichment result as structured JSON.",
-                input_schema: structured_output_schema(),
+                input_schema: schema.clone(),
             }],
             tool_choice: AnthropicToolChoice {
                 choice_type: "tool",
