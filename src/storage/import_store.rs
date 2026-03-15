@@ -10,11 +10,7 @@ use crate::storage::StorageTx;
 pub trait ImportPayloadStore {
     type Tx: StorageTx;
 
-    fn insert_payload(
-        &self,
-        tx: &mut Self::Tx,
-        payload: &NewImportObjectRef,
-    ) -> StorageResult<()>;
+    fn insert_payload(&self, tx: &mut Self::Tx, payload: &NewImportObjectRef) -> StorageResult<()>;
 }
 
 /// Manages the lifecycle of one import request.

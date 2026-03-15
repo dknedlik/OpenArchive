@@ -91,10 +91,7 @@ pub fn insert_derived_object(conn: &Connection, object: &NewDerivedObject) -> St
     Ok(())
 }
 
-pub fn supersede_active_derived_objects(
-    conn: &Connection,
-    artifact_id: &str,
-) -> StorageResult<()> {
+pub fn supersede_active_derived_objects(conn: &Connection, artifact_id: &str) -> StorageResult<()> {
     conn.execute(
         "UPDATE oa_derived_object \
          SET object_status = 'superseded' \

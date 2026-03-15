@@ -3,7 +3,7 @@ use std::thread;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
 use crate::config::GeminiConfig;
@@ -12,9 +12,10 @@ use crate::storage::types::EnrichmentTier;
 use super::{
     build_conversation_user_prompt, should_shape_conversation_input, structured_output_schema,
     ArtifactBatchProcessor, ArtifactProcessor, ArtifactProcessorFactory, ArtifactProcessorInput,
-    ArtifactProcessorOutput, ConversationEnrichmentStrategy, GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
-    HostedArtifactProcessor, HostedReconciliationProcessor, InferenceClient, InferenceResult,
-    InferenceUsage, ProcessorError, RECONCILIATION_SYSTEM_PROMPT, ReconciliationProcessor,
+    ArtifactProcessorOutput, ConversationEnrichmentStrategy, HostedArtifactProcessor,
+    HostedReconciliationProcessor, InferenceClient, InferenceResult, InferenceUsage,
+    ProcessorError, ReconciliationProcessor, GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+    RECONCILIATION_SYSTEM_PROMPT,
 };
 
 pub struct GeminiProcessorFactory {
@@ -35,7 +36,9 @@ impl GeminiProcessorFactory {
         Ok(Self {
             client: Arc::new(client),
             batch_client: if config.batch_enabled {
-                Some(Arc::new(GeminiBatchClient::new(&config).map_err(|err| err.to_string())?))
+                Some(Arc::new(
+                    GeminiBatchClient::new(&config).map_err(|err| err.to_string())?,
+                ))
             } else {
                 None
             },
@@ -147,13 +150,21 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
             }
         }
 
-        let job = match self.client.submit_inline_batch(&self.model, Some("openarchive-enrichment"), &requests) {
+        let job = match self.client.submit_inline_batch(
+            &self.model,
+            Some("openarchive-enrichment"),
+            &requests,
+        ) {
             Ok(job) => job,
             Err(err) => {
                 let message = err.to_string();
                 return inputs
                     .iter()
-                    .map(|_| Err(ProcessorError::Message { message: message.clone() }))
+                    .map(|_| {
+                        Err(ProcessorError::Message {
+                            message: message.clone(),
+                        })
+                    })
                     .collect();
             }
         };
@@ -164,7 +175,11 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
                 let message = err.to_string();
                 return inputs
                     .iter()
-                    .map(|_| Err(ProcessorError::Message { message: message.clone() }))
+                    .map(|_| {
+                        Err(ProcessorError::Message {
+                            message: message.clone(),
+                        })
+                    })
                     .collect();
             }
         };
@@ -173,10 +188,12 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
             Ok(results) => results
                 .into_iter()
                 .map(|result| {
-                    let parsed: super::ModelArtifactOutput = serde_json::from_str(&result.output_text)
-                        .map_err(|source| ProcessorError::ParseModelJson {
-                            source,
-                            body_preview: super::preview(&result.output_text),
+                    let parsed: super::ModelArtifactOutput =
+                        serde_json::from_str(&result.output_text).map_err(|source| {
+                            ProcessorError::ParseModelJson {
+                                source,
+                                body_preview: super::preview(&result.output_text),
+                            }
                         })?;
                     let input = inputs
                         .iter()
@@ -199,7 +216,11 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
                 let message = err.to_string();
                 inputs
                     .iter()
-                    .map(|_| Err(ProcessorError::Message { message: message.clone() }))
+                    .map(|_| {
+                        Err(ProcessorError::Message {
+                            message: message.clone(),
+                        })
+                    })
                     .collect()
             }
         }
@@ -267,8 +288,8 @@ impl GeminiClient {
                 max_output_tokens: self.max_output_tokens,
             },
         };
-        let request_body =
-            serde_json::to_vec(&body).map_err(|source| ProcessorError::SerializePrompt { source })?;
+        let request_body = serde_json::to_vec(&body)
+            .map_err(|source| ProcessorError::SerializePrompt { source })?;
 
         let response = self
             .client
@@ -297,15 +318,17 @@ impl GeminiClient {
                 }
             })?;
 
-        let output_text = parsed.flatten_text().ok_or_else(|| ProcessorError::Message {
-            message: format!(
-                "Gemini generateContent returned empty content{}",
-                parsed
-                    .primary_finish_reason()
-                    .map(|reason| format!(" (finish_reason={reason})"))
-                    .unwrap_or_default()
-            ),
-        })?;
+        let output_text = parsed
+            .flatten_text()
+            .ok_or_else(|| ProcessorError::Message {
+                message: format!(
+                    "Gemini generateContent returned empty content{}",
+                    parsed
+                        .primary_finish_reason()
+                        .map(|reason| format!(" (finish_reason={reason})"))
+                        .unwrap_or_default()
+                ),
+            })?;
 
         Ok(InferenceResult {
             output_text,
@@ -438,8 +461,8 @@ impl GeminiBatchClient {
                 },
             },
         };
-        let request_body =
-            serde_json::to_vec(&body).map_err(|source| ProcessorError::SerializePrompt { source })?;
+        let request_body = serde_json::to_vec(&body)
+            .map_err(|source| ProcessorError::SerializePrompt { source })?;
 
         let response = self
             .client
@@ -461,9 +484,11 @@ impl GeminiBatchClient {
         }
 
         let operation: GeminiBatchOperation =
-            serde_json::from_str(&response_text).map_err(|source| ProcessorError::ParseInferenceResponse {
-                source,
-                body_preview: super::preview(&response_text),
+            serde_json::from_str(&response_text).map_err(|source| {
+                ProcessorError::ParseInferenceResponse {
+                    source,
+                    body_preview: super::preview(&response_text),
+                }
             })?;
         Ok(operation.into_batch_job())
     }
@@ -495,9 +520,11 @@ impl GeminiBatchClient {
         }
 
         let operation: GeminiBatchOperation =
-            serde_json::from_str(&response_text).map_err(|source| ProcessorError::ParseInferenceResponse {
-                source,
-                body_preview: super::preview(&response_text),
+            serde_json::from_str(&response_text).map_err(|source| {
+                ProcessorError::ParseInferenceResponse {
+                    source,
+                    body_preview: super::preview(&response_text),
+                }
             })?;
         Ok(operation.into_batch_job())
     }
@@ -719,16 +746,27 @@ impl GeminiBatchJob {
                 let key = entry
                     .key
                     .clone()
-                    .or_else(|| entry.metadata.as_ref().and_then(|metadata| metadata.key.clone()))
+                    .or_else(|| {
+                        entry
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.key.clone())
+                    })
                     .ok_or_else(|| ProcessorError::Message {
                         message: "Gemini batch response missing request key".to_string(),
                     })?;
-                let response = entry.response.as_ref().ok_or_else(|| ProcessorError::Message {
-                    message: format!("Gemini batch response {key} missing output"),
-                })?;
-                let output_text = response.flatten_text().ok_or_else(|| ProcessorError::Message {
-                    message: format!("Gemini batch response {key} returned empty content"),
-                })?;
+                let response = entry
+                    .response
+                    .as_ref()
+                    .ok_or_else(|| ProcessorError::Message {
+                        message: format!("Gemini batch response {key} missing output"),
+                    })?;
+                let output_text =
+                    response
+                        .flatten_text()
+                        .ok_or_else(|| ProcessorError::Message {
+                            message: format!("Gemini batch response {key} returned empty content"),
+                        })?;
                 Ok(GeminiBatchResult {
                     key,
                     output_text,
@@ -800,13 +838,31 @@ impl GeminiBatchOperation {
     fn into_batch_job(self) -> GeminiBatchJob {
         GeminiBatchJob {
             name: self.name,
-            state: self.metadata.as_ref().and_then(|metadata| metadata.state.clone()),
-            display_name: self.metadata.as_ref().and_then(|metadata| metadata.display_name.clone()),
-            model: self.metadata.as_ref().and_then(|metadata| metadata.model.clone()),
-            create_time: self.metadata.as_ref().and_then(|metadata| metadata.create_time.clone()),
-            update_time: self.metadata.as_ref().and_then(|metadata| metadata.update_time.clone()),
+            state: self
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.state.clone()),
+            display_name: self
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.display_name.clone()),
+            model: self
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.model.clone()),
+            create_time: self
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.create_time.clone()),
+            update_time: self
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.update_time.clone()),
             dest: self.response.map(|response| GeminiBatchDestination {
-                inlined_responses: response.dest.and_then(|dest| dest.inlined_responses).or(response.inlined_responses),
+                inlined_responses: response
+                    .dest
+                    .and_then(|dest| dest.inlined_responses)
+                    .or(response.inlined_responses),
             }),
         }
     }

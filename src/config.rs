@@ -62,7 +62,9 @@ impl PostgresConfig {
     pub fn from_env() -> ConfigResult<Self> {
         let connection_string = env::var("OA_POSTGRES_URL")
             .or_else(|_| env::var("DATABASE_URL"))
-            .map_err(|_| ConfigError::MissingEnv { key: "OA_POSTGRES_URL" })?;
+            .map_err(|_| ConfigError::MissingEnv {
+                key: "OA_POSTGRES_URL",
+            })?;
 
         Ok(Self { connection_string })
     }
@@ -79,7 +81,9 @@ impl ObjectStoreConfig {
         let provider = env::var("OA_OBJECT_STORE").unwrap_or_else(|_| "local_fs".to_string());
         match provider.as_str() {
             "local_fs" => Ok(Self::LocalFs(LocalFsObjectStoreConfig::from_env()?)),
-            "s3" => Ok(Self::S3Compatible(S3CompatibleObjectStoreConfig::from_env()?)),
+            "s3" => Ok(Self::S3Compatible(
+                S3CompatibleObjectStoreConfig::from_env()?
+            )),
             _ => Err(ConfigError::InvalidEnumEnv {
                 key: "OA_OBJECT_STORE",
                 value: provider,
@@ -332,7 +336,6 @@ impl GrokConfig {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OracleConfig {
     pub connect_string: String,
@@ -354,12 +357,16 @@ pub struct ConnectionPoolConfig {
 
 impl OracleConfig {
     pub fn from_env() -> ConfigResult<Self> {
-        let connect_string = env::var("OA_ORACLE_CONNECT_STRING")
-            .map_err(|_| ConfigError::MissingEnv { key: "OA_ORACLE_CONNECT_STRING" })?;
-        let username = env::var("OA_ORACLE_USERNAME")
-            .map_err(|_| ConfigError::MissingEnv { key: "OA_ORACLE_USERNAME" })?;
-        let password = env::var("OA_ORACLE_PASSWORD")
-            .map_err(|_| ConfigError::MissingEnv { key: "OA_ORACLE_PASSWORD" })?;
+        let connect_string =
+            env::var("OA_ORACLE_CONNECT_STRING").map_err(|_| ConfigError::MissingEnv {
+                key: "OA_ORACLE_CONNECT_STRING",
+            })?;
+        let username = env::var("OA_ORACLE_USERNAME").map_err(|_| ConfigError::MissingEnv {
+            key: "OA_ORACLE_USERNAME",
+        })?;
+        let password = env::var("OA_ORACLE_PASSWORD").map_err(|_| ConfigError::MissingEnv {
+            key: "OA_ORACLE_PASSWORD",
+        })?;
 
         Ok(Self {
             connect_string,
@@ -421,12 +428,12 @@ impl HttpConfig {
 fn positive_u32_env(key: &'static str) -> ConfigResult<Option<u32>> {
     match env::var(key) {
         Ok(raw) => {
-            let value =
-                raw.parse::<u32>()
-                    .map_err(|_| ConfigError::InvalidPositiveIntegerEnv {
-                        key,
-                        value: raw.clone(),
-                    })?;
+            let value = raw
+                .parse::<u32>()
+                .map_err(|_| ConfigError::InvalidPositiveIntegerEnv {
+                    key,
+                    value: raw.clone(),
+                })?;
             if value == 0 {
                 return Err(ConfigError::InvalidPositiveIntegerEnv { key, value: raw });
             }
@@ -450,12 +457,12 @@ fn optional_trimmed_env(key: &'static str) -> Option<String> {
 fn optional_duration_env_ms(key: &'static str) -> ConfigResult<Option<Duration>> {
     match env::var(key) {
         Ok(raw) => {
-            let value =
-                raw.parse::<u64>()
-                    .map_err(|_| ConfigError::InvalidPositiveIntegerEnv {
-                        key,
-                        value: raw.clone(),
-                    })?;
+            let value = raw
+                .parse::<u64>()
+                .map_err(|_| ConfigError::InvalidPositiveIntegerEnv {
+                    key,
+                    value: raw.clone(),
+                })?;
             if value == 0 {
                 return Err(ConfigError::InvalidPositiveIntegerEnv { key, value: raw });
             }
@@ -566,7 +573,10 @@ mod tests {
     fn app_config_defaults_to_postgres_and_stubbed_future_providers() {
         let _guard = env_lock();
         clear_test_env();
-        std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
 
         let config = AppConfig::from_env().expect("app config should load");
 
@@ -574,10 +584,7 @@ mod tests {
             config.relational_store,
             RelationalStoreConfig::Postgres(_)
         ));
-        assert!(matches!(
-            config.object_store,
-            ObjectStoreConfig::LocalFs(_)
-        ));
+        assert!(matches!(config.object_store, ObjectStoreConfig::LocalFs(_)));
         assert_eq!(config.inference, InferenceConfig::Stub);
     }
 
@@ -586,7 +593,10 @@ mod tests {
         let _guard = env_lock();
         clear_test_env();
         std::env::set_var("OA_RELATIONAL_STORE", "postgres");
-        std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
 
         let config = AppConfig::from_env().expect("postgres provider should load");
         assert!(matches!(
@@ -624,7 +634,10 @@ mod tests {
         let _guard = env_lock();
         clear_test_env();
         std::env::set_var("OA_RELATIONAL_STORE", "sqlite");
-        std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
 
         let error = AppConfig::from_env().expect_err("provider should be rejected");
         assert!(matches!(
@@ -640,7 +653,10 @@ mod tests {
     fn s3_object_store_provider_loads_when_configured() {
         let _guard = env_lock();
         clear_test_env();
-        std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
         std::env::set_var("OA_OBJECT_STORE", "s3");
         std::env::set_var("OA_S3_ENDPOINT", "http://localhost:9000");
         std::env::set_var("OA_S3_REGION", "us-east-1");
@@ -665,7 +681,10 @@ mod tests {
     fn openai_inference_provider_loads_when_configured() {
         let _guard = env_lock();
         clear_test_env();
-        std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
         std::env::set_var("OA_INFERENCE_PROVIDER", "openai");
         std::env::set_var("OA_OPENAI_API_KEY", "test-key");
         std::env::set_var("OA_OPENAI_REASONING_EFFORT", "low");
@@ -688,7 +707,10 @@ mod tests {
     fn gemini_inference_provider_loads_when_configured() {
         let _guard = env_lock();
         clear_test_env();
-        std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
         std::env::set_var("OA_INFERENCE_PROVIDER", "gemini");
         std::env::set_var("OA_GEMINI_API_KEY", "test-key");
         std::env::set_var("OA_GEMINI_STANDARD_MODEL", "gemini-2.5-flash-lite");
@@ -712,7 +734,10 @@ mod tests {
     fn anthropic_inference_provider_loads_when_configured() {
         let _guard = env_lock();
         clear_test_env();
-        std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
         std::env::set_var("OA_INFERENCE_PROVIDER", "anthropic");
         std::env::set_var("OA_ANTHROPIC_API_KEY", "test-key");
         std::env::set_var("OA_ANTHROPIC_STANDARD_MODEL", "claude-sonnet-4-20250514");
@@ -733,7 +758,10 @@ mod tests {
     fn grok_inference_provider_loads_when_configured() {
         let _guard = env_lock();
         clear_test_env();
-        std::env::set_var("OA_POSTGRES_URL", "postgres://test:test@localhost/open_archive");
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
         std::env::set_var("OA_INFERENCE_PROVIDER", "grok");
         std::env::set_var("OA_GROK_API_KEY", "test-key");
         std::env::set_var("OA_GROK_STANDARD_MODEL", "grok-4-fast-reasoning");

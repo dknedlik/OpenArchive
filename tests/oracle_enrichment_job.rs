@@ -44,11 +44,15 @@ impl ProviderHarness for OracleHarness {
     }
 
     fn import_store(&self) -> Box<dyn ImportWriteStore> {
-        Box::new(open_archive::storage::OracleImportWriteStore::new(self.0.clone()))
+        Box::new(open_archive::storage::OracleImportWriteStore::new(
+            self.0.clone(),
+        ))
     }
 
     fn job_store(&self) -> Box<dyn EnrichmentJobLifecycleStore> {
-        Box::new(open_archive::storage::OracleEnrichmentJobStore::new(self.0.clone()))
+        Box::new(open_archive::storage::OracleEnrichmentJobStore::new(
+            self.0.clone(),
+        ))
     }
 
     fn seed_existing_artifact(&self, _import_set: &open_archive::storage::WriteImportSet) {

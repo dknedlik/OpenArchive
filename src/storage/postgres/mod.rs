@@ -7,12 +7,12 @@ pub mod segment;
 use crate::config::PostgresConfig;
 use crate::error::StorageResult;
 use crate::postgres_db;
+use crate::storage::archive_retrieval_store::ArchiveRetrievalStore;
 use crate::storage::derivation_store::{
     DerivationWriteResult, DerivedMetadataWriteStore, WriteDerivationAttempt,
 };
 use crate::storage::enrichment_state_store::EnrichmentStateStore;
 use crate::storage::job_store::EnrichmentJobLifecycleStore;
-use crate::storage::archive_retrieval_store::ArchiveRetrievalStore;
 use crate::storage::types::{
     ArtifactExtractionResult, ClaimedJob, ReconciliationDecision, RetrievalIntent,
     RetrievalResultSet, RetrievedContextItem, RetryOutcome,
@@ -28,12 +28,12 @@ pub struct PostgresStorageTx {
 
 impl StorageTx for PostgresStorageTx {
     fn commit(&mut self) -> StorageResult<()> {
-        self.client
-            .batch_execute("COMMIT")
-            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+        self.client.batch_execute("COMMIT").map_err(|source| {
+            crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
                 connection_string: "transaction".to_string(),
                 source,
-            }))
+            })
+        })
     }
 }
 
@@ -65,17 +65,18 @@ impl ArtifactReadStore for PostgresImportWriteStore {
 impl ImportWriteStore for PostgresImportWriteStore {
     fn write_import(&self, mut import_set: WriteImportSet) -> StorageResult<ImportWriteResult> {
         let mut client = postgres_db::connect(&self.config)?;
-        client
-            .batch_execute("BEGIN")
-            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+        client.batch_execute("BEGIN").map_err(|source| {
+            crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
                 connection_string: self.config.connection_string.clone(),
                 source,
-            }))?;
+            })
+        })?;
         let mut tx = PostgresStorageTx { client };
 
-        if let Some(existing_object_id) =
-            import::find_payload_object_id_by_sha256(&mut tx.client, &import_set.payload_object.sha256)?
-        {
+        if let Some(existing_object_id) = import::find_payload_object_id_by_sha256(
+            &mut tx.client,
+            &import_set.payload_object.sha256,
+        )? {
             import_set.import.payload_object_id = existing_object_id;
         } else {
             import::insert_payload_object(&mut tx.client, &import_set.payload_object)?;
@@ -96,12 +97,14 @@ impl ImportWriteStore for PostgresImportWriteStore {
         for artifact_set in import_set.artifact_sets {
             let artifact_id = artifact_set.artifact.artifact_id.clone();
 
-            if let Some((existing_artifact_id, enrichment_status)) = artifact::find_artifact_by_source_hash(
-                &mut tx.client,
-                artifact_set.artifact.source_type,
-                &artifact_set.artifact.content_hash_version,
-                &artifact_set.artifact.source_conversation_hash,
-            )? {
+            if let Some((existing_artifact_id, enrichment_status)) =
+                artifact::find_artifact_by_source_hash(
+                    &mut tx.client,
+                    artifact_set.artifact.source_type,
+                    &artifact_set.artifact.content_hash_version,
+                    &artifact_set.artifact.source_conversation_hash,
+                )?
+            {
                 artifacts.push(ImportedArtifact {
                     artifact_id: existing_artifact_id,
                     enrichment_status,
@@ -110,12 +113,12 @@ impl ImportWriteStore for PostgresImportWriteStore {
                 continue;
             }
 
-            tx.client
-                .batch_execute("BEGIN")
-                .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+            tx.client.batch_execute("BEGIN").map_err(|source| {
+                crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
                     connection_string: self.config.connection_string.clone(),
                     source,
-                }))?;
+                })
+            })?;
 
             let phase2_result: StorageResult<usize> = (|| {
                 artifact::insert_artifact(&mut tx.client, &artifact_set.artifact)?;
@@ -146,12 +149,12 @@ impl ImportWriteStore for PostgresImportWriteStore {
                     count_imported += 1;
                 }
                 Err(e) => {
-                    tx.client
-                        .batch_execute("ROLLBACK")
-                        .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                    tx.client.batch_execute("ROLLBACK").map_err(|source| {
+                        crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
                             connection_string: self.config.connection_string.clone(),
                             source,
-                        }))?;
+                        })
+                    })?;
                     failed_artifact_ids.push(artifact_id.clone());
                     count_failed += 1;
                     artifact_errors.push(format!("artifact {}: {e:#}", artifact_id));
@@ -172,12 +175,12 @@ impl ImportWriteStore for PostgresImportWriteStore {
             Some(artifact_errors.join(" | "))
         };
 
-        tx.client
-            .batch_execute("BEGIN")
-            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+        tx.client.batch_execute("BEGIN").map_err(|source| {
+            crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
                 connection_string: self.config.connection_string.clone(),
                 source,
-            }))?;
+            })
+        })?;
         import::finalize_import(
             &mut tx.client,
             &import_id,
@@ -261,25 +264,37 @@ impl ArchiveRetrievalStore for PostgresImportWriteStore {
                  LIMIT $3"
             );
             let rows = client
-                .query(&sql, &[&artifact_id, &like_pattern, &(limit_per_intent as i64)])
-                .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
-                    connection_string: self.config.connection_string.clone(),
-                    source,
-                }))?;
+                .query(
+                    &sql,
+                    &[&artifact_id, &like_pattern, &(limit_per_intent as i64)],
+                )
+                .map_err(|source| {
+                    crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                        connection_string: self.config.connection_string.clone(),
+                        source,
+                    })
+                })?;
             for row in rows {
                 let matched_title = row.get::<_, Option<String>>(3);
                 let matched_body = row.get::<_, Option<String>>(4);
                 let mut matched_fields = Vec::new();
                 if matched_title
                     .as_deref()
-                    .map(|title| title.to_ascii_lowercase().contains(&intent.query_text.to_ascii_lowercase()))
+                    .map(|title| {
+                        title
+                            .to_ascii_lowercase()
+                            .contains(&intent.query_text.to_ascii_lowercase())
+                    })
                     .unwrap_or(false)
                 {
                     matched_fields.push("title".to_string());
                 }
                 if matched_body
                     .as_deref()
-                    .map(|body| body.to_ascii_lowercase().contains(&intent.query_text.to_ascii_lowercase()))
+                    .map(|body| {
+                        body.to_ascii_lowercase()
+                            .contains(&intent.query_text.to_ascii_lowercase())
+                    })
                     .unwrap_or(false)
                 {
                     matched_fields.push("body_text".to_string());
@@ -341,14 +356,18 @@ impl EnrichmentStateStore for PostgresDerivedMetadataStore {
                  WHERE extraction_result_id = $1",
                 &[&extraction_result_id],
             )
-            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
-                connection_string: self.config.connection_string.clone(),
-                source,
-            }))?;
+            .map_err(|source| {
+                crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                    connection_string: self.config.connection_string.clone(),
+                    source,
+                })
+            })?;
         row.map(|row| serde_json::from_str::<ArtifactExtractionResult>(&row.get::<_, String>(0)))
             .transpose()
             .map_err(|err| crate::error::StorageError::InvalidDerivationWrite {
-                detail: format!("failed to deserialize extraction result {extraction_result_id}: {err}"),
+                detail: format!(
+                    "failed to deserialize extraction result {extraction_result_id}: {err}"
+                ),
             })
     }
 
@@ -392,14 +411,18 @@ impl EnrichmentStateStore for PostgresDerivedMetadataStore {
                  WHERE retrieval_result_set_id = $1",
                 &[&retrieval_result_set_id],
             )
-            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
-                connection_string: self.config.connection_string.clone(),
-                source,
-            }))?;
+            .map_err(|source| {
+                crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                    connection_string: self.config.connection_string.clone(),
+                    source,
+                })
+            })?;
         row.map(|row| serde_json::from_str::<RetrievalResultSet>(&row.get::<_, String>(0)))
             .transpose()
             .map_err(|err| crate::error::StorageError::InvalidDerivationWrite {
-                detail: format!("failed to deserialize retrieval result set {retrieval_result_set_id}: {err}"),
+                detail: format!(
+                    "failed to deserialize retrieval result set {retrieval_result_set_id}: {err}"
+                ),
             })
     }
 
@@ -457,10 +480,12 @@ impl EnrichmentStateStore for PostgresDerivedMetadataStore {
                  ORDER BY reconciliation_decision_id",
                 &[&extraction_result_id],
             )
-            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
-                connection_string: self.config.connection_string.clone(),
-                source,
-            }))?;
+            .map_err(|source| {
+                crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                    connection_string: self.config.connection_string.clone(),
+                    source,
+                })
+            })?;
         rows.into_iter()
             .map(|row| {
                 serde_json::from_str::<ReconciliationDecision>(&row.get::<_, String>(0)).map_err(|err| {
@@ -484,21 +509,21 @@ impl PostgresEnrichmentJobStore {
 impl EnrichmentJobLifecycleStore for PostgresEnrichmentJobStore {
     fn enqueue_jobs(&self, jobs: &[crate::storage::types::NewEnrichmentJob]) -> StorageResult<()> {
         let mut client = postgres_db::connect(&self.config)?;
-        client
-            .batch_execute("BEGIN")
-            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+        client.batch_execute("BEGIN").map_err(|source| {
+            crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
                 connection_string: self.config.connection_string.clone(),
                 source,
-            }))?;
+            })
+        })?;
         for job in jobs {
             job::insert_job(&mut client, job)?;
         }
-        client
-            .batch_execute("COMMIT")
-            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+        client.batch_execute("COMMIT").map_err(|source| {
+            crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
                 connection_string: self.config.connection_string.clone(),
                 source,
-            }))?;
+            })
+        })?;
         Ok(())
     }
 
@@ -525,7 +550,13 @@ impl EnrichmentJobLifecycleStore for PostgresEnrichmentJobStore {
         retry_after_seconds: i64,
     ) -> StorageResult<RetryOutcome> {
         let mut client = postgres_db::connect(&self.config)?;
-        job::mark_job_retryable(&mut client, worker_id, job_id, error_message, retry_after_seconds)
+        job::mark_job_retryable(
+            &mut client,
+            worker_id,
+            job_id,
+            error_message,
+            retry_after_seconds,
+        )
     }
 }
 
@@ -535,12 +566,12 @@ impl DerivedMetadataWriteStore for PostgresDerivedMetadataStore {
         attempt: WriteDerivationAttempt,
     ) -> StorageResult<DerivationWriteResult> {
         let mut client = postgres_db::connect(&self.config)?;
-        client
-            .batch_execute("BEGIN")
-            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+        client.batch_execute("BEGIN").map_err(|source| {
+            crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
                 connection_string: self.config.connection_string.clone(),
                 source,
-            }))?;
+            })
+        })?;
 
         let result = (|| {
             derivation::validate_derivation_attempt(
@@ -588,21 +619,21 @@ impl DerivedMetadataWriteStore for PostgresDerivedMetadataStore {
 
         match result {
             Ok(result) => {
-                client
-                    .batch_execute("COMMIT")
-                    .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                client.batch_execute("COMMIT").map_err(|source| {
+                    crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
                         connection_string: self.config.connection_string.clone(),
                         source,
-                    }))?;
+                    })
+                })?;
                 Ok(result)
             }
             Err(error) => {
-                client
-                    .batch_execute("ROLLBACK")
-                    .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                client.batch_execute("ROLLBACK").map_err(|source| {
+                    crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
                         connection_string: self.config.connection_string.clone(),
                         source,
-                    }))?;
+                    })
+                })?;
                 Err(error)
             }
         }

@@ -69,26 +69,63 @@ impl DerivedMetadataHarness for OracleHarness {
                     payload_object_id: fixture.write_set.import.payload_object_id.clone(),
                     source_filename: fixture.write_set.import.source_filename.clone(),
                     source_content_hash: fixture.write_set.import.source_content_hash.clone(),
-                    conversation_count_detected: fixture.write_set.import.conversation_count_detected,
+                    conversation_count_detected: fixture
+                        .write_set
+                        .import
+                        .conversation_count_detected,
                 },
                 artifact_sets: vec![open_archive::storage::WriteArtifactSet {
                     artifact: open_archive::storage::NewArtifact {
-                        artifact_id: fixture.write_set.artifact_sets[0].artifact.artifact_id.clone(),
-                        import_id: fixture.write_set.artifact_sets[0].artifact.import_id.clone(),
+                        artifact_id: fixture.write_set.artifact_sets[0]
+                            .artifact
+                            .artifact_id
+                            .clone(),
+                        import_id: fixture.write_set.artifact_sets[0]
+                            .artifact
+                            .import_id
+                            .clone(),
                         artifact_class: fixture.write_set.artifact_sets[0].artifact.artifact_class,
                         source_type: fixture.write_set.artifact_sets[0].artifact.source_type,
-                        artifact_status: fixture.write_set.artifact_sets[0].artifact.artifact_status,
-                        enrichment_status: fixture.write_set.artifact_sets[0].artifact.enrichment_status,
-                        source_conversation_key: fixture.write_set.artifact_sets[0].artifact.source_conversation_key.clone(),
-                        source_conversation_hash: fixture.write_set.artifact_sets[0].artifact.source_conversation_hash.clone(),
+                        artifact_status: fixture.write_set.artifact_sets[0]
+                            .artifact
+                            .artifact_status,
+                        enrichment_status: fixture.write_set.artifact_sets[0]
+                            .artifact
+                            .enrichment_status,
+                        source_conversation_key: fixture.write_set.artifact_sets[0]
+                            .artifact
+                            .source_conversation_key
+                            .clone(),
+                        source_conversation_hash: fixture.write_set.artifact_sets[0]
+                            .artifact
+                            .source_conversation_hash
+                            .clone(),
                         title: fixture.write_set.artifact_sets[0].artifact.title.clone(),
-                        created_at_source: fixture.write_set.artifact_sets[0].artifact.created_at_source.clone(),
-                        started_at: fixture.write_set.artifact_sets[0].artifact.started_at.clone(),
+                        created_at_source: fixture.write_set.artifact_sets[0]
+                            .artifact
+                            .created_at_source
+                            .clone(),
+                        started_at: fixture.write_set.artifact_sets[0]
+                            .artifact
+                            .started_at
+                            .clone(),
                         ended_at: fixture.write_set.artifact_sets[0].artifact.ended_at.clone(),
-                        primary_language: fixture.write_set.artifact_sets[0].artifact.primary_language.clone(),
-                        content_hash_version: fixture.write_set.artifact_sets[0].artifact.content_hash_version.clone(),
-                        content_facets_json: fixture.write_set.artifact_sets[0].artifact.content_facets_json.clone(),
-                        normalization_version: fixture.write_set.artifact_sets[0].artifact.normalization_version.clone(),
+                        primary_language: fixture.write_set.artifact_sets[0]
+                            .artifact
+                            .primary_language
+                            .clone(),
+                        content_hash_version: fixture.write_set.artifact_sets[0]
+                            .artifact
+                            .content_hash_version
+                            .clone(),
+                        content_facets_json: fixture.write_set.artifact_sets[0]
+                            .artifact
+                            .content_facets_json
+                            .clone(),
+                        normalization_version: fixture.write_set.artifact_sets[0]
+                            .artifact
+                            .normalization_version
+                            .clone(),
                     },
                     participants: fixture.write_set.artifact_sets[0]
                         .participants
@@ -154,7 +191,11 @@ impl DerivedMetadataHarness for OracleHarness {
                 &[&derivation_run_id],
             )
             .expect("select derivation run");
-        DerivationRunRecord { artifact_id: row.0, run_type: row.1, run_status: row.2 }
+        DerivationRunRecord {
+            artifact_id: row.0,
+            run_type: row.1,
+            run_status: row.2,
+        }
     }
 
     fn count_derived_objects_for_run(&self, derivation_run_id: &str) -> i64 {
@@ -162,10 +203,16 @@ impl DerivedMetadataHarness for OracleHarness {
         conn.query_row_as::<(i64,)>(
             "SELECT COUNT(*) FROM oa_derived_object WHERE derivation_run_id = :1",
             &[&derivation_run_id],
-        ).expect("derived count").0
+        )
+        .expect("derived count")
+        .0
     }
 
-    fn count_derived_objects_for_run_with_status(&self, derivation_run_id: &str, status: &str) -> i64 {
+    fn count_derived_objects_for_run_with_status(
+        &self,
+        derivation_run_id: &str,
+        status: &str,
+    ) -> i64 {
         let conn = open_archive::db::connect(&self.0).expect("connect");
         conn.query_row_as::<(i64,)>(
             "SELECT COUNT(*) FROM oa_derived_object WHERE derivation_run_id = :1 AND object_status = :2",
@@ -175,19 +222,26 @@ impl DerivedMetadataHarness for OracleHarness {
 
     fn count_evidence_links_for_objects(&self, derived_object_ids: &[String]) -> i64 {
         let conn = open_archive::db::connect(&self.0).expect("connect");
-        let [a, b, c] = derived_object_ids else { panic!("expected 3 object ids") };
+        let [a, b, c] = derived_object_ids else {
+            panic!("expected 3 object ids")
+        };
         conn.query_row_as::<(i64,)>(
             "SELECT COUNT(*) FROM oa_evidence_link WHERE derived_object_id IN (:1, :2, :3)",
             &[a, b, c],
-        ).expect("evidence count").0
+        )
+        .expect("evidence count")
+        .0
     }
 
     fn fetch_object_json(&self, derived_object_id: &str) -> Value {
         let conn = open_archive::db::connect(&self.0).expect("connect");
-        let payload: String = conn.query_row_as::<(String,)>(
-            "SELECT object_json FROM oa_derived_object WHERE derived_object_id = :1",
-            &[&derived_object_id],
-        ).expect("object payload").0;
+        let payload: String = conn
+            .query_row_as::<(String,)>(
+                "SELECT object_json FROM oa_derived_object WHERE derived_object_id = :1",
+                &[&derived_object_id],
+            )
+            .expect("object payload")
+            .0;
         serde_json::from_str(&payload).expect("json payload")
     }
 
@@ -196,7 +250,9 @@ impl DerivedMetadataHarness for OracleHarness {
         conn.query_row_as::<(i64,)>(
             "SELECT COUNT(*) FROM oa_derivation_run WHERE derivation_run_id = :1",
             &[&derivation_run_id],
-        ).expect("run count").0
+        )
+        .expect("run count")
+        .0
     }
 
     fn count_derived_object_by_id(&self, derived_object_id: &str) -> i64 {
@@ -204,7 +260,9 @@ impl DerivedMetadataHarness for OracleHarness {
         conn.query_row_as::<(i64,)>(
             "SELECT COUNT(*) FROM oa_derived_object WHERE derived_object_id = :1",
             &[&derived_object_id],
-        ).expect("object count").0
+        )
+        .expect("object count")
+        .0
     }
 
     fn count_evidence_links_for_object(&self, derived_object_id: &str) -> i64 {
@@ -212,15 +270,23 @@ impl DerivedMetadataHarness for OracleHarness {
         conn.query_row_as::<(i64,)>(
             "SELECT COUNT(*) FROM oa_evidence_link WHERE derived_object_id = :1",
             &[&derived_object_id],
-        ).expect("evidence count").0
+        )
+        .expect("evidence count")
+        .0
     }
 
-    fn count_derived_objects_for_artifact_with_status(&self, artifact_id: &str, status: &str) -> i64 {
+    fn count_derived_objects_for_artifact_with_status(
+        &self,
+        artifact_id: &str,
+        status: &str,
+    ) -> i64 {
         let conn = open_archive::db::connect(&self.0).expect("connect");
         conn.query_row_as::<(i64,)>(
             "SELECT COUNT(*) FROM oa_derived_object WHERE artifact_id = :1 AND object_status = :2",
             &[&artifact_id, &status],
-        ).expect("artifact derived count with status").0
+        )
+        .expect("artifact derived count with status")
+        .0
     }
 }
 

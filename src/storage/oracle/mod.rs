@@ -12,11 +12,11 @@ use crate::storage::derivation_store::{
     DerivationWriteResult, DerivedMetadataWriteStore, WriteDerivationAttempt,
 };
 use crate::storage::enrichment_state_store::EnrichmentStateStore;
+use crate::storage::types::ImportStatus;
 use crate::storage::types::{
     ArtifactExtractionResult, ReconciliationDecision, RetrievalIntent, RetrievalResultSet,
     RetrievedContextItem,
 };
-use crate::storage::types::ImportStatus;
 use crate::storage::{
     ArtifactIngestResult, ArtifactReadStore, ImportWriteResult, ImportWriteStore, ImportedArtifact,
     StorageTx, WriteImportSet,
@@ -107,7 +107,10 @@ impl ArchiveRetrievalStore for OracleImportWriteStore {
                 ) WHERE ROWNUM <= :3"
             );
             let rows = conn
-                .query(&sql, &[&artifact_id, &like_pattern, &(limit_per_intent as i64)])
+                .query(
+                    &sql,
+                    &[&artifact_id, &like_pattern, &(limit_per_intent as i64)],
+                )
                 .map_err(|source| StorageError::ListArtifacts { source })?;
             for row_result in rows {
                 let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
@@ -468,7 +471,9 @@ impl EnrichmentStateStore for OracleDerivedMetadataStore {
         serde_json::from_str(&row)
             .map(Some)
             .map_err(|err| StorageError::InvalidDerivationWrite {
-                detail: format!("failed to deserialize extraction result {extraction_result_id}: {err}"),
+                detail: format!(
+                    "failed to deserialize extraction result {extraction_result_id}: {err}"
+                ),
             })
     }
 
@@ -535,7 +540,9 @@ impl EnrichmentStateStore for OracleDerivedMetadataStore {
         serde_json::from_str(&row)
             .map(Some)
             .map_err(|err| StorageError::InvalidDerivationWrite {
-                detail: format!("failed to deserialize retrieval result set {retrieval_result_set_id}: {err}"),
+                detail: format!(
+                    "failed to deserialize retrieval result set {retrieval_result_set_id}: {err}"
+                ),
             })
     }
 
@@ -619,7 +626,9 @@ impl EnrichmentStateStore for OracleDerivedMetadataStore {
         let mut decisions = Vec::new();
         for row_result in rows {
             let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
-            let decision_json = row.get::<_, String>(0).map_err(|source| StorageError::ListArtifacts { source })?;
+            let decision_json = row
+                .get::<_, String>(0)
+                .map_err(|source| StorageError::ListArtifacts { source })?;
             let decision = serde_json::from_str::<ReconciliationDecision>(&decision_json).map_err(|err| {
                 StorageError::InvalidDerivationWrite {
                     detail: format!(

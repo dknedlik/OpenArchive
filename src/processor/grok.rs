@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use reqwest::blocking::Client;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 
 use crate::config::GrokConfig;
 use crate::storage::types::EnrichmentTier;
@@ -11,8 +11,8 @@ use super::{
     HostedArtifactProcessor, HostedReconciliationProcessor, InferenceClient, InferenceResult,
     InferenceUsage, OpenRouterResponsesContentItem, OpenRouterResponsesInputItem,
     OpenRouterResponsesReasoningConfig, OpenRouterResponsesRequest, OpenRouterResponsesResponse,
-    OpenRouterResponsesTextConfig, ProcessorError, RECONCILIATION_SYSTEM_PROMPT,
-    ReconciliationProcessor,
+    OpenRouterResponsesTextConfig, ProcessorError, ReconciliationProcessor,
+    RECONCILIATION_SYSTEM_PROMPT,
 };
 
 pub struct GrokProcessorFactory {
@@ -80,10 +80,9 @@ impl GrokClient {
         let mut default_headers = HeaderMap::new();
         default_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         let bearer = format!("Bearer {}", config.api_key);
-        let auth_value =
-            HeaderValue::from_str(&bearer).map_err(|err| ProcessorError::Message {
-                message: format!("invalid Grok API key header: {err}"),
-            })?;
+        let auth_value = HeaderValue::from_str(&bearer).map_err(|err| ProcessorError::Message {
+            message: format!("invalid Grok API key header: {err}"),
+        })?;
         default_headers.insert(AUTHORIZATION, auth_value);
 
         let client = Client::builder()
@@ -152,12 +151,13 @@ impl InferenceClient for GrokClient {
             });
         }
 
-        let parsed: OpenRouterResponsesResponse = serde_json::from_str(&response_text).map_err(
-            |source| ProcessorError::ParseInferenceResponse {
-                source,
-                body_preview: super::preview(&response_text),
-            },
-        )?;
+        let parsed: OpenRouterResponsesResponse =
+            serde_json::from_str(&response_text).map_err(|source| {
+                ProcessorError::ParseInferenceResponse {
+                    source,
+                    body_preview: super::preview(&response_text),
+                }
+            })?;
 
         let usage = parsed
             .usage

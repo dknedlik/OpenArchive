@@ -80,9 +80,8 @@ struct ModelPricing {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let config = OpenAiConfig::from_env().context(
-        "failed to load OpenAI config from env; set OA_OPENAI_API_KEY and related vars",
-    )?;
+    let config = OpenAiConfig::from_env()
+        .context("failed to load OpenAI config from env; set OA_OPENAI_API_KEY and related vars")?;
     let case_names = if args.cases.is_empty() {
         discover_case_names()?
     } else {
@@ -107,14 +106,15 @@ fn main() -> Result<()> {
         let average = total_score as f32 / results.len() as f32;
         let passed = results.iter().filter(|result| result.passed).count();
         let total_elapsed: Duration = results.iter().map(|result| result.elapsed).sum();
-        let average_elapsed = Duration::from_secs_f64(
-            total_elapsed.as_secs_f64() / results.len() as f64,
-        );
+        let average_elapsed =
+            Duration::from_secs_f64(total_elapsed.as_secs_f64() / results.len() as f64);
         let total_cost_micros: u64 = results
             .iter()
             .filter_map(|result| result.reported_cost_micros)
             .sum();
-        let has_cost = results.iter().any(|result| result.reported_cost_micros.is_some());
+        let has_cost = results
+            .iter()
+            .any(|result| result.reported_cost_micros.is_some());
 
         println!("Model: {model}");
         if let Some(pricing) = pricing_for_model(&model) {
@@ -246,8 +246,9 @@ fn build_processor_input(fixture: &EvalFixture) -> Result<ArtifactProcessorInput
         .iter()
         .enumerate()
         .map(|(index, segment)| {
-            let role = ParticipantRole::from_str(&segment.participant_role)
-                .ok_or_else(|| anyhow!("unsupported participant_role {}", segment.participant_role))?;
+            let role = ParticipantRole::from_str(&segment.participant_role).ok_or_else(|| {
+                anyhow!("unsupported participant_role {}", segment.participant_role)
+            })?;
             Ok(LoadedSegment {
                 segment_id: segment.segment_id.clone(),
                 participant_id: participants_by_role.get(&segment.participant_role).cloned(),
@@ -338,7 +339,10 @@ fn score_case(
     }
 
     for classification in &output.classifications {
-        if !matches!(classification.classification_type.as_str(), "topic" | "intent") {
+        if !matches!(
+            classification.classification_type.as_str(),
+            "topic" | "intent"
+        ) {
             score -= 10;
             notes.push(format!(
                 "invalid classification type {}",
@@ -391,7 +395,13 @@ fn score_case(
             ));
         }
 
-        if !seen_memory_titles.insert(memory.title.clone().unwrap_or_default().to_ascii_lowercase()) {
+        if !seen_memory_titles.insert(
+            memory
+                .title
+                .clone()
+                .unwrap_or_default()
+                .to_ascii_lowercase(),
+        ) {
             score -= 5;
             notes.push("duplicate memory title".to_string());
         }
@@ -610,7 +620,8 @@ fn load_fixture(case_name: &str) -> Result<EvalFixture> {
     let path = fixture_dir().join(format!("{case_name}.fixture.json"));
     let raw = fs::read_to_string(&path)
         .with_context(|| format!("failed to read fixture {}", path.display()))?;
-    serde_json::from_str(&raw).with_context(|| format!("failed to parse fixture {}", path.display()))
+    serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse fixture {}", path.display()))
 }
 
 fn fixture_dir() -> PathBuf {

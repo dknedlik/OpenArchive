@@ -1,7 +1,5 @@
 use crate::error::StorageResult;
-use crate::storage::types::{
-    ArtifactExtractionResult, ReconciliationDecision, RetrievalResultSet,
-};
+use crate::storage::types::{ArtifactExtractionResult, ReconciliationDecision, RetrievalResultSet};
 
 pub trait EnrichmentStateStore: Send + Sync {
     fn save_extraction_result(&self, result: &ArtifactExtractionResult) -> StorageResult<()>;

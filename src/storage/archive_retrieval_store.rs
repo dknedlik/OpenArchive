@@ -1,5 +1,5 @@
 use crate::error::StorageResult;
-use crate::storage::types::{RetrievedContextItem, RetrievalIntent};
+use crate::storage::types::{RetrievalIntent, RetrievedContextItem};
 
 pub trait ArchiveRetrievalStore: Send + Sync {
     fn retrieve_for_intents(

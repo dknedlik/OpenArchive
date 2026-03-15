@@ -135,7 +135,6 @@ pub enum ConfigError {
 
     #[error("invalid inference configuration: {message}")]
     InvalidInferenceConfig { message: String },
-
 }
 
 #[derive(Debug, Error)]

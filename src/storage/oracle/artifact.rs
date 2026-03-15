@@ -180,12 +180,11 @@ pub fn load_artifact_for_enrichment(
     let Some((artifact_id_value, import_id, source_type_str, title)) = artifact_row else {
         return Ok(None);
     };
-    let source_type = SourceType::from_str(&source_type_str).ok_or_else(|| {
-        StorageError::InvalidSourceType {
+    let source_type =
+        SourceType::from_str(&source_type_str).ok_or_else(|| StorageError::InvalidSourceType {
             artifact_id: artifact_id_value.clone(),
             value: source_type_str,
-        }
-    })?;
+        })?;
     let artifact = LoadedArtifactRecord {
         artifact_id: artifact_id_value,
         import_id,
@@ -205,8 +204,12 @@ pub fn load_artifact_for_enrichment(
     let mut participants = Vec::new();
     for row_result in participant_rows {
         let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
-        let participant_id: String = row.get(0).map_err(|source| StorageError::ListArtifacts { source })?;
-        let role: String = row.get(1).map_err(|source| StorageError::ListArtifacts { source })?;
+        let participant_id: String = row
+            .get(0)
+            .map_err(|source| StorageError::ListArtifacts { source })?;
+        let role: String = row
+            .get(1)
+            .map_err(|source| StorageError::ListArtifacts { source })?;
         participants.push(LoadedParticipant {
             participant_id: participant_id.clone(),
             participant_role: ParticipantRole::from_str(&role).ok_or_else(|| {
@@ -215,8 +218,12 @@ pub fn load_artifact_for_enrichment(
                     value: role,
                 }
             })?,
-            display_name: row.get(2).map_err(|source| StorageError::ListArtifacts { source })?,
-            external_id: row.get(3).map_err(|source| StorageError::ListArtifacts { source })?,
+            display_name: row
+                .get(2)
+                .map_err(|source| StorageError::ListArtifacts { source })?,
+            external_id: row
+                .get(3)
+                .map_err(|source| StorageError::ListArtifacts { source })?,
         });
     }
 
@@ -234,38 +241,51 @@ pub fn load_artifact_for_enrichment(
     let mut segments = Vec::new();
     for row_result in segment_rows {
         let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
-        let segment_id: String = row.get(0).map_err(|source| StorageError::ListArtifacts { source })?;
-        let participant_id: Option<String> =
-            row.get(1).map_err(|source| StorageError::ListArtifacts { source })?;
-        let participant_role_raw: Option<String> =
-            row.get(2).map_err(|source| StorageError::ListArtifacts { source })?;
+        let segment_id: String = row
+            .get(0)
+            .map_err(|source| StorageError::ListArtifacts { source })?;
+        let participant_id: Option<String> = row
+            .get(1)
+            .map_err(|source| StorageError::ListArtifacts { source })?;
+        let participant_role_raw: Option<String> = row
+            .get(2)
+            .map_err(|source| StorageError::ListArtifacts { source })?;
         let participant_role = participant_role_raw
             .map(|value| {
-                ParticipantRole::from_str(&value).ok_or_else(|| StorageError::InvalidParticipantRole {
-                    participant_id: participant_id.clone().unwrap_or_else(|| "unknown".to_string()),
-                    value,
+                ParticipantRole::from_str(&value).ok_or_else(|| {
+                    StorageError::InvalidParticipantRole {
+                        participant_id: participant_id
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        value,
+                    }
                 })
             })
             .transpose()?;
-        let visibility_status_raw: String =
-            row.get(6).map_err(|source| StorageError::ListArtifacts { source })?;
+        let visibility_status_raw: String = row
+            .get(6)
+            .map_err(|source| StorageError::ListArtifacts { source })?;
 
         segments.push(LoadedSegment {
             segment_id: segment_id.clone(),
             participant_id,
             participant_role,
-            sequence_no: row.get(3).map_err(|source| StorageError::ListArtifacts { source })?,
-            text_content: row.get(4).map_err(|source| StorageError::ListArtifacts { source })?,
+            sequence_no: row
+                .get(3)
+                .map_err(|source| StorageError::ListArtifacts { source })?,
+            text_content: row
+                .get(4)
+                .map_err(|source| StorageError::ListArtifacts { source })?,
             created_at_source: row
                 .get::<_, Option<chrono::DateTime<chrono::Utc>>>(5)
                 .map_err(|source| StorageError::ListArtifacts { source })?
                 .map(SourceTimestamp::from),
-            visibility_status: VisibilityStatus::from_str(&visibility_status_raw).ok_or_else(|| {
-                StorageError::InvalidVisibilityStatus {
+            visibility_status: VisibilityStatus::from_str(&visibility_status_raw).ok_or_else(
+                || StorageError::InvalidVisibilityStatus {
                     segment_id,
                     value: visibility_status_raw,
-                }
-            })?,
+                },
+            )?,
         });
     }
 

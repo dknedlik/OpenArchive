@@ -476,9 +476,10 @@ mod tests {
 
         // Verify job payload matches ArtifactPreprocessPayload v1 contract
         for artifact_set in &import_set.artifact_sets {
-            let payload =
-                crate::storage::ArtifactPreprocessPayload::from_json(&artifact_set.job.payload_json)
-                    .expect("payload must deserialize to ArtifactPreprocessPayload");
+            let payload = crate::storage::ArtifactPreprocessPayload::from_json(
+                &artifact_set.job.payload_json,
+            )
+            .expect("payload must deserialize to ArtifactPreprocessPayload");
             assert_eq!(payload.schema_version, "1");
             assert_eq!(
                 payload.source_type,

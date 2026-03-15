@@ -7,8 +7,8 @@ pub fn insert_job(client: &mut postgres::Client, j: &NewEnrichmentJob) -> Storag
     let job_type = j.job_type.as_str();
     let enrichment_tier = j.enrichment_tier.as_str();
     let job_status = j.job_status.as_str();
-    let required_capabilities =
-        serde_json::to_string(&j.required_capabilities).expect("required capabilities serializable");
+    let required_capabilities = serde_json::to_string(&j.required_capabilities)
+        .expect("required capabilities serializable");
     client
         .execute(
             "INSERT INTO oa_enrichment_job \
@@ -32,10 +32,11 @@ pub fn insert_job(client: &mut postgres::Client, j: &NewEnrichmentJob) -> Storag
     Ok(())
 }
 
-pub fn claim_next_job(client: &mut postgres::Client, worker_id: &str) -> StorageResult<Option<ClaimedJob>> {
-    client
-        .batch_execute("BEGIN")
-        .map_err(map_pg_storage_err)?;
+pub fn claim_next_job(
+    client: &mut postgres::Client,
+    worker_id: &str,
+) -> StorageResult<Option<ClaimedJob>> {
+    client.batch_execute("BEGIN").map_err(map_pg_storage_err)?;
 
     let row = client
         .query_opt(
@@ -112,7 +113,11 @@ pub fn claim_next_job(client: &mut postgres::Client, worker_id: &str) -> Storage
     }))
 }
 
-pub fn complete_job(client: &mut postgres::Client, worker_id: &str, job_id: &str) -> StorageResult<()> {
+pub fn complete_job(
+    client: &mut postgres::Client,
+    worker_id: &str,
+    job_id: &str,
+) -> StorageResult<()> {
     update_terminal_job(
         client,
         worker_id,
@@ -158,7 +163,9 @@ pub fn mark_job_retryable(
         )
         .map_err(map_pg_storage_err)?;
     let Some(row) = row else {
-        client.batch_execute("ROLLBACK").map_err(map_pg_storage_err)?;
+        client
+            .batch_execute("ROLLBACK")
+            .map_err(map_pg_storage_err)?;
         return Err(crate::error::StorageError::JobNotClaimed {
             job_id: job_id.to_string(),
             worker_id: worker_id.to_string(),
@@ -177,7 +184,12 @@ pub fn mark_job_retryable(
                      claimed_by = NULL, \
                      claimed_at = NULL \
                  WHERE job_id = $3 AND claimed_by = $4",
-                &[&JobStatus::Failed.as_str(), &error_message, &job_id, &worker_id],
+                &[
+                    &JobStatus::Failed.as_str(),
+                    &error_message,
+                    &job_id,
+                    &worker_id,
+                ],
             )
             .map_err(map_pg_storage_err)?;
 
@@ -230,7 +242,9 @@ fn update_terminal_job(
         )
         .map_err(map_pg_storage_err)?;
     if rows_updated == 0 {
-        client.batch_execute("ROLLBACK").map_err(map_pg_storage_err)?;
+        client
+            .batch_execute("ROLLBACK")
+            .map_err(map_pg_storage_err)?;
         return Err(crate::error::StorageError::JobNotClaimed {
             job_id: job_id.to_string(),
             worker_id: worker_id.to_string(),

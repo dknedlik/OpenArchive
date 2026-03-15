@@ -20,8 +20,8 @@
 //!
 //! Granular trait methods never call `commit()` themselves.
 
-pub mod artifact_store;
 pub mod archive_retrieval_store;
+pub mod artifact_store;
 pub mod derivation_store;
 pub mod enrichment_state_store;
 pub mod import_store;
@@ -32,8 +32,8 @@ pub mod segment_store;
 pub mod types;
 
 pub use crate::domain::{ParticipantRole, SourceTimestamp, VisibilityStatus};
-pub use artifact_store::{ArtifactReadStore, ArtifactStore};
 pub use archive_retrieval_store::ArchiveRetrievalStore;
+pub use artifact_store::{ArtifactReadStore, ArtifactStore};
 pub use derivation_store::{
     DerivationStore, DerivationWriteResult, DerivedMetadataWriteStore, WriteDerivationAttempt,
     WriteDerivedObject,
@@ -47,13 +47,12 @@ pub use postgres::{
 };
 pub use segment_store::SegmentStore;
 pub use types::{
-    ArtifactClass, ArtifactIngestResult, ArtifactListItem, ArtifactPreprocessPayload,
-    ArtifactStatus, ClaimedJob, ClassificationObjectJson,
-    ArtifactExtractPayload, ArtifactExtractionResult, ArtifactReconcilePayload,
-    ArtifactRetrieveContextPayload, CandidateEntity, CandidateRelationship,
-    ConversationWindowRef, DerivationRunStatus,
-    DerivationRunType, DerivedObjectPayload, DerivedObjectType, EnrichmentStatus, EvidenceRole,
-    EnrichmentTier, ExtractedClassification, ExtractedMemory, ImportStatus, InputScopeType,
+    ArtifactClass, ArtifactExtractPayload, ArtifactExtractionResult, ArtifactIngestResult,
+    ArtifactListItem, ArtifactPreprocessPayload, ArtifactReconcilePayload,
+    ArtifactRetrieveContextPayload, ArtifactStatus, CandidateEntity, CandidateRelationship,
+    ClaimedJob, ClassificationObjectJson, ConversationWindowRef, DerivationRunStatus,
+    DerivationRunType, DerivedObjectPayload, DerivedObjectType, EnrichmentStatus, EnrichmentTier,
+    EvidenceRole, ExtractedClassification, ExtractedMemory, ImportStatus, InputScopeType,
     JobStatus, JobType, LoadedArtifactForEnrichment, LoadedArtifactRecord, LoadedParticipant,
     LoadedSegment, MemoryObjectJson, NewArtifact, NewDerivationRun, NewDerivedObject,
     NewEnrichmentJob, NewEvidenceLink, NewImport, NewImportObjectRef, NewParticipant, NewSegment,

@@ -2,15 +2,15 @@
 
 use open_archive::object_store::StoredObject;
 use open_archive::storage::{
-    ArtifactClass, ArtifactIngestResult, ArtifactStatus, ArtifactEnrichmentPayload,
-    ClassificationObjectJson, DerivedMetadataWriteStore, DerivedObjectPayload, DerivationRunStatus,
-    DerivationRunType,
-    EnrichmentJobLifecycleStore, EnrichmentStatus, ImportStatus, ImportWriteStore, JobStatus,
-    JobType, MemoryObjectJson, NewArtifact, NewDerivationRun, NewDerivedObject, NewEnrichmentJob,
-    NewEvidenceLink, NewImport, NewImportObjectRef, NewParticipant, NewSegment, ObjectStatus,
-    OriginKind, ParticipantRole, PayloadFormat, RetryOutcome, ScopeType, SegmentType, SourceType,
-    SummaryObjectJson, SupportStrength, VisibilityStatus, WriteArtifactSet, WriteDerivationAttempt,
-    WriteDerivedObject, WriteImportSet, EvidenceRole, InputScopeType,
+    ArtifactClass, ArtifactEnrichmentPayload, ArtifactIngestResult, ArtifactStatus,
+    ClassificationObjectJson, DerivationRunStatus, DerivationRunType, DerivedMetadataWriteStore,
+    DerivedObjectPayload, EnrichmentJobLifecycleStore, EnrichmentStatus, EvidenceRole,
+    ImportStatus, ImportWriteStore, InputScopeType, JobStatus, JobType, MemoryObjectJson,
+    NewArtifact, NewDerivationRun, NewDerivedObject, NewEnrichmentJob, NewEvidenceLink, NewImport,
+    NewImportObjectRef, NewParticipant, NewSegment, ObjectStatus, OriginKind, ParticipantRole,
+    PayloadFormat, RetryOutcome, ScopeType, SegmentType, SourceType, SummaryObjectJson,
+    SupportStrength, VisibilityStatus, WriteArtifactSet, WriteDerivationAttempt,
+    WriteDerivedObject, WriteImportSet,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -271,13 +271,21 @@ pub trait DerivedMetadataHarness {
     fn seed_artifact(&self, fixture: &TestImportFixture);
     fn fetch_derivation_run_record(&self, derivation_run_id: &str) -> DerivationRunRecord;
     fn count_derived_objects_for_run(&self, derivation_run_id: &str) -> i64;
-    fn count_derived_objects_for_run_with_status(&self, derivation_run_id: &str, status: &str) -> i64;
+    fn count_derived_objects_for_run_with_status(
+        &self,
+        derivation_run_id: &str,
+        status: &str,
+    ) -> i64;
     fn count_evidence_links_for_objects(&self, derived_object_ids: &[String]) -> i64;
     fn fetch_object_json(&self, derived_object_id: &str) -> Value;
     fn count_derivation_run_by_id(&self, derivation_run_id: &str) -> i64;
     fn count_derived_object_by_id(&self, derived_object_id: &str) -> i64;
     fn count_evidence_links_for_object(&self, derived_object_id: &str) -> i64;
-    fn count_derived_objects_for_artifact_with_status(&self, artifact_id: &str, status: &str) -> i64;
+    fn count_derived_objects_for_artifact_with_status(
+        &self,
+        artifact_id: &str,
+        status: &str,
+    ) -> i64;
 }
 
 fn fixture_derivation_attempt(
@@ -432,7 +440,10 @@ pub fn contract_write_single_import_happy_path<H: ProviderHarness>(harness: &H) 
     assert_eq!(result.import_id, import_id);
     assert_eq!(result.import_status, ImportStatus::Completed);
     assert_eq!(result.artifacts.len(), 1);
-    assert_eq!(result.artifacts[0].ingest_result, ArtifactIngestResult::Created);
+    assert_eq!(
+        result.artifacts[0].ingest_result,
+        ArtifactIngestResult::Created
+    );
     assert!(result.failed_artifact_ids.is_empty());
     assert_eq!(result.segments_written, 3);
 
@@ -480,7 +491,10 @@ pub fn contract_write_import_duplicate_payload_is_idempotent<H: ProviderHarness>
 
     assert_eq!(result.import_status, ImportStatus::Completed);
     assert_eq!(result.artifacts.len(), 1);
-    assert_eq!(result.artifacts[0].ingest_result, ArtifactIngestResult::AlreadyExists);
+    assert_eq!(
+        result.artifacts[0].ingest_result,
+        ArtifactIngestResult::AlreadyExists
+    );
     assert!(result.failed_artifact_ids.is_empty());
 
     let import_record = harness.fetch_import_record(&import_id);
@@ -488,8 +502,14 @@ pub fn contract_write_import_duplicate_payload_is_idempotent<H: ProviderHarness>
     assert_eq!(import_record.payload_object_id, format!("payload-{suffix}"));
     assert_eq!(harness.count_payload_objects_by_sha256(&payload_sha256), 1);
     assert_eq!(harness.count_artifacts_by_source_hash(&duplicate_hash), 1);
-    assert_eq!(harness.count_segments_by_artifact_id(&original_artifact_id), 3);
-    assert_eq!(harness.count_participants_by_artifact_id(&original_artifact_id), 2);
+    assert_eq!(
+        harness.count_segments_by_artifact_id(&original_artifact_id),
+        3
+    );
+    assert_eq!(
+        harness.count_participants_by_artifact_id(&original_artifact_id),
+        2
+    );
     assert_eq!(harness.count_jobs_by_artifact_id(&original_artifact_id), 1);
 }
 
@@ -505,8 +525,9 @@ pub fn contract_write_import_duplicate_artifact_hash_is_idempotent<H: ProviderHa
 
     let suffix2 = unique_suffix("dupartb");
     let mut duplicate = make_test_import_fixture(&suffix2);
-    duplicate.write_set.artifact_sets[0].artifact.source_conversation_hash =
-        sha256_hex(&format!("conv-hash-{suffix}"));
+    duplicate.write_set.artifact_sets[0]
+        .artifact
+        .source_conversation_hash = sha256_hex(&format!("conv-hash-{suffix}"));
 
     let import_id = duplicate.write_set.import.import_id.clone();
     let duplicate_hash = duplicate.write_set.artifact_sets[0]
@@ -521,7 +542,10 @@ pub fn contract_write_import_duplicate_artifact_hash_is_idempotent<H: ProviderHa
 
     assert_eq!(result.import_status, ImportStatus::Completed);
     assert_eq!(result.artifacts.len(), 1);
-    assert_eq!(result.artifacts[0].ingest_result, ArtifactIngestResult::AlreadyExists);
+    assert_eq!(
+        result.artifacts[0].ingest_result,
+        ArtifactIngestResult::AlreadyExists
+    );
     assert!(result.failed_artifact_ids.is_empty());
 
     let import_record = harness.fetch_import_record(&import_id);
@@ -530,8 +554,14 @@ pub fn contract_write_import_duplicate_artifact_hash_is_idempotent<H: ProviderHa
     assert_eq!(import_record.count_failed, 0);
     assert_eq!(harness.count_artifacts_by_import_id(&import_id), 0);
     assert_eq!(harness.count_artifacts_by_source_hash(&duplicate_hash), 1);
-    assert_eq!(harness.count_segments_by_artifact_id(&seeded.artifact_id), 0);
-    assert_eq!(harness.count_participants_by_artifact_id(&seeded.artifact_id), 0);
+    assert_eq!(
+        harness.count_segments_by_artifact_id(&seeded.artifact_id),
+        0
+    );
+    assert_eq!(
+        harness.count_participants_by_artifact_id(&seeded.artifact_id),
+        0
+    );
     assert_eq!(harness.count_jobs_by_artifact_id(&seeded.artifact_id), 0);
 }
 
@@ -567,7 +597,10 @@ pub fn contract_write_import_partial_success_finalizes_completed_with_errors<H: 
     assert_eq!(result.artifacts.len(), 1);
     assert_eq!(result.failed_artifact_ids, vec![failed_artifact_id.clone()]);
     assert_eq!(result.segments_written, 3);
-    assert_eq!(result.artifacts[0].ingest_result, ArtifactIngestResult::Created);
+    assert_eq!(
+        result.artifacts[0].ingest_result,
+        ArtifactIngestResult::Created
+    );
     assert_eq!(result.artifacts[0].artifact_id, successful_artifact_id);
 
     let import_record = harness.fetch_import_record(&import_id);
@@ -576,12 +609,27 @@ pub fn contract_write_import_partial_success_finalizes_completed_with_errors<H: 
     assert_eq!(import_record.count_failed, 1);
     assert_eq!(harness.count_artifacts_by_import_id(&import_id), 1);
     assert_eq!(harness.count_artifacts_by_import_id(&failed_artifact_id), 0);
-    assert_eq!(harness.count_participants_by_artifact_id(&failed_artifact_id), 0);
-    assert_eq!(harness.count_segments_by_artifact_id(&failed_artifact_id), 0);
+    assert_eq!(
+        harness.count_participants_by_artifact_id(&failed_artifact_id),
+        0
+    );
+    assert_eq!(
+        harness.count_segments_by_artifact_id(&failed_artifact_id),
+        0
+    );
     assert_eq!(harness.count_jobs_by_artifact_id(&failed_artifact_id), 0);
-    assert_eq!(harness.count_participants_by_artifact_id(&successful_artifact_id), 2);
-    assert_eq!(harness.count_segments_by_artifact_id(&successful_artifact_id), 3);
-    assert_eq!(harness.count_jobs_by_artifact_id(&successful_artifact_id), 1);
+    assert_eq!(
+        harness.count_participants_by_artifact_id(&successful_artifact_id),
+        2
+    );
+    assert_eq!(
+        harness.count_segments_by_artifact_id(&successful_artifact_id),
+        3
+    );
+    assert_eq!(
+        harness.count_jobs_by_artifact_id(&successful_artifact_id),
+        1
+    );
 }
 
 pub fn contract_claim_complete_happy_path<H: ProviderHarness>(harness: &H) {
@@ -717,7 +765,12 @@ pub fn contract_retryable_exhausted_becomes_terminal<H: ProviderHarness>(harness
     assert_eq!(claimed_1.attempt_count, 1);
 
     let outcome_1 = lifecycle_store
-        .mark_job_retryable("worker-exhaust-1", &claimed_1.job_id, "transient error 1", 0)
+        .mark_job_retryable(
+            "worker-exhaust-1",
+            &claimed_1.job_id,
+            "transient error 1",
+            0,
+        )
         .expect("mark_job_retryable should succeed");
     assert_eq!(outcome_1, RetryOutcome::Retried);
 
@@ -728,7 +781,12 @@ pub fn contract_retryable_exhausted_becomes_terminal<H: ProviderHarness>(harness
     assert_eq!(claimed_2.attempt_count, 2);
 
     let outcome_2 = lifecycle_store
-        .mark_job_retryable("worker-exhaust-2", &claimed_2.job_id, "transient error 2", 0)
+        .mark_job_retryable(
+            "worker-exhaust-2",
+            &claimed_2.job_id,
+            "transient error 2",
+            0,
+        )
         .expect("mark_job_retryable should succeed");
     assert_eq!(outcome_2, RetryOutcome::RetriesExhausted);
 
@@ -897,7 +955,9 @@ pub fn contract_non_claiming_worker_cannot_complete_job<H: ProviderHarness>(harn
     assert_eq!(job.claimed_by.as_deref(), Some("worker-owner"));
 }
 
-pub fn contract_writes_summary_classification_and_memory_with_evidence<H: DerivedMetadataHarness>(
+pub fn contract_writes_summary_classification_and_memory_with_evidence<
+    H: DerivedMetadataHarness,
+>(
     harness: &H,
 ) {
     let _guard = lock_live_test();
@@ -945,7 +1005,10 @@ pub fn contract_writes_summary_classification_and_memory_with_evidence<H: Derive
     );
 
     let classification_payload = harness.fetch_object_json(&classification_id);
-    assert_eq!(classification_payload["classification_type"], "conversation_type");
+    assert_eq!(
+        classification_payload["classification_type"],
+        "conversation_type"
+    );
     assert_eq!(classification_payload["classification_value"], "greeting");
 }
 
@@ -1084,9 +1147,7 @@ pub fn contract_rejects_cross_artifact_evidence_links_without_writing_rows<
     assert_eq!(harness.count_derived_object_by_id(&summary_id), 0);
 }
 
-pub fn contract_rolls_back_partial_writes_when_evidence_insert_fails<
-    H: DerivedMetadataHarness,
->(
+pub fn contract_rolls_back_partial_writes_when_evidence_insert_fails<H: DerivedMetadataHarness>(
     harness: &H,
 ) {
     let _guard = lock_live_test();

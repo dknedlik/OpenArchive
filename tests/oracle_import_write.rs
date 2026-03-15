@@ -3,8 +3,8 @@ mod support;
 use open_archive::config::OracleConfig;
 use open_archive::migrations;
 use open_archive::storage::{ImportWriteStore, OracleImportWriteStore};
-use support::{ImportRecord, ProviderHarness};
 use std::sync::OnceLock;
+use support::{ImportRecord, ProviderHarness};
 
 fn oracle_config() -> Option<OracleConfig> {
     if std::env::var("OA_ORACLE_INTEGRATION_TESTS").is_err() {
@@ -48,7 +48,9 @@ impl ProviderHarness for OracleHarness {
     }
 
     fn job_store(&self) -> Box<dyn open_archive::storage::EnrichmentJobLifecycleStore> {
-        Box::new(open_archive::storage::OracleEnrichmentJobStore::new(self.0.clone()))
+        Box::new(open_archive::storage::OracleEnrichmentJobStore::new(
+            self.0.clone(),
+        ))
     }
 
     fn seed_existing_artifact(&self, import_set: &open_archive::storage::WriteImportSet) {

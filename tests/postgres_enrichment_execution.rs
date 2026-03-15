@@ -44,7 +44,10 @@ fn recreate_test_database(config: &PostgresConfig) {
         .next()
         .expect("database name");
     client
-        .execute(&format!("DROP DATABASE IF EXISTS {database_name} WITH (FORCE)"), &[])
+        .execute(
+            &format!("DROP DATABASE IF EXISTS {database_name} WITH (FORCE)"),
+            &[],
+        )
         .expect("drop integration database");
     client
         .execute(&format!("CREATE DATABASE {database_name}"), &[])
@@ -53,7 +56,10 @@ fn recreate_test_database(config: &PostgresConfig) {
 
 fn harness() -> Option<PostgresHarness> {
     static CONFIG: OnceLock<Option<PostgresConfig>> = OnceLock::new();
-    CONFIG.get_or_init(postgres_config).clone().map(PostgresHarness)
+    CONFIG
+        .get_or_init(postgres_config)
+        .clone()
+        .map(PostgresHarness)
 }
 
 struct PostgresHarness(PostgresConfig);

@@ -31,7 +31,10 @@ fn admin_connection_string(connection_string: &str) -> String {
 
 fn harness() -> Option<PostgresHarness> {
     static CONFIG: OnceLock<Option<PostgresConfig>> = OnceLock::new();
-    CONFIG.get_or_init(postgres_config).clone().map(PostgresHarness)
+    CONFIG
+        .get_or_init(postgres_config)
+        .clone()
+        .map(PostgresHarness)
 }
 
 struct PostgresHarness(PostgresConfig);
@@ -54,7 +57,10 @@ impl DerivedMetadataHarness for PostgresHarness {
             .next()
             .expect("database name");
         client
-            .execute(&format!("DROP DATABASE IF EXISTS {database_name} WITH (FORCE)"), &[])
+            .execute(
+                &format!("DROP DATABASE IF EXISTS {database_name} WITH (FORCE)"),
+                &[],
+            )
             .expect("drop integration database");
         client
             .execute(&format!("CREATE DATABASE {database_name}"), &[])
@@ -223,7 +229,11 @@ impl DerivedMetadataHarness for PostgresHarness {
             .get(0)
     }
 
-    fn count_derived_objects_for_run_with_status(&self, derivation_run_id: &str, status: &str) -> i64 {
+    fn count_derived_objects_for_run_with_status(
+        &self,
+        derivation_run_id: &str,
+        status: &str,
+    ) -> i64 {
         let mut client = open_archive::postgres_db::connect(&self.0).expect("connect");
         client
             .query_one(
@@ -290,7 +300,11 @@ impl DerivedMetadataHarness for PostgresHarness {
             .get(0)
     }
 
-    fn count_derived_objects_for_artifact_with_status(&self, artifact_id: &str, status: &str) -> i64 {
+    fn count_derived_objects_for_artifact_with_status(
+        &self,
+        artifact_id: &str,
+        status: &str,
+    ) -> i64 {
         let mut client = open_archive::postgres_db::connect(&self.0).expect("connect");
         client
             .query_one(

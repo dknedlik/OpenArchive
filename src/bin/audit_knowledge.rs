@@ -423,8 +423,7 @@ fn score_artifact(
     let summary_score = score_summary(&summaries, artifact, &mut notes);
     let evidence_score = score_evidence(objects, &mut notes);
     let memory_score = score_memories(&memories, artifact, &mut notes);
-    let classification_score =
-        score_classifications(&classifications, artifact, &mut notes);
+    let classification_score = score_classifications(&classifications, artifact, &mut notes);
     let compression_score = score_compression(&summaries, artifact, &mut notes);
     let importance_score = score_importance(run, artifact, &mut notes);
     let duplication_penalty =
@@ -468,7 +467,10 @@ fn score_summary(
     }
 
     let summary = summaries[0];
-    let title_ok = summary.title.as_ref().is_some_and(|value| !value.trim().is_empty());
+    let title_ok = summary
+        .title
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty());
     let body_len = summary
         .body_text
         .as_ref()
@@ -504,7 +506,10 @@ fn score_evidence(objects: &[AuditObject], notes: &mut Vec<String>) -> f32 {
         return 0.0;
     }
 
-    let missing = objects.iter().filter(|object| object.evidence_count == 0).count();
+    let missing = objects
+        .iter()
+        .filter(|object| object.evidence_count == 0)
+        .count();
     let avg = objects
         .iter()
         .map(|object| object.evidence_count as f32)
@@ -651,11 +656,7 @@ fn score_compression(
     score
 }
 
-fn score_importance(
-    run: &AuditRun,
-    artifact: &AuditArtifact,
-    notes: &mut Vec<String>,
-) -> f32 {
+fn score_importance(run: &AuditRun, artifact: &AuditArtifact, notes: &mut Vec<String>) -> f32 {
     let Some(score) = run.importance_score else {
         notes.push("missing_importance_score".to_string());
         return 3.0;
@@ -698,7 +699,12 @@ fn score_duplicate_penalty(
             penalty += 2.0;
             continue;
         }
-        if duplicate_title_counts.get(&normalized).copied().unwrap_or(0) >= 4 {
+        if duplicate_title_counts
+            .get(&normalized)
+            .copied()
+            .unwrap_or(0)
+            >= 4
+        {
             notes.push("memory_title_repeated_across_corpus".to_string());
             penalty += 1.0;
         }

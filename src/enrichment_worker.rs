@@ -1,27 +1,28 @@
 use crate::domain::SourceTimestamp;
 use crate::processor::{
-    ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput, ClassificationOutput,
-    EntityOutput, MemoryOutput, ProcessorError, ReconciliationProcessorInput, RelationshipOutput,
-    StubProcessorFactory, SummaryOutput,
+    ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
+    ClassificationOutput, EntityOutput, MemoryOutput, ProcessorError, ReconciliationProcessorInput,
+    RelationshipOutput, StubProcessorFactory, SummaryOutput,
 };
 use crate::shutdown::ShutdownToken;
 use crate::storage::{
-    ArchiveRetrievalStore, ArtifactExtractPayload, ArtifactExtractionResult, ArtifactPreprocessPayload,
-    ArtifactReadStore, ArtifactReconcilePayload, ArtifactRetrieveContextPayload, CandidateEntity,
-    CandidateRelationship, ClaimedJob, ClassificationObjectJson, ConversationWindowRef,
-    DerivationRunStatus, DerivationRunType, DerivedMetadataWriteStore, DerivedObjectPayload,
-    EnrichmentJobLifecycleStore, EnrichmentStateStore, EvidenceRole, ExtractedClassification,
-    ExtractedMemory, InputScopeType, MemoryObjectJson, NewDerivationRun, NewDerivedObject,
-    NewEnrichmentJob, NewEvidenceLink, ObjectStatus, OriginKind, ReconciliationDecision,
-    ReconciliationDecisionKind, RetrievalIntent, RetrievalResultSet, ScopeType, SummaryObjectJson,
-    SupportStrength, WriteDerivationAttempt, WriteDerivedObject, RelationshipObjectJson,
+    ArchiveRetrievalStore, ArtifactExtractPayload, ArtifactExtractionResult,
+    ArtifactPreprocessPayload, ArtifactReadStore, ArtifactReconcilePayload,
+    ArtifactRetrieveContextPayload, CandidateEntity, CandidateRelationship, ClaimedJob,
+    ClassificationObjectJson, ConversationWindowRef, DerivationRunStatus, DerivationRunType,
+    DerivedMetadataWriteStore, DerivedObjectPayload, EnrichmentJobLifecycleStore,
+    EnrichmentStateStore, EvidenceRole, ExtractedClassification, ExtractedMemory, InputScopeType,
+    MemoryObjectJson, NewDerivationRun, NewDerivedObject, NewEnrichmentJob, NewEvidenceLink,
+    ObjectStatus, OriginKind, ReconciliationDecision, ReconciliationDecisionKind,
+    RelationshipObjectJson, RetrievalIntent, RetrievalResultSet, ScopeType, SummaryObjectJson,
+    SupportStrength, WriteDerivationAttempt, WriteDerivedObject,
 };
 use anyhow::Result;
 use log::{debug, error, info};
 use rand::random;
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -66,7 +67,10 @@ fn enrichment_worker(
                     derived_store.as_ref(),
                     processor_factory.as_ref(),
                 ) {
-                    error!("Worker {} failed to process claimed work: {}", worker_id, err);
+                    error!(
+                        "Worker {} failed to process claimed work: {}",
+                        worker_id, err
+                    );
                 }
             }
             Ok(None) => thread::sleep(poll_interval),
@@ -125,15 +129,16 @@ fn process_preprocess_job(
     job_store: &dyn EnrichmentJobLifecycleStore,
     read_store: &dyn ArtifactReadStore,
 ) -> std::result::Result<(), String> {
-    let payload = ArtifactPreprocessPayload::from_json(&claimed_job.payload_json).map_err(|err| {
-        fail_job(
-            job_store,
-            worker_id,
-            &claimed_job.job_id,
-            "Failed to parse preprocess payload JSON",
-            err,
-        )
-    })?;
+    let payload =
+        ArtifactPreprocessPayload::from_json(&claimed_job.payload_json).map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to parse preprocess payload JSON",
+                err,
+            )
+        })?;
 
     let loaded = read_store
         .load_artifact_for_enrichment(&claimed_job.artifact_id)
@@ -151,7 +156,10 @@ fn process_preprocess_job(
                 job_store,
                 worker_id,
                 &claimed_job.job_id,
-                format!("Artifact {} not found for preprocessing", claimed_job.artifact_id),
+                format!(
+                    "Artifact {} not found for preprocessing",
+                    claimed_job.artifact_id
+                ),
             )
         })?;
 
@@ -209,18 +217,36 @@ fn process_extract_job(
     state_store: &dyn EnrichmentStateStore,
     processor_factory: &dyn ArtifactProcessorFactory,
 ) -> std::result::Result<(), String> {
-    let payload = ArtifactExtractPayload::from_json(&claimed_job.payload_json)
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to parse extract payload JSON", err))?;
+    let payload = ArtifactExtractPayload::from_json(&claimed_job.payload_json).map_err(|err| {
+        fail_job(
+            job_store,
+            worker_id,
+            &claimed_job.job_id,
+            "Failed to parse extract payload JSON",
+            err,
+        )
+    })?;
 
     let loaded = read_store
         .load_artifact_for_enrichment(&claimed_job.artifact_id)
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to load artifact for extraction", err))?
+        .map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to load artifact for extraction",
+                err,
+            )
+        })?
         .ok_or_else(|| {
             fail_job_message(
                 job_store,
                 worker_id,
                 &claimed_job.job_id,
-                format!("Artifact {} not found for extraction", claimed_job.artifact_id),
+                format!(
+                    "Artifact {} not found for extraction",
+                    claimed_job.artifact_id
+                ),
             )
         })?;
 
@@ -248,14 +274,22 @@ fn process_extract_job(
 
     let processor = processor_factory
         .build(claimed_job.enrichment_tier)
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to build extraction processor", err))?;
+        .map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to build extraction processor",
+                err,
+            )
+        })?;
 
     let output = if payload.conversation_windows.len() > 1 {
         let mut chunk_outputs = Vec::new();
         for chunk_input in build_chunk_inputs(&processor_input, &payload.conversation_windows) {
-            let chunk_output = processor
-                .process(&chunk_input)
-                .map_err(|err| handle_processor_error(job_store, worker_id, &claimed_job.job_id, err))?;
+            let chunk_output = processor.process(&chunk_input).map_err(|err| {
+                handle_processor_error(job_store, worker_id, &claimed_job.job_id, err)
+            })?;
             chunk_outputs.push(chunk_output);
         }
         merge_chunk_outputs(&processor_input, &chunk_outputs)
@@ -265,10 +299,23 @@ fn process_extract_job(
             .map_err(|err| handle_processor_error(job_store, worker_id, &claimed_job.job_id, err))?
     };
 
-    let extraction_result = build_extraction_result(claimed_job, &processor_input, &output, payload.conversation_windows);
+    let extraction_result = build_extraction_result(
+        claimed_job,
+        &processor_input,
+        &output,
+        payload.conversation_windows,
+    );
     state_store
         .save_extraction_result(&extraction_result)
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to persist extraction result", err))?;
+        .map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to persist extraction result",
+                err,
+            )
+        })?;
 
     let retrieve_job = NewEnrichmentJob {
         job_id: new_id("job"),
@@ -309,24 +356,55 @@ fn process_retrieve_context_job(
     retrieval_store: &dyn ArchiveRetrievalStore,
     state_store: &dyn EnrichmentStateStore,
 ) -> std::result::Result<(), String> {
-    let payload = ArtifactRetrieveContextPayload::from_json(&claimed_job.payload_json)
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to parse retrieve-context payload JSON", err))?;
+    let payload =
+        ArtifactRetrieveContextPayload::from_json(&claimed_job.payload_json).map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to parse retrieve-context payload JSON",
+                err,
+            )
+        })?;
 
     let extraction_result = state_store
         .load_extraction_result(&payload.extraction_result_id)
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to load extraction result", err))?
+        .map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to load extraction result",
+                err,
+            )
+        })?
         .ok_or_else(|| {
             fail_job_message(
                 job_store,
                 worker_id,
                 &claimed_job.job_id,
-                format!("Extraction result {} not found", payload.extraction_result_id),
+                format!(
+                    "Extraction result {} not found",
+                    payload.extraction_result_id
+                ),
             )
         })?;
 
     let results = retrieval_store
-        .retrieve_for_intents(&claimed_job.artifact_id, &extraction_result.retrieval_intents, 8)
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to retrieve archive context", err))?;
+        .retrieve_for_intents(
+            &claimed_job.artifact_id,
+            &extraction_result.retrieval_intents,
+            8,
+        )
+        .map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to retrieve archive context",
+                err,
+            )
+        })?;
 
     let result_set = RetrievalResultSet {
         retrieval_result_set_id: new_id("retrieval"),
@@ -343,7 +421,15 @@ fn process_retrieve_context_job(
 
     state_store
         .save_retrieval_result_set(&result_set)
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to persist retrieval result set", err))?;
+        .map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to persist retrieval result set",
+                err,
+            )
+        })?;
 
     let source_type =
         crate::storage::SourceType::from_str(&payload.source_type).ok_or_else(|| {
@@ -400,44 +486,87 @@ fn process_reconcile_job(
     derived_store: &dyn DerivedMetadataWriteStore,
     processor_factory: &dyn ArtifactProcessorFactory,
 ) -> std::result::Result<(), String> {
-    let payload = ArtifactReconcilePayload::from_json(&claimed_job.payload_json)
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to parse reconcile payload JSON", err))?;
+    let payload =
+        ArtifactReconcilePayload::from_json(&claimed_job.payload_json).map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to parse reconcile payload JSON",
+                err,
+            )
+        })?;
 
     let loaded = read_store
         .load_artifact_for_enrichment(&claimed_job.artifact_id)
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to load artifact for reconciliation", err))?
+        .map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to load artifact for reconciliation",
+                err,
+            )
+        })?
         .ok_or_else(|| {
             fail_job_message(
                 job_store,
                 worker_id,
                 &claimed_job.job_id,
-                format!("Artifact {} not found for reconciliation", claimed_job.artifact_id),
+                format!(
+                    "Artifact {} not found for reconciliation",
+                    claimed_job.artifact_id
+                ),
             )
         })?;
     let extraction_result = state_store
         .load_extraction_result(&payload.extraction_result_id)
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to load extraction result for reconciliation", err))?
+        .map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to load extraction result for reconciliation",
+                err,
+            )
+        })?
         .ok_or_else(|| {
             fail_job_message(
                 job_store,
                 worker_id,
                 &claimed_job.job_id,
-                format!("Extraction result {} not found", payload.extraction_result_id),
+                format!(
+                    "Extraction result {} not found",
+                    payload.extraction_result_id
+                ),
             )
         })?;
     let retrieval_result_set = state_store
         .load_retrieval_result_set(&payload.retrieval_result_set_id)
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to load retrieval result set", err))?
+        .map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to load retrieval result set",
+                err,
+            )
+        })?
         .ok_or_else(|| {
             fail_job_message(
                 job_store,
                 worker_id,
                 &claimed_job.job_id,
-                format!("Retrieval result set {} not found", payload.retrieval_result_set_id),
+                format!(
+                    "Retrieval result set {} not found",
+                    payload.retrieval_result_set_id
+                ),
             )
         })?;
 
-    let decisions = if extraction_result.memories.is_empty() && extraction_result.relationships.is_empty() {
+    let decisions = if extraction_result.memories.is_empty()
+        && extraction_result.relationships.is_empty()
+    {
         vec![ReconciliationDecision {
             reconciliation_decision_id: new_id("reconcile"),
             artifact_id: extraction_result.artifact_id.clone(),
@@ -450,7 +579,8 @@ fn process_reconcile_job(
             target_kind: "artifact".to_string(),
             target_key: extraction_result.artifact_id.clone(),
             matched_object_id: None,
-            rationale: "No candidate memories or relationships were extracted for reconciliation.".to_string(),
+            rationale: "No candidate memories or relationships were extracted for reconciliation."
+                .to_string(),
             evidence_segment_ids: extraction_result.summary_evidence_segment_ids.clone(),
             status: "completed".to_string(),
             error_message: None,
@@ -458,22 +588,51 @@ fn process_reconcile_job(
     } else {
         let processor = processor_factory
             .build_reconciliation_processor(claimed_job.enrichment_tier)
-            .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to build reconciliation processor", err))?;
+            .map_err(|err| {
+                fail_job(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    "Failed to build reconciliation processor",
+                    err,
+                )
+            })?;
         let input = build_reconciliation_input(
             &claimed_job.artifact_id,
             &payload.source_type,
             &extraction_result,
             &retrieval_result_set,
         )
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to build reconciliation input", err))?;
-        let outputs = processor
-            .reconcile(&input)
-            .map_err(|err| handle_processor_error(job_store, worker_id, &claimed_job.job_id, err))?;
-        build_reconciliation_decisions(claimed_job, &extraction_result, &retrieval_result_set, outputs)
+        .map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to build reconciliation input",
+                err,
+            )
+        })?;
+        let outputs = processor.reconcile(&input).map_err(|err| {
+            handle_processor_error(job_store, worker_id, &claimed_job.job_id, err)
+        })?;
+        build_reconciliation_decisions(
+            claimed_job,
+            &extraction_result,
+            &retrieval_result_set,
+            outputs,
+        )
     };
     state_store
         .save_reconciliation_decisions(&decisions)
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to persist reconciliation decisions", err))?;
+        .map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to persist reconciliation decisions",
+                err,
+            )
+        })?;
 
     let attempt = build_derivation_attempt(
         claimed_job,
@@ -483,7 +642,15 @@ fn process_reconcile_job(
     );
     derived_store
         .write_derivation_attempt(attempt)
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to persist derivation output", err))?;
+        .map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to persist derivation output",
+                err,
+            )
+        })?;
 
     complete_job(job_store, worker_id, &claimed_job.job_id)?;
     Ok(())
@@ -500,8 +667,14 @@ fn build_preprocess_windows(
         return vec![ConversationWindowRef {
             window_id: format!("{artifact_id}:window:0"),
             label: "full conversation".to_string(),
-            start_sequence_no: segments.first().map(|segment| segment.sequence_no).unwrap_or(0),
-            end_sequence_no: segments.last().map(|segment| segment.sequence_no).unwrap_or(0),
+            start_sequence_no: segments
+                .first()
+                .map(|segment| segment.sequence_no)
+                .unwrap_or(0),
+            end_sequence_no: segments
+                .last()
+                .map(|segment| segment.sequence_no)
+                .unwrap_or(0),
         }];
     }
 
@@ -850,7 +1023,9 @@ fn build_derivation_attempt(
     let derivation_run_id = new_id("drvrun");
     let started_at = SourceTimestamp::from(chrono::Utc::now());
     let completed_at = started_at.clone();
-    let mut objects = Vec::with_capacity(1 + extraction_result.classifications.len() + extraction_result.memories.len());
+    let mut objects = Vec::with_capacity(
+        1 + extraction_result.classifications.len() + extraction_result.memories.len(),
+    );
 
     let summary_object_id = new_id("dobj");
     objects.push(WriteDerivedObject {
@@ -874,7 +1049,10 @@ fn build_derivation_attempt(
                 }),
             },
         },
-        evidence_links: build_evidence_links(&summary_object_id, &extraction_result.summary_evidence_segment_ids),
+        evidence_links: build_evidence_links(
+            &summary_object_id,
+            &extraction_result.summary_evidence_segment_ids,
+        ),
     });
 
     for classification in &extraction_result.classifications {
@@ -900,19 +1078,23 @@ fn build_derivation_attempt(
                     },
                 },
             },
-            evidence_links: build_evidence_links(&derived_object_id, &classification.evidence_segment_ids),
+            evidence_links: build_evidence_links(
+                &derived_object_id,
+                &classification.evidence_segment_ids,
+            ),
         });
     }
 
     let mut attached_existing = HashSet::new();
     for memory in &extraction_result.memories {
-        let decision = decisions
-            .iter()
-            .find(|decision| decision.target_kind == "memory" && decision.target_key == memory_target_key(memory));
+        let decision = decisions.iter().find(|decision| {
+            decision.target_kind == "memory" && decision.target_key == memory_target_key(memory)
+        });
         if let Some(decision) = decision {
             if matches!(
                 decision.decision_kind,
-                ReconciliationDecisionKind::AttachToExisting | ReconciliationDecisionKind::StrengthenExisting
+                ReconciliationDecisionKind::AttachToExisting
+                    | ReconciliationDecisionKind::StrengthenExisting
             ) {
                 if let Some(existing_id) = &decision.matched_object_id {
                     attached_existing.insert(existing_id.clone());
@@ -923,9 +1105,12 @@ fn build_derivation_attempt(
 
         let derived_object_id = new_id("dobj");
         let supersedes_derived_object_id = decision.and_then(|decision| {
-            matches!(decision.decision_kind, ReconciliationDecisionKind::SupersedeExisting)
-                .then(|| decision.matched_object_id.clone())
-                .flatten()
+            matches!(
+                decision.decision_kind,
+                ReconciliationDecisionKind::SupersedeExisting
+            )
+            .then(|| decision.matched_object_id.clone())
+            .flatten()
         });
         objects.push(WriteDerivedObject {
             object: NewDerivedObject {
@@ -1011,7 +1196,10 @@ fn build_derivation_attempt(
                     },
                 },
             },
-            evidence_links: build_evidence_links(&derived_object_id, &relationship.evidence_segment_ids),
+            evidence_links: build_evidence_links(
+                &derived_object_id,
+                &relationship.evidence_segment_ids,
+            ),
         });
     }
 
@@ -1091,7 +1279,13 @@ fn handle_processor_error(
         );
     }
 
-    fail_job(job_store, worker_id, job_id, "Processor execution failed", err)
+    fail_job(
+        job_store,
+        worker_id,
+        job_id,
+        "Processor execution failed",
+        err,
+    )
 }
 
 fn complete_job(

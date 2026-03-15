@@ -116,7 +116,10 @@ fn evaluate_fixture(case_name: &str, fixture: &EvalFixture, output: &EvalOutput)
         );
     }
 
-    assert!(!output.summary.title.trim().is_empty(), "{case_name}: summary title empty");
+    assert!(
+        !output.summary.title.trim().is_empty(),
+        "{case_name}: summary title empty"
+    );
     assert!(
         !output.summary.body_text.trim().is_empty(),
         "{case_name}: summary body empty"
@@ -147,8 +150,7 @@ fn evaluate_fixture(case_name: &str, fixture: &EvalFixture, output: &EvalOutput)
         &fixture.expectations.importance_score,
     );
     assert_eq!(
-        output.escalate_to_frontier,
-        fixture.expectations.escalate_to_frontier,
+        output.escalate_to_frontier, fixture.expectations.escalate_to_frontier,
         "{case_name}: escalate_to_frontier mismatch"
     );
 
@@ -167,7 +169,10 @@ fn evaluate_fixture(case_name: &str, fixture: &EvalFixture, output: &EvalOutput)
     let mut seen_memory_titles = HashSet::new();
     for (index, classification) in output.classifications.iter().enumerate() {
         assert!(
-            matches!(classification.classification_type.as_str(), "topic" | "intent"),
+            matches!(
+                classification.classification_type.as_str(),
+                "topic" | "intent"
+            ),
             "{case_name}: classifications[{index}] has invalid type {}",
             classification.classification_type
         );

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use reqwest::blocking::Client;
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
 use crate::config::AnthropicConfig;
@@ -10,7 +10,7 @@ use crate::storage::types::EnrichmentTier;
 use super::{
     ArtifactProcessor, ArtifactProcessorFactory, ConversationEnrichmentStrategy,
     HostedArtifactProcessor, HostedReconciliationProcessor, InferenceClient, InferenceResult,
-    InferenceUsage, ProcessorError, RECONCILIATION_SYSTEM_PROMPT, ReconciliationProcessor,
+    InferenceUsage, ProcessorError, ReconciliationProcessor, RECONCILIATION_SYSTEM_PROMPT,
 };
 
 pub struct AnthropicProcessorFactory {
@@ -151,18 +151,21 @@ impl InferenceClient for AnthropicClient {
             });
         }
 
-        let parsed: AnthropicMessagesResponse = serde_json::from_str(&response_text).map_err(
-            |source| ProcessorError::ParseInferenceResponse {
-                source,
-                body_preview: super::preview(&response_text),
-            },
-        )?;
+        let parsed: AnthropicMessagesResponse =
+            serde_json::from_str(&response_text).map_err(|source| {
+                ProcessorError::ParseInferenceResponse {
+                    source,
+                    body_preview: super::preview(&response_text),
+                }
+            })?;
 
         let tool_input = parsed
             .content
             .iter()
             .find_map(|block| match block {
-                AnthropicContentBlock::ToolUse { name, input, .. } if name == "record_enrichment" => {
+                AnthropicContentBlock::ToolUse { name, input, .. }
+                    if name == "record_enrichment" =>
+                {
                     Some(input.clone())
                 }
                 _ => None,

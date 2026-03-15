@@ -2,44 +2,41 @@ use std::io::Cursor;
 
 use tiny_http::{Header, Method, Request, Response, StatusCode};
 
+use crate::app::ArchiveApplication;
 use crate::error::OpenArchiveError;
-use crate::import_service::import_chatgpt_payload;
-use crate::object_store::ObjectStore;
-use crate::storage::{ArtifactReadStore, ImportWriteStore};
 
-pub fn build_response<S>(request: &mut Request, store: &S) -> Response<Cursor<Vec<u8>>>
-where
-    S: ImportWriteStore + ArtifactReadStore + ObjectStore + ?Sized,
-{
+pub fn build_response(
+    request: &mut Request,
+    app: &ArchiveApplication,
+) -> Response<Cursor<Vec<u8>>> {
     match (request.method(), request.url()) {
-        (&Method::Post, "/imports/chatgpt") => handle_post_imports_chatgpt(request, store),
-        (&Method::Get, "/artifacts") => handle_get_artifacts(store),
+        (&Method::Post, "/imports/chatgpt") => handle_post_imports_chatgpt(request, app),
+        (&Method::Get, "/artifacts") => handle_get_artifacts(app),
         _ => text_response(StatusCode(404), "not found"),
     }
 }
 
-fn handle_post_imports_chatgpt<S>(request: &mut Request, store: &S) -> Response<Cursor<Vec<u8>>>
-where
-    S: ImportWriteStore + ArtifactReadStore + ObjectStore + ?Sized,
-{
-    match read_request_body(request)
-        .and_then(|body| import_chatgpt_payload(store, store, &body).map_err(HttpError::from))
-    {
+fn handle_post_imports_chatgpt(
+    request: &mut Request,
+    app: &ArchiveApplication,
+) -> Response<Cursor<Vec<u8>>> {
+    match read_request_body(request).and_then(|body| {
+        app.imports
+            .import_chatgpt_payload(&body)
+            .map_err(HttpError::from)
+    }) {
         Ok(result) => json_response(StatusCode(200), &result),
         Err(err) => err.into_response(),
     }
 }
 
-fn handle_get_artifacts<S>(store: &S) -> Response<Cursor<Vec<u8>>>
-where
-    S: ArtifactReadStore + ?Sized,
-{
+fn handle_get_artifacts(app: &ArchiveApplication) -> Response<Cursor<Vec<u8>>> {
     #[derive(serde::Serialize)]
     struct ArtifactListResponse {
         artifacts: Vec<crate::storage::ArtifactListItem>,
     }
 
-    match store.list_artifacts().map_err(HttpError::from) {
+    match app.artifacts.list_artifacts().map_err(HttpError::from) {
         Ok(artifacts) => json_response(StatusCode(200), &ArtifactListResponse { artifacts }),
         Err(err) => err.into_response(),
     }
@@ -123,12 +120,14 @@ impl HttpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::ArchiveApplication;
+    use crate::object_store::{NewObject, ObjectStore, PutObjectResult, StoredObject};
     use crate::storage::{
         ArtifactIngestResult, ArtifactListItem, ArtifactReadStore, EnrichmentStatus, ImportStatus,
-        ImportWriteResult, ImportedArtifact, WriteImportSet,
+        ImportWriteResult, ImportWriteStore, ImportedArtifact, WriteImportSet,
     };
-    use crate::object_store::{NewObject, ObjectStore, PutObjectResult, StoredObject};
     use std::io::Read;
+    use std::sync::Arc;
     use tiny_http::TestRequest;
 
     struct MockStore {
@@ -166,13 +165,17 @@ mod tests {
         fn load_artifact_for_enrichment(
             &self,
             _artifact_id: &str,
-        ) -> crate::error::StorageResult<Option<crate::storage::LoadedArtifactForEnrichment>> {
+        ) -> crate::error::StorageResult<Option<crate::storage::LoadedArtifactForEnrichment>>
+        {
             Ok(None)
         }
     }
 
     impl ObjectStore for MockStore {
-        fn put_object(&self, object: NewObject) -> crate::error::ObjectStoreResult<PutObjectResult> {
+        fn put_object(
+            &self,
+            object: NewObject,
+        ) -> crate::error::ObjectStoreResult<PutObjectResult> {
             Ok(PutObjectResult {
                 stored_object: StoredObject {
                     object_id: object.object_id,
@@ -209,7 +212,8 @@ mod tests {
             .with_body(valid_export())
             .into();
 
-        let response = build_response(&mut request, &store);
+        let app = test_app(store);
+        let response = build_response(&mut request, app.as_ref());
         assert_eq!(response.status_code(), StatusCode(200));
     }
 
@@ -224,7 +228,8 @@ mod tests {
             .with_body(r#"{"bad":true}"#)
             .into();
 
-        let response = build_response(&mut request, &store);
+        let app = test_app(store);
+        let response = build_response(&mut request, app.as_ref());
         assert_eq!(response.status_code(), StatusCode(400));
     }
 
@@ -234,7 +239,8 @@ mod tests {
             artifacts: Vec::new(),
         };
         let mut request = TestRequest::new().with_path("/missing").into();
-        let response = build_response(&mut request, &store);
+        let app = test_app(store);
+        let response = build_response(&mut request, app.as_ref());
         assert_eq!(response.status_code(), StatusCode(404));
     }
 
@@ -248,7 +254,8 @@ mod tests {
             .with_path("/artifacts")
             .into();
 
-        let response = build_response(&mut request, &store);
+        let app = test_app(store);
+        let response = build_response(&mut request, app.as_ref());
         assert_eq!(response.status_code(), StatusCode(200));
         assert_eq!(response_body_string(response), r#"{"artifacts":[]}"#);
     }
@@ -280,7 +287,8 @@ mod tests {
             .with_path("/artifacts")
             .into();
 
-        let response = build_response(&mut request, &store);
+        let app = test_app(store);
+        let response = build_response(&mut request, app.as_ref());
         assert_eq!(response.status_code(), StatusCode(200));
         assert_eq!(
             response_body_string(response),
@@ -296,6 +304,18 @@ mod tests {
                 "]}"
             )
         );
+    }
+
+    fn test_app(store: MockStore) -> Arc<ArchiveApplication> {
+        let store = Arc::new(store);
+        let import_store: Arc<dyn ImportWriteStore + Send + Sync> = store.clone();
+        let read_store: Arc<dyn ArtifactReadStore + Send + Sync> = store.clone();
+        let object_store: Arc<dyn ObjectStore + Send + Sync> = store;
+        Arc::new(ArchiveApplication::new(
+            import_store,
+            read_store,
+            object_store,
+        ))
     }
 
     fn response_body_string(response: Response<Cursor<Vec<u8>>>) -> String {

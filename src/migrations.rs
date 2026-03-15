@@ -271,10 +271,12 @@ pub mod postgres {
                     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )",
             )
-            .map_err(|source| MigrationsError::Db(crate::error::DbError::ConnectPostgres {
-                connection_string: "postgres".to_string(),
-                source,
-            }))?;
+            .map_err(|source| {
+                MigrationsError::Db(crate::error::DbError::ConnectPostgres {
+                    connection_string: "postgres".to_string(),
+                    source,
+                })
+            })?;
         Ok(())
     }
 
@@ -293,10 +295,12 @@ pub mod postgres {
             let table_name: String = row.get(0);
             client
                 .batch_execute(&format!("DROP TABLE IF EXISTS \"{}\" CASCADE", table_name))
-                .map_err(|source| MigrationsError::Db(crate::error::DbError::ConnectPostgres {
-                    connection_string: "postgres".to_string(),
-                    source,
-                }))?;
+                .map_err(|source| {
+                    MigrationsError::Db(crate::error::DbError::ConnectPostgres {
+                        connection_string: "postgres".to_string(),
+                        source,
+                    })
+                })?;
         }
         Ok(())
     }
@@ -331,10 +335,12 @@ pub mod postgres {
                 "SELECT version, checksum FROM oa_schema_migration ORDER BY version",
                 &[],
             )
-            .map_err(|source| MigrationsError::Db(crate::error::DbError::ConnectPostgres {
-                connection_string: "postgres".to_string(),
-                source,
-            }))?;
+            .map_err(|source| {
+                MigrationsError::Db(crate::error::DbError::ConnectPostgres {
+                    connection_string: "postgres".to_string(),
+                    source,
+                })
+            })?;
 
         for row in rows {
             let version: String = row.get(0);
@@ -347,12 +353,12 @@ pub mod postgres {
 
     fn apply_migration(client: &mut Client, migration: &Migration) -> MigrationsResult<()> {
         println!("applying {} {}", migration.version, migration.name);
-        client
-            .batch_execute(&migration.sql)
-            .map_err(|source| MigrationsError::Db(crate::error::DbError::ConnectPostgres {
+        client.batch_execute(&migration.sql).map_err(|source| {
+            MigrationsError::Db(crate::error::DbError::ConnectPostgres {
                 connection_string: "postgres".to_string(),
                 source,
-            }))?;
+            })
+        })?;
         client
             .execute(
                 "INSERT INTO oa_schema_migration (version, name, filename, checksum, applied_at) VALUES ($1, $2, $3, $4, NOW())",

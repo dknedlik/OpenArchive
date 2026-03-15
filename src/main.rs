@@ -1,11 +1,10 @@
 use anyhow::Context;
 use clap::{command, Parser, Subcommand};
+use open_archive::app::ArchiveApplication;
 use open_archive::bootstrap::{build_service_bundle, require_oracle_db_config};
 use open_archive::config::AppConfig;
 use open_archive::enrichment_worker::start_enrichment_workers_with_factory;
 use open_archive::shutdown::ShutdownToken;
-use open_archive::object_store::ObjectStore;
-use open_archive::storage::{ArtifactReadStore, ImportWriteStore};
 use open_archive::{db, http, migrations};
 
 use std::sync::Arc;
@@ -34,11 +33,13 @@ fn main() -> Result<(), anyhow::Error> {
     match cli.command {
         Command::OracleCheck => oracle_check(),
         Command::Migrate => {
-            let config = AppConfig::from_env().context("failed to load application configuration")?;
+            let config =
+                AppConfig::from_env().context("failed to load application configuration")?;
             migrations::migrate(&config).context("failed to apply database migrations")
         }
         Command::MigrateCheck => {
-            let config = AppConfig::from_env().context("failed to load application configuration")?;
+            let config =
+                AppConfig::from_env().context("failed to load application configuration")?;
             migrations::check(&config).context("database migration check failed")
         }
         Command::Serve => serve(),
@@ -47,8 +48,8 @@ fn main() -> Result<(), anyhow::Error> {
 
 fn oracle_check() -> Result<(), anyhow::Error> {
     let config = AppConfig::from_env().context("failed to load application configuration")?;
-    let config =
-        require_oracle_db_config(&config).context("failed to resolve Oracle database configuration")?;
+    let config = require_oracle_db_config(&config)
+        .context("failed to resolve Oracle database configuration")?;
     let conn = db::connect(&config).context("failed to connect to Oracle")?;
     let row = conn
         .query_row_as::<(i32, String)>(
@@ -86,7 +87,7 @@ fn serve() -> Result<(), anyhow::Error> {
         })?;
     }
 
-    let store = Arc::clone(&services.archive_service);
+    let app = Arc::clone(&services.app);
     let server: Arc<tiny_http::Server> = Arc::new(
         tiny_http::Server::http(&bind_addr)
             .map_err(|err| anyhow::anyhow!("failed to start HTTP server: {err}"))?,
@@ -115,13 +116,13 @@ fn serve() -> Result<(), anyhow::Error> {
     let mut workers = Vec::with_capacity(request_worker_count);
     for worker_index in 0..request_worker_count {
         let server = Arc::clone(&server);
-        let store = Arc::clone(&store);
+        let app = Arc::clone(&app);
         let shutdown = shutdown.clone();
         workers.push(
             thread::Builder::new()
                 .name(format!("http-worker-{worker_index}"))
                 .spawn(move || {
-                    run_http_worker_loop(server.as_ref(), store.as_ref(), shutdown);
+                    run_http_worker_loop(server.as_ref(), app.as_ref(), shutdown);
                 })?,
         );
     }
@@ -156,10 +157,11 @@ impl RequestReceiver for tiny_http::Server {
     }
 }
 
-fn run_http_worker_loop<S>(receiver: &impl RequestReceiver, store: &S, shutdown: ShutdownToken)
-where
-    S: ImportWriteStore + ArtifactReadStore + ObjectStore + ?Sized,
-{
+fn run_http_worker_loop(
+    receiver: &impl RequestReceiver,
+    app: &ArchiveApplication,
+    shutdown: ShutdownToken,
+) {
     loop {
         if shutdown.is_shutdown() {
             break;
@@ -167,7 +169,7 @@ where
 
         match receiver.recv_timeout(Duration::from_millis(500)) {
             Ok(Some(mut request)) => {
-                let response = http::build_response(&mut request, store);
+                let response = http::build_response(&mut request, app);
                 if let Err(err) = request.respond(response) {
                     eprintln!("http_respond_error={err}");
                 }
@@ -186,11 +188,15 @@ where
 mod tests {
     use super::*;
 
+    use open_archive::app::ArchiveApplication;
     use open_archive::object_store::{NewObject, ObjectStore, PutObjectResult, StoredObject};
+    use open_archive::storage::{
+        ArtifactListItem, ArtifactReadStore, ImportStatus, ImportWriteResult, ImportWriteStore,
+        WriteImportSet,
+    };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
-    use open_archive::storage::{ArtifactListItem, ImportStatus, ImportWriteResult, WriteImportSet};
 
     struct MockReceiver {
         items: Mutex<VecDeque<Result<Option<tiny_http::Request>, std::io::Error>>>,
@@ -288,8 +294,8 @@ mod tests {
         let receiver = MockReceiver {
             items: Mutex::new(VecDeque::new()),
         };
-        let store = MockStore::new();
-        run_http_worker_loop(&receiver, &store, shutdown);
+        let app = mock_app(MockStore::new());
+        run_http_worker_loop(&receiver, app.as_ref(), shutdown);
     }
 
     #[test]
@@ -304,8 +310,8 @@ mod tests {
                 .into(),
             ),
         };
-        let store = MockStore::new();
-        run_http_worker_loop(&receiver, &store, shutdown.clone());
+        let app = mock_app(MockStore::new());
+        run_http_worker_loop(&receiver, app.as_ref(), shutdown.clone());
         assert!(shutdown.is_shutdown());
     }
 
@@ -315,13 +321,13 @@ mod tests {
         let receiver = MockReceiver {
             items: Mutex::new(vec![Ok(None), Ok(None)].into()),
         };
-        let store = MockStore::new();
+        let app = mock_app(MockStore::new());
         let shutdown_clone = shutdown.clone();
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(50));
             shutdown_clone.signal();
         });
-        run_http_worker_loop(&receiver, &store, shutdown);
+        run_http_worker_loop(&receiver, app.as_ref(), shutdown);
     }
 
     #[test]
@@ -335,13 +341,13 @@ mod tests {
                 .into(),
             ),
         };
-        let store = MockStore::new();
+        let app = mock_app(MockStore::new());
         let shutdown_clone = shutdown.clone();
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(50));
             shutdown_clone.signal();
         });
-        run_http_worker_loop(&receiver, &store, shutdown);
+        run_http_worker_loop(&receiver, app.as_ref(), shutdown);
     }
 
     #[test]
@@ -349,12 +355,12 @@ mod tests {
         let addr = "127.0.0.1:0";
         let server = Arc::new(tiny_http::Server::http(addr).unwrap());
         let shutdown = ShutdownToken::new();
-        let store = MockStore::new();
+        let app = mock_app(MockStore::new());
         let server_clone = server.clone();
         let shutdown_clone = shutdown.clone();
-        let store_clone = store.clone();
+        let app_clone = app.clone();
         let worker = thread::spawn(move || {
-            run_http_worker_loop(server_clone.as_ref(), &store_clone, shutdown_clone);
+            run_http_worker_loop(server_clone.as_ref(), app_clone.as_ref(), shutdown_clone);
         });
         thread::sleep(Duration::from_millis(100));
         shutdown.signal();
@@ -366,5 +372,17 @@ mod tests {
             "Worker took too long to shutdown: {:?}",
             duration
         );
+    }
+
+    fn mock_app(store: MockStore) -> Arc<ArchiveApplication> {
+        let store = Arc::new(store);
+        let import_store: Arc<dyn ImportWriteStore + Send + Sync> = store.clone();
+        let read_store: Arc<dyn ArtifactReadStore + Send + Sync> = store.clone();
+        let object_store: Arc<dyn ObjectStore + Send + Sync> = store;
+        Arc::new(ArchiveApplication::new(
+            import_store,
+            read_store,
+            object_store,
+        ))
     }
 }

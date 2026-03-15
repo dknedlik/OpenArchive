@@ -1,14 +1,16 @@
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use open_archive::config::{AnthropicConfig, GeminiConfig, GrokConfig, OpenAiConfig, PostgresConfig};
+use open_archive::config::{
+    AnthropicConfig, GeminiConfig, GrokConfig, OpenAiConfig, PostgresConfig,
+};
 use open_archive::processor::{
     AnthropicProcessorFactory, ArtifactProcessorFactory, ArtifactProcessorInput,
     GeminiProcessorFactory, GrokProcessorFactory, OpenAiProcessorFactory,
 };
-use open_archive::storage::{ArtifactReadStore, PostgresImportWriteStore};
 use open_archive::storage::types::EnrichmentTier;
+use open_archive::storage::{ArtifactReadStore, PostgresImportWriteStore};
 
 #[derive(Debug, Parser)]
 #[command(name = "probe_output_budget")]
@@ -97,9 +99,8 @@ fn main() -> Result<()> {
         for budget in &args.budgets {
             let factory: Box<dyn ArtifactProcessorFactory> = match provider {
                 ProbeProvider::OpenRouter => {
-                    let mut config = OpenAiConfig::from_env().context(
-                        "failed to reload OpenAI config from env",
-                    )?;
+                    let mut config = OpenAiConfig::from_env()
+                        .context("failed to reload OpenAI config from env")?;
                     config.standard_model = model.clone();
                     config.quality_model = Some(model.clone());
                     config.max_output_tokens = *budget;

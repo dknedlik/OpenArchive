@@ -14,8 +14,8 @@ pub fn insert_job(conn: &Connection, j: &NewEnrichmentJob) -> StorageResult<()> 
     let job_type = j.job_type.as_str();
     let enrichment_tier = j.enrichment_tier.as_str();
     let job_status = j.job_status.as_str();
-    let required_capabilities =
-        serde_json::to_string(&j.required_capabilities).expect("required capabilities serializable");
+    let required_capabilities = serde_json::to_string(&j.required_capabilities)
+        .expect("required capabilities serializable");
     conn.execute(
         "INSERT INTO oa_enrichment_job \
          (job_id, artifact_id, job_type, enrichment_tier, spawned_by_job_id, job_status, \
@@ -85,7 +85,17 @@ pub fn claim_next_job(conn: &Connection, worker_id: &str) -> StorageResult<Optio
         required_capabilities_json,
         payload_json,
     ) = row
-        .get_as::<(String, String, String, String, Option<String>, i32, i32, String, String)>()
+        .get_as::<(
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            i32,
+            i32,
+            String,
+            String,
+        )>()
         .map_err(|source| StorageError::ClaimJob { source })?;
 
     // Validate job_type BEFORE any update to avoid stranding invalid jobs in running state

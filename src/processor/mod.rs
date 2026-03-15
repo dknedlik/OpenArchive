@@ -2,24 +2,24 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use reqwest::blocking::Client;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
 use crate::config::{OpenAiConfig, OpenAiReasoningEffort};
-use crate::storage::{
-    types::{
-        EnrichmentTier, LoadedParticipant, LoadedSegment,
-        ReconciliationDecisionKind, RetrievalIntent, ScopeType, SourceType,
-    },
+use crate::storage::types::{
+    EnrichmentTier, LoadedParticipant, LoadedSegment, ReconciliationDecisionKind, RetrievalIntent,
+    ScopeType, SourceType,
 };
 
 mod anthropic;
 mod gemini;
 mod grok;
 pub use anthropic::AnthropicProcessorFactory;
-pub use gemini::{GeminiBatchClient, GeminiBatchEnrichmentRequest, GeminiBatchJob, GeminiProcessorFactory};
+pub use gemini::{
+    GeminiBatchClient, GeminiBatchEnrichmentRequest, GeminiBatchJob, GeminiProcessorFactory,
+};
 pub use grok::GrokProcessorFactory;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,7 +236,8 @@ impl ArtifactProcessor for StubProcessor {
                         .to_ascii_lowercase()
                         .replace(' ', "_"),
                     title: Some("Participant interaction".to_string()),
-                    body_text: "The artifact captures an interaction between two participants.".to_string(),
+                    body_text: "The artifact captures an interaction between two participants."
+                        .to_string(),
                     confidence_label: "medium".to_string(),
                     evidence_segment_ids: vec![input.segments[0].segment_id.clone()],
                 }]
@@ -279,14 +280,24 @@ impl ReconciliationProcessor for StubReconciliationProcessor {
                 rationale: "Stub reconciliation defaults to create_new.".to_string(),
                 evidence_segment_ids: memory.evidence_segment_ids.clone(),
             })
-            .chain(input.relationships.iter().map(|relationship| ReconciliationDecisionOutput {
-                decision_kind: ReconciliationDecisionKind::CreateNew,
-                target_kind: "relationship".to_string(),
-                target_key: format!("{}:{}:{}", relationship.relationship_type, relationship.subject_key, relationship.object_key),
-                matched_object_id: None,
-                rationale: "Stub reconciliation defaults to create_new.".to_string(),
-                evidence_segment_ids: relationship.evidence_segment_ids.clone(),
-            }))
+            .chain(
+                input
+                    .relationships
+                    .iter()
+                    .map(|relationship| ReconciliationDecisionOutput {
+                        decision_kind: ReconciliationDecisionKind::CreateNew,
+                        target_kind: "relationship".to_string(),
+                        target_key: format!(
+                            "{}:{}:{}",
+                            relationship.relationship_type,
+                            relationship.subject_key,
+                            relationship.object_key
+                        ),
+                        matched_object_id: None,
+                        rationale: "Stub reconciliation defaults to create_new.".to_string(),
+                        evidence_segment_ids: relationship.evidence_segment_ids.clone(),
+                    }),
+            )
             .collect())
     }
 }
@@ -399,20 +410,16 @@ impl HostedArtifactProcessor {
         input: &ArtifactProcessorInput,
         user_prompt: &str,
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
-        let inference_result = self
-            .client
-            .complete_json(
-                &self.model,
-                self.strategy.system_prompt(),
-                user_prompt,
-                &structured_output_schema_wrapper(),
-            )?;
-        let parsed: ModelArtifactOutput =
-            serde_json::from_str(&inference_result.output_text).map_err(|source| {
-                ProcessorError::ParseModelJson {
-                    source,
-                    body_preview: preview(&inference_result.output_text),
-                }
+        let inference_result = self.client.complete_json(
+            &self.model,
+            self.strategy.system_prompt(),
+            user_prompt,
+            &structured_output_schema_wrapper(),
+        )?;
+        let parsed: ModelArtifactOutput = serde_json::from_str(&inference_result.output_text)
+            .map_err(|source| ProcessorError::ParseModelJson {
+                source,
+                body_preview: preview(&inference_result.output_text),
             })?;
         let parsed = parsed.resolve_evidence_aliases(input);
 
@@ -433,20 +440,16 @@ impl HostedReconciliationProcessor {
         input: &ReconciliationProcessorInput,
         user_prompt: &str,
     ) -> Result<Vec<ReconciliationDecisionOutput>, ProcessorError> {
-        let inference_result = self
-            .client
-            .complete_json(
-                &self.model,
-                self.system_prompt,
-                user_prompt,
-                &reconciliation_output_schema_wrapper(),
-            )?;
-        let parsed: ModelReconciliationOutput =
-            serde_json::from_str(&inference_result.output_text).map_err(|source| {
-                ProcessorError::ParseModelJson {
-                    source,
-                    body_preview: preview(&inference_result.output_text),
-                }
+        let inference_result = self.client.complete_json(
+            &self.model,
+            self.system_prompt,
+            user_prompt,
+            &reconciliation_output_schema_wrapper(),
+        )?;
+        let parsed: ModelReconciliationOutput = serde_json::from_str(&inference_result.output_text)
+            .map_err(|source| ProcessorError::ParseModelJson {
+                source,
+                body_preview: preview(&inference_result.output_text),
             })?;
         parsed.validate_against(input)?;
         Ok(parsed.into_outputs())
@@ -605,10 +608,9 @@ impl OpenAiClient {
         let mut default_headers = HeaderMap::new();
         default_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         let bearer = format!("Bearer {}", config.api_key);
-        let auth_value =
-            HeaderValue::from_str(&bearer).map_err(|err| ProcessorError::Message {
-                message: format!("invalid OpenAI API key header: {err}"),
-            })?;
+        let auth_value = HeaderValue::from_str(&bearer).map_err(|err| ProcessorError::Message {
+            message: format!("invalid OpenAI API key header: {err}"),
+        })?;
         default_headers.insert(AUTHORIZATION, auth_value);
 
         let client = Client::builder()
@@ -676,8 +678,8 @@ impl OpenAiClient {
             ],
         };
 
-        let request_body =
-            serde_json::to_vec(&body).map_err(|source| ProcessorError::SerializePrompt { source })?;
+        let request_body = serde_json::to_vec(&body)
+            .map_err(|source| ProcessorError::SerializePrompt { source })?;
 
         let response = request
             .body(request_body)
@@ -697,9 +699,11 @@ impl OpenAiClient {
         }
 
         let parsed: OpenRouterResponsesResponse =
-            serde_json::from_str(&response_text).map_err(|source| ProcessorError::ParseInferenceResponse {
-                source,
-                body_preview: preview(&response_text),
+            serde_json::from_str(&response_text).map_err(|source| {
+                ProcessorError::ParseInferenceResponse {
+                    source,
+                    body_preview: preview(&response_text),
+                }
             })?;
 
         let usage = parsed
@@ -775,7 +779,6 @@ struct OpenRouterResponsesContentItem {
     text: String,
 }
 
-
 #[derive(Debug, Deserialize)]
 struct OpenRouterResponsesResponse {
     #[serde(default)]
@@ -799,7 +802,9 @@ impl OpenRouterResponsesResponse {
             match item {
                 OpenRouterResponsesOutputItem::Message { content } => {
                     message_texts.extend(content.into_iter().filter_map(|content| match content {
-                        OpenRouterResponsesOutputContent::OutputText { text } if !text.trim().is_empty() => {
+                        OpenRouterResponsesOutputContent::OutputText { text }
+                            if !text.trim().is_empty() =>
+                        {
                             Some(text)
                         }
                         _ => None,
@@ -829,9 +834,7 @@ impl OpenRouterResponsesResponse {
 
 impl InferenceUsage {
     fn from_openrouter_usage(usage: OpenRouterUsage) -> Option<Self> {
-        let reported_cost_micros = usage
-            .cost
-            .map(|cost| (cost * 1_000_000.0).round() as u64);
+        let reported_cost_micros = usage.cost.map(|cost| (cost * 1_000_000.0).round() as u64);
 
         if usage.input_tokens.is_none()
             && usage.output_tokens.is_none()
@@ -1075,7 +1078,10 @@ impl ModelArtifactOutput {
         }
 
         for (index, classification) in self.classifications.iter().enumerate() {
-            validate_text_field(&format!("classifications[{index}].title"), &classification.title)?;
+            validate_text_field(
+                &format!("classifications[{index}].title"),
+                &classification.title,
+            )?;
             validate_text_field(
                 &format!("classifications[{index}].body_text"),
                 &classification.body_text,
@@ -1103,7 +1109,10 @@ impl ModelArtifactOutput {
 
         if self.memories.len() > 5 {
             return Err(ProcessorError::InvalidModelOutput {
-                detail: format!("model returned {} memories; expected at most 5", self.memories.len()),
+                detail: format!(
+                    "model returned {} memories; expected at most 5",
+                    self.memories.len()
+                ),
             });
         }
 
@@ -1132,8 +1141,14 @@ impl ModelArtifactOutput {
 
         for (index, entity) in self.entities.iter().enumerate() {
             validate_text_field(&format!("entities[{index}].entity_key"), &entity.entity_key)?;
-            validate_text_field(&format!("entities[{index}].display_name"), &entity.display_name)?;
-            validate_text_field(&format!("entities[{index}].entity_type"), &entity.entity_type)?;
+            validate_text_field(
+                &format!("entities[{index}].display_name"),
+                &entity.display_name,
+            )?;
+            validate_text_field(
+                &format!("entities[{index}].entity_type"),
+                &entity.entity_type,
+            )?;
             validate_evidence_ids(
                 &format!("entities[{index}].evidence_segment_ids"),
                 &entity.evidence_segment_ids,
@@ -1154,7 +1169,10 @@ impl ModelArtifactOutput {
                 &format!("relationships[{index}].object_key"),
                 &relationship.object_key,
             )?;
-            validate_text_field(&format!("relationships[{index}].title"), &relationship.title)?;
+            validate_text_field(
+                &format!("relationships[{index}].title"),
+                &relationship.title,
+            )?;
             validate_text_field(
                 &format!("relationships[{index}].body_text"),
                 &relationship.body_text,
@@ -1201,9 +1219,8 @@ impl ModelArtifactOutput {
 
         if self.escalate_to_frontier && self.importance_score < 8 {
             return Err(ProcessorError::InvalidModelOutput {
-                detail:
-                    "escalate_to_frontier cannot be true when importance_score is below 8"
-                        .to_string(),
+                detail: "escalate_to_frontier cannot be true when importance_score is below 8"
+                    .to_string(),
             });
         }
 
@@ -1315,9 +1332,15 @@ impl ModelReconciliationOutput {
             .summary
             .evidence_segment_ids
             .iter()
-            .chain(input.memories.iter().flat_map(|memory| memory.evidence_segment_ids.iter()))
             .chain(
-                input.relationships
+                input
+                    .memories
+                    .iter()
+                    .flat_map(|memory| memory.evidence_segment_ids.iter()),
+            )
+            .chain(
+                input
+                    .relationships
                     .iter()
                     .flat_map(|relationship| relationship.evidence_segment_ids.iter()),
             )
@@ -1326,17 +1349,36 @@ impl ModelReconciliationOutput {
         let valid_targets: HashSet<String> = input
             .memories
             .iter()
-            .map(|memory| memory.title.clone().unwrap_or_else(|| memory.body_text.chars().take(64).collect()))
+            .map(|memory| {
+                memory
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| memory.body_text.chars().take(64).collect())
+            })
             .chain(input.relationships.iter().map(|relationship| {
-                format!("{}:{}:{}", relationship.relationship_type, relationship.subject_key, relationship.object_key)
+                format!(
+                    "{}:{}:{}",
+                    relationship.relationship_type,
+                    relationship.subject_key,
+                    relationship.object_key
+                )
             }))
             .collect();
         let mut seen_targets = HashSet::new();
 
         for (index, decision) in self.decisions.iter().enumerate() {
-            validate_text_field(&format!("decisions[{index}].target_kind"), &decision.target_kind)?;
-            validate_text_field(&format!("decisions[{index}].target_key"), &decision.target_key)?;
-            validate_text_field(&format!("decisions[{index}].rationale"), &decision.rationale)?;
+            validate_text_field(
+                &format!("decisions[{index}].target_kind"),
+                &decision.target_kind,
+            )?;
+            validate_text_field(
+                &format!("decisions[{index}].target_key"),
+                &decision.target_key,
+            )?;
+            validate_text_field(
+                &format!("decisions[{index}].rationale"),
+                &decision.rationale,
+            )?;
             if !valid_targets.contains(&decision.target_key) {
                 return Err(ProcessorError::InvalidModelOutput {
                     detail: format!(
@@ -1460,8 +1502,8 @@ pub(crate) fn build_conversation_user_prompt(
         })
         .collect();
 
-    let segments_json =
-        serde_json::to_string_pretty(&prompt_segments).map_err(|source| ProcessorError::SerializePrompt { source })?;
+    let segments_json = serde_json::to_string_pretty(&prompt_segments)
+        .map_err(|source| ProcessorError::SerializePrompt { source })?;
 
     Ok(format!(
         "Input artifact:\n\
@@ -1552,10 +1594,10 @@ pub(crate) fn build_reconciliation_prompt(
         })
         .collect();
 
-    let memories_json =
-        serde_json::to_string_pretty(&memories).map_err(|source| ProcessorError::SerializePrompt { source })?;
-    let relationships_json =
-        serde_json::to_string_pretty(&relationships).map_err(|source| ProcessorError::SerializePrompt { source })?;
+    let memories_json = serde_json::to_string_pretty(&memories)
+        .map_err(|source| ProcessorError::SerializePrompt { source })?;
+    let relationships_json = serde_json::to_string_pretty(&relationships)
+        .map_err(|source| ProcessorError::SerializePrompt { source })?;
 
     Ok(format!(
         "Reconcile extraction candidates against archive retrieval results.\n\
@@ -1588,8 +1630,11 @@ fn preview(value: &str) -> String {
     value.chars().take(240).collect()
 }
 
-fn build_segment_alias_map(input: &ArtifactProcessorInput) -> std::collections::HashMap<String, String> {
-    input.segments
+fn build_segment_alias_map(
+    input: &ArtifactProcessorInput,
+) -> std::collections::HashMap<String, String> {
+    input
+        .segments
         .iter()
         .enumerate()
         .map(|(index, segment)| (segment_alias(index), segment.segment_id.clone()))
@@ -2056,11 +2101,14 @@ mod tests {
             })
             .to_string(),
         });
-        let factory =
-            OpenAiProcessorFactory::with_client(client, "gpt-4.1-mini", "gpt-5.4");
-        let processor = factory.build(EnrichmentTier::Standard).expect("processor should build");
+        let factory = OpenAiProcessorFactory::with_client(client, "gpt-4.1-mini", "gpt-5.4");
+        let processor = factory
+            .build(EnrichmentTier::Standard)
+            .expect("processor should build");
 
-        let output = processor.process(&sample_input()).expect("processor should succeed");
+        let output = processor
+            .process(&sample_input())
+            .expect("processor should succeed");
 
         assert_eq!(output.pipeline_name, "openai_enrichment");
         assert_eq!(output.classifications.len(), 1);
@@ -2099,9 +2147,13 @@ mod tests {
             .to_string(),
         });
         let factory = OpenAiProcessorFactory::with_client(client, "gpt-4.1-mini", "gpt-5.4");
-        let processor = factory.build(EnrichmentTier::Standard).expect("processor should build");
+        let processor = factory
+            .build(EnrichmentTier::Standard)
+            .expect("processor should build");
 
-        let err = processor.process(&sample_input()).expect_err("processor should fail");
+        let err = processor
+            .process(&sample_input())
+            .expect_err("processor should fail");
         assert!(matches!(err, ProcessorError::InvalidModelOutput { .. }));
     }
 
@@ -2161,7 +2213,9 @@ mod tests {
             ]),
         });
         let factory = OpenAiProcessorFactory::with_client(client, "gpt-4.1-mini", "gpt-5.4");
-        let processor = factory.build(EnrichmentTier::Standard).expect("processor should build");
+        let processor = factory
+            .build(EnrichmentTier::Standard)
+            .expect("processor should build");
 
         let output = processor
             .process(&sample_input())

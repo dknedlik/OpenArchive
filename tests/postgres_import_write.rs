@@ -14,7 +14,9 @@ fn postgres_config() -> Option<PostgresConfig> {
 
     let connection_string = std::env::var("OA_TEST_POSTGRES_URL")
         .or_else(|_| std::env::var("OA_POSTGRES_URL"))
-        .unwrap_or_else(|_| "postgres://openarchive:openarchive@127.0.0.1:5432/openarchive_import_test".to_string());
+        .unwrap_or_else(|_| {
+            "postgres://openarchive:openarchive@127.0.0.1:5432/openarchive_import_test".to_string()
+        });
 
     Some(PostgresConfig { connection_string })
 }
@@ -36,7 +38,10 @@ fn recreate_test_database(config: &PostgresConfig) {
         .next()
         .expect("database name");
     client
-        .execute(&format!("DROP DATABASE IF EXISTS {database_name} WITH (FORCE)"), &[])
+        .execute(
+            &format!("DROP DATABASE IF EXISTS {database_name} WITH (FORCE)"),
+            &[],
+        )
         .expect("drop integration database");
     client
         .execute(&format!("CREATE DATABASE {database_name}"), &[])
@@ -46,9 +51,7 @@ fn recreate_test_database(config: &PostgresConfig) {
 fn harness() -> Option<PostgresHarness> {
     static CONFIG: OnceLock<Option<PostgresConfig>> = OnceLock::new();
     CONFIG
-        .get_or_init(|| {
-            postgres_config()
-        })
+        .get_or_init(|| postgres_config())
         .clone()
         .map(PostgresHarness)
 }
@@ -71,7 +74,9 @@ impl ProviderHarness for PostgresHarness {
     }
 
     fn job_store(&self) -> Box<dyn open_archive::storage::EnrichmentJobLifecycleStore> {
-        Box::new(open_archive::storage::PostgresEnrichmentJobStore::new(self.0.clone()))
+        Box::new(open_archive::storage::PostgresEnrichmentJobStore::new(
+            self.0.clone(),
+        ))
     }
 
     fn seed_existing_artifact(&self, import_set: &open_archive::storage::WriteImportSet) {

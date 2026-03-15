@@ -15,9 +15,9 @@ use open_archive::storage::{
     EnrichmentJobLifecycleStore, JobType, WriteDerivationAttempt,
 };
 use open_archive::{ParticipantRole, VisibilityStatus};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 #[test]
@@ -96,7 +96,10 @@ fn test_worker_persists_stub_outputs_and_completes_job() {
     let attempts = derived_store.attempts.lock().unwrap();
     assert_eq!(attempts.len(), 1);
     assert!(attempts[0].objects.len() >= 3);
-    assert_eq!(attempts[0].run.run_status, open_archive::storage::DerivationRunStatus::Completed);
+    assert_eq!(
+        attempts[0].run.run_status,
+        open_archive::storage::DerivationRunStatus::Completed
+    );
     assert!(attempts[0].run.completed_at.is_some());
 }
 
@@ -164,15 +167,13 @@ fn test_worker_marks_job_retryable_for_transient_inference_failures() {
     assert_eq!(job_store.complete_count.load(Ordering::SeqCst), 0);
     assert_eq!(job_store.fail_count.load(Ordering::SeqCst), 0);
     assert!(job_store.retryable_count.load(Ordering::SeqCst) > 0);
-    assert!(
-        job_store
-            .last_retryable_message
-            .lock()
-            .unwrap()
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Processor execution failed")
-    );
+    assert!(job_store
+        .last_retryable_message
+        .lock()
+        .unwrap()
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Processor execution failed"));
 }
 
 #[test]
@@ -203,15 +204,13 @@ fn test_worker_fails_job_when_artifact_cannot_be_loaded() {
 
     assert_eq!(job_store.complete_count.load(Ordering::SeqCst), 0);
     assert!(job_store.fail_count.load(Ordering::SeqCst) > 0);
-    assert!(
-        job_store
-            .last_fail_message
-            .lock()
-            .unwrap()
-            .as_deref()
-            .unwrap_or_default()
-            .contains("not found for enrichment")
-    );
+    assert!(job_store
+        .last_fail_message
+        .lock()
+        .unwrap()
+        .as_deref()
+        .unwrap_or_default()
+        .contains("not found for enrichment"));
     assert!(derived_store.attempts.lock().unwrap().is_empty());
 }
 
@@ -252,15 +251,13 @@ fn test_worker_fails_job_when_payload_source_type_is_invalid() {
 
     assert_eq!(job_store.complete_count.load(Ordering::SeqCst), 0);
     assert!(job_store.fail_count.load(Ordering::SeqCst) > 0);
-    assert!(
-        job_store
-            .last_fail_message
-            .lock()
-            .unwrap()
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Invalid artifact source_type")
-    );
+    assert!(job_store
+        .last_fail_message
+        .lock()
+        .unwrap()
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Invalid artifact source_type"));
     assert!(derived_store.attempts.lock().unwrap().is_empty());
 }
 

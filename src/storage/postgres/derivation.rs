@@ -151,7 +151,9 @@ pub fn validate_derivation_attempt(
             return Err(StorageError::InvalidDerivationWrite {
                 detail: format!(
                     "derived object {} references derivation run {} but attempt run is {}",
-                    object.derived_object_id, object.derivation_run_id, attempt.run.derivation_run_id
+                    object.derived_object_id,
+                    object.derivation_run_id,
+                    attempt.run.derivation_run_id
                 ),
             });
         }
@@ -168,7 +170,8 @@ pub fn validate_derivation_attempt(
                 detail: format!("duplicate derived object id {}", object.derived_object_id),
             });
         }
-        if matches!(object.object_status, ObjectStatus::Active) && object_write.evidence_links.is_empty()
+        if matches!(object.object_status, ObjectStatus::Active)
+            && object_write.evidence_links.is_empty()
         {
             return Err(StorageError::InvalidDerivationWrite {
                 detail: format!(
@@ -188,7 +191,8 @@ pub fn validate_derivation_attempt(
                     ),
                 });
             }
-            let segment_artifact_id = load_segment_artifact_id(client, connection_string, &link.segment_id)?;
+            let segment_artifact_id =
+                load_segment_artifact_id(client, connection_string, &link.segment_id)?;
             if segment_artifact_id.as_deref() != Some(artifact_id.as_str()) {
                 return Err(StorageError::InvalidDerivationWrite {
                     detail: format!(
@@ -249,10 +253,7 @@ fn artifact_exists(
         )
         .map_err(|source| pg_error(connection_string, source))?;
 
-    Ok(row
-        .map(|row| row.get::<_, String>(0))
-        .as_deref()
-        == Some(artifact_id))
+    Ok(row.map(|row| row.get::<_, String>(0)).as_deref() == Some(artifact_id))
 }
 
 fn load_segment_artifact_id(

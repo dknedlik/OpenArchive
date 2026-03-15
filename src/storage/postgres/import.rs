@@ -15,7 +15,10 @@ pub fn find_payload_object_id_by_sha256(
     Ok(row.map(|row| row.get::<_, String>(0)))
 }
 
-pub fn insert_payload_object(client: &mut postgres::Client, p: &NewImportObjectRef) -> StorageResult<()> {
+pub fn insert_payload_object(
+    client: &mut postgres::Client,
+    p: &NewImportObjectRef,
+) -> StorageResult<()> {
     client
         .execute(
             "INSERT INTO oa_object_ref \

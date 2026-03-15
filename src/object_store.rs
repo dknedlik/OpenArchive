@@ -134,11 +134,12 @@ pub struct S3CompatibleObjectStore {
 
 impl S3CompatibleObjectStore {
     pub fn new(config: S3CompatibleObjectStoreConfig) -> ObjectStoreResult<Self> {
-        let endpoint = Url::parse(&config.endpoint).map_err(|source| ObjectStoreError::InvalidUrl {
-            key: "OA_S3_ENDPOINT",
-            value: config.endpoint.clone(),
-            source,
-        })?;
+        let endpoint =
+            Url::parse(&config.endpoint).map_err(|source| ObjectStoreError::InvalidUrl {
+                key: "OA_S3_ENDPOINT",
+                value: config.endpoint.clone(),
+                source,
+            })?;
         let bucket = Bucket::new(
             endpoint,
             match config.url_style {
@@ -170,9 +171,7 @@ impl S3CompatibleObjectStore {
     }
 
     fn upload_url(&self, storage_key: &str, mime_type: &str) -> Url {
-        let mut action = self
-            .bucket
-            .put_object(Some(&self.credentials), storage_key);
+        let mut action = self.bucket.put_object(Some(&self.credentials), storage_key);
         action.headers_mut().insert("content-type", mime_type);
         action.sign(Duration::from_secs(S3_SIGNED_URL_TTL_SECS))
     }
