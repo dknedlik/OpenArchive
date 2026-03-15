@@ -40,6 +40,9 @@ pub trait EnrichmentJobStore {
 ///   becomes terminal automatically when `mark_job_retryable` is called but
 ///   `attempt_count >= max_attempts`.
 pub trait EnrichmentJobLifecycleStore: Sync + Send {
+    /// Insert newly spawned jobs.
+    fn enqueue_jobs(&self, jobs: &[NewEnrichmentJob]) -> StorageResult<()>;
+
     /// Atomically claim the next eligible job.
     ///
     /// Eligible: `job_status IN ('pending', 'retryable') AND available_at <= SYSTIMESTAMP`.

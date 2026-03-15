@@ -181,12 +181,14 @@ impl SegmentType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobType {
+    ArtifactPreprocess,
     ArtifactEnrichment,
 }
 
 impl JobType {
     pub fn as_str(&self) -> &'static str {
         match self {
+            JobType::ArtifactPreprocess => "artifact_preprocess",
             JobType::ArtifactEnrichment => "artifact_enrichment",
         }
     }
@@ -195,6 +197,7 @@ impl JobType {
 impl JobType {
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
+            "artifact_preprocess" => Some(Self::ArtifactPreprocess),
             "artifact_enrichment" => Some(Self::ArtifactEnrichment),
             _ => None,
         }
@@ -333,6 +336,15 @@ impl DerivedObjectType {
             DerivedObjectType::Summary => "summary",
             DerivedObjectType::Classification => "classification",
             DerivedObjectType::Memory => "memory",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "summary" => Some(Self::Summary),
+            "classification" => Some(Self::Classification),
+            "memory" => Some(Self::Memory),
+            _ => None,
         }
     }
 }
@@ -685,6 +697,43 @@ pub struct NewEvidenceLink {
 // Job payload contract
 // ---------------------------------------------------------------------------
 
+/// Segment-scoped work unit created by preprocessing.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ConversationWindowRef {
+    pub window_id: String,
+    pub label: String,
+    pub start_sequence_no: i32,
+    pub end_sequence_no: i32,
+}
+
+/// Documented contract for the `artifact_preprocess` job payload.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ArtifactPreprocessPayload {
+    pub schema_version: String,
+    pub artifact_id: String,
+    pub import_id: String,
+    pub source_type: String,
+}
+
+impl ArtifactPreprocessPayload {
+    pub fn new_v1(artifact_id: &str, import_id: &str, source_type: SourceType) -> Self {
+        Self {
+            schema_version: "1".to_string(),
+            artifact_id: artifact_id.to_string(),
+            import_id: import_id.to_string(),
+            source_type: source_type.as_str().to_string(),
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("ArtifactPreprocessPayload is always serializable")
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+}
+
 /// Documented contract for the `artifact_enrichment` job payload.
 ///
 /// This is the exact shape stored in `oa_enrichment_job.payload_json`. The
@@ -704,16 +753,24 @@ pub struct ArtifactEnrichmentPayload {
     pub artifact_id: String,
     pub import_id: String,
     pub source_type: String,
+    #[serde(default)]
+    pub conversation_window: Option<ConversationWindowRef>,
 }
 
 impl ArtifactEnrichmentPayload {
     /// Build a slice-one payload with `schema_version = "1"`.
-    pub fn new_v1(artifact_id: &str, import_id: &str, source_type: SourceType) -> Self {
+    pub fn new_v1(
+        artifact_id: &str,
+        import_id: &str,
+        source_type: SourceType,
+        conversation_window: Option<ConversationWindowRef>,
+    ) -> Self {
         Self {
             schema_version: "1".to_string(),
             artifact_id: artifact_id.to_string(),
             import_id: import_id.to_string(),
             source_type: source_type.as_str().to_string(),
+            conversation_window,
         }
     }
 
@@ -802,4 +859,13 @@ pub struct LoadedArtifactForEnrichment {
     pub artifact: LoadedArtifactRecord,
     pub participants: Vec<LoadedParticipant>,
     pub segments: Vec<LoadedSegment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrainContextCandidate {
+    pub artifact_id: String,
+    pub artifact_title: Option<String>,
+    pub derived_object_type: DerivedObjectType,
+    pub title: Option<String>,
+    pub body_text: Option<String>,
 }

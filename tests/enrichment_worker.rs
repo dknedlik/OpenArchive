@@ -6,8 +6,9 @@ use open_archive::error::StorageResult;
 use open_archive::processor::{ArtifactProcessor, ArtifactProcessorFactory, ProcessorError};
 use open_archive::shutdown::ShutdownToken;
 use open_archive::storage::types::{
-    ArtifactEnrichmentPayload, ClaimedJob, EnrichmentTier, LoadedArtifactForEnrichment,
-    LoadedArtifactRecord, LoadedParticipant, LoadedSegment, RetryOutcome, SourceType,
+    ArtifactEnrichmentPayload, BrainContextCandidate, ClaimedJob, EnrichmentTier,
+    LoadedArtifactForEnrichment, LoadedArtifactRecord, LoadedParticipant, LoadedSegment,
+    NewEnrichmentJob, RetryOutcome, SourceType,
 };
 use open_archive::storage::{
     ArtifactListItem, ArtifactReadStore, DerivationWriteResult, DerivedMetadataWriteStore,
@@ -277,6 +278,7 @@ fn valid_claimed_job() -> ClaimedJob {
         "artifact-1",
         "import-1",
         SourceType::ChatGptExport,
+        None,
     );
     ClaimedJob {
         job_id: "job-1".to_string(),
@@ -343,6 +345,10 @@ impl EnrichmentJobLifecycleStore for SingleJobStore {
         *self.last_retryable_message.lock().unwrap() = Some(_error_message.to_string());
         Ok(RetryOutcome::Retried)
     }
+
+    fn enqueue_jobs(&self, _jobs: &[NewEnrichmentJob]) -> StorageResult<()> {
+        Ok(())
+    }
 }
 
 struct EmptyQueueMockStore {
@@ -379,6 +385,10 @@ impl EnrichmentJobLifecycleStore for EmptyQueueMockStore {
         _retry_after_seconds: i64,
     ) -> StorageResult<RetryOutcome> {
         Ok(RetryOutcome::Retried)
+    }
+
+    fn enqueue_jobs(&self, _jobs: &[NewEnrichmentJob]) -> StorageResult<()> {
+        Ok(())
     }
 }
 
@@ -446,6 +456,14 @@ impl ArtifactReadStore for FixedReadStore {
         _artifact_id: &str,
     ) -> StorageResult<Option<LoadedArtifactForEnrichment>> {
         Ok(self.loaded.clone())
+    }
+
+    fn load_brain_context_candidates(
+        &self,
+        _exclude_artifact_id: &str,
+        _limit: usize,
+    ) -> StorageResult<Vec<BrainContextCandidate>> {
+        Ok(Vec::new())
     }
 }
 

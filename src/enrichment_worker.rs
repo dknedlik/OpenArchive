@@ -1,15 +1,15 @@
 use crate::processor::{
-    ArtifactBatchProcessor, ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
-    ProcessorError,
+    ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput, ProcessorError,
     StubProcessorFactory,
 };
 use crate::shutdown::ShutdownToken;
 use crate::storage::{
-    ArtifactReadStore, ClaimedJob, ClassificationObjectJson, ArtifactEnrichmentPayload,
-    DerivationRunStatus, DerivationRunType, DerivedMetadataWriteStore, DerivedObjectPayload,
-    EnrichmentJobLifecycleStore, EvidenceRole, InputScopeType, MemoryObjectJson, NewDerivationRun,
-    NewDerivedObject, NewEvidenceLink, ObjectStatus, OriginKind, ScopeType, SummaryObjectJson,
-    SupportStrength, WriteDerivationAttempt, WriteDerivedObject,
+    ArtifactPreprocessPayload, ArtifactReadStore, ClaimedJob, ClassificationObjectJson,
+    ArtifactEnrichmentPayload, ConversationWindowRef, DerivationRunStatus, DerivationRunType,
+    DerivedMetadataWriteStore, DerivedObjectPayload, EnrichmentJobLifecycleStore, EvidenceRole,
+    InputScopeType, MemoryObjectJson, NewDerivationRun, NewDerivedObject, NewEnrichmentJob,
+    NewEvidenceLink, ObjectStatus, OriginKind, ScopeType, SummaryObjectJson, SupportStrength,
+    WriteDerivationAttempt, WriteDerivedObject,
 };
 use crate::domain::SourceTimestamp;
 use anyhow::Result;
@@ -20,6 +20,8 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RETRYABLE_INFERENCE_BACKOFF_SECONDS: i64 = 60;
+const PREPROCESS_WINDOW_SEGMENTS: usize = 24;
+const PREPROCESS_WINDOW_OVERLAP: usize = 4;
 
 /// Worker ID format: enrichment:<pid>:<worker_index>
 pub fn format_worker_id(pid: u32, worker_index: usize) -> String {
@@ -77,206 +79,143 @@ fn process_claimed_or_batched_jobs(
     derived_store: &dyn DerivedMetadataWriteStore,
     processor_factory: &dyn ArtifactProcessorFactory,
 ) -> std::result::Result<(), String> {
-    let Some(batch_processor) = processor_factory
-        .build_batch_processor(first_job.enrichment_tier)
-        .map_err(|err| format!("failed to build batch processor: {err}"))?
-    else {
-        return process_claimed_job(
-            worker_id,
-            &first_job,
-            job_store,
-            read_store,
-            derived_store,
-            processor_factory,
-        );
-    };
-
-    let mut claimed_jobs = vec![first_job];
-    while claimed_jobs.len() < batch_processor.max_batch_jobs() {
-        match job_store.claim_next_job(worker_id) {
-            Ok(Some(job)) if job.enrichment_tier == claimed_jobs[0].enrichment_tier => claimed_jobs.push(job),
-            Ok(Some(job)) => {
-                process_claimed_job(worker_id, &job, job_store, read_store, derived_store, processor_factory)?;
-            }
-            Ok(None) => break,
-            Err(err) => {
-                error!("Worker {} failed to claim additional batch job: {}", worker_id, err);
-                break;
-            }
-        }
+    if first_job.job_type == crate::storage::JobType::ArtifactPreprocess {
+        return process_preprocess_job(worker_id, &first_job, job_store, read_store);
     }
-
-    process_claimed_job_batch(
+    process_claimed_job(
         worker_id,
-        claimed_jobs,
+        &first_job,
         job_store,
         read_store,
         derived_store,
         processor_factory,
-        batch_processor,
     )
 }
 
-fn process_claimed_job_batch(
+fn process_preprocess_job(
     worker_id: &str,
-    claimed_jobs: Vec<ClaimedJob>,
+    claimed_job: &ClaimedJob,
     job_store: &dyn EnrichmentJobLifecycleStore,
     read_store: &dyn ArtifactReadStore,
-    derived_store: &dyn DerivedMetadataWriteStore,
-    processor_factory: &dyn ArtifactProcessorFactory,
-    batch_processor: Box<dyn ArtifactBatchProcessor>,
 ) -> std::result::Result<(), String> {
-    let single_processor = processor_factory
-        .build(claimed_jobs[0].enrichment_tier)
-        .map_err(|err| format!("failed to build single processor fallback: {err}"))?;
+    let payload = ArtifactPreprocessPayload::from_json(&claimed_job.payload_json).map_err(|err| {
+        fail_job(
+            job_store,
+            worker_id,
+            &claimed_job.job_id,
+            "Failed to parse preprocess payload JSON",
+            err,
+        )
+    })?;
 
-    let mut batch_candidates = Vec::new();
-    let mut batch_bytes = 0usize;
-    let mut deferred_single = Vec::new();
-
-    for claimed_job in claimed_jobs {
-        let payload = match ArtifactEnrichmentPayload::from_json(&claimed_job.payload_json) {
-            Ok(payload) => payload,
-            Err(err) => {
-                fail_job(
-                    job_store,
-                    worker_id,
-                    &claimed_job.job_id,
-                    "Failed to parse payload JSON",
-                    err,
-                );
-                continue;
-            }
-        };
-
-        let loaded = match read_store.load_artifact_for_enrichment(&claimed_job.artifact_id) {
-            Ok(Some(loaded)) => loaded,
-            Ok(None) => {
-                fail_job_message(
-                    job_store,
-                    worker_id,
-                    &claimed_job.job_id,
-                    format!("Artifact {} not found for enrichment", claimed_job.artifact_id),
-                );
-                continue;
-            }
-            Err(err) => {
-                fail_job(
-                    job_store,
-                    worker_id,
-                    &claimed_job.job_id,
-                    "Failed to load artifact for enrichment",
-                    err,
-                );
-                continue;
-            }
-        };
-
-        let Some(source_type) = crate::storage::SourceType::from_str(&payload.source_type) else {
+    let loaded = read_store
+        .load_artifact_for_enrichment(&claimed_job.artifact_id)
+        .map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to load artifact for preprocessing",
+                err,
+            )
+        })?
+        .ok_or_else(|| {
             fail_job_message(
                 job_store,
                 worker_id,
                 &claimed_job.job_id,
-                format!(
-                    "Invalid artifact source_type in enrichment payload: {}",
-                    payload.source_type
-                ),
-            );
-            continue;
-        };
-
-        let input = ArtifactProcessorInput {
-            artifact_id: loaded.artifact.artifact_id.clone(),
-            import_id: payload.import_id.clone(),
-            source_type,
-            title: loaded.artifact.title.clone(),
-            participants: loaded.participants,
-            segments: loaded.segments,
-        };
-
-        if !batch_processor.can_process(&input) {
-            deferred_single.push((claimed_job, input));
-            continue;
-        }
-
-        match batch_processor.estimate_size_bytes(&input) {
-            Ok(size)
-                if batch_candidates.len() < batch_processor.max_batch_jobs()
-                    && batch_bytes + size <= batch_processor.max_batch_bytes() =>
-            {
-                batch_bytes += size;
-                batch_candidates.push((claimed_job, input));
-            }
-            Ok(_) => deferred_single.push((claimed_job, input)),
-            Err(err) => {
-                fail_job(
-                    job_store,
-                    worker_id,
-                    &claimed_job.job_id,
-                    "Failed to prepare batch prompt",
-                    err,
-                );
-            }
-        }
-    }
-
-    if !batch_candidates.is_empty() {
-        let inputs: Vec<ArtifactProcessorInput> =
-            batch_candidates.iter().map(|(_, input)| input.clone()).collect();
-        let results = batch_processor.process_batch(&inputs);
-        for ((claimed_job, input), result) in batch_candidates.into_iter().zip(results.into_iter()) {
-            match result {
-                Ok(output) => persist_and_complete_job(
-                    worker_id,
-                    &claimed_job,
-                    &input,
-                    &output,
-                    job_store,
-                    derived_store,
-                )?,
-                Err(err) => {
-                    debug!(
-                        "Worker {} retrying batch item {} through single-item fallback after batch failure: {}",
-                        worker_id, claimed_job.job_id, err
-                    );
-                    match single_processor.process(&input) {
-                        Ok(output) => persist_and_complete_job(
-                            worker_id,
-                            &claimed_job,
-                            &input,
-                            &output,
-                            job_store,
-                            derived_store,
-                        )?,
-                        Err(single_err) => {
-                            let _ = handle_processor_error(
-                                job_store,
-                                worker_id,
-                                &claimed_job.job_id,
-                                single_err,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    for (claimed_job, input) in deferred_single {
-        let output = single_processor.process(&input).map_err(|err| {
-            handle_processor_error(job_store, worker_id, &claimed_job.job_id, err)
+                format!("Artifact {} not found for preprocessing", claimed_job.artifact_id),
+            )
         })?;
-        persist_and_complete_job(
-            worker_id,
-            &claimed_job,
-            &input,
-            &output,
+
+    let Some(source_type) = crate::storage::SourceType::from_str(&payload.source_type) else {
+        return Err(fail_job_message(
             job_store,
-            derived_store,
-        )?;
+            worker_id,
+            &claimed_job.job_id,
+            format!(
+                "Invalid artifact source_type in preprocess payload: {}",
+                payload.source_type
+            ),
+        ));
+    };
+
+    let windows = build_preprocess_windows(&claimed_job.artifact_id, &loaded.segments);
+    let jobs = windows
+        .into_iter()
+        .map(|window| NewEnrichmentJob {
+            job_id: new_id("job"),
+            artifact_id: claimed_job.artifact_id.clone(),
+            job_type: crate::storage::JobType::ArtifactEnrichment,
+            enrichment_tier: claimed_job.enrichment_tier,
+            spawned_by_job_id: Some(claimed_job.job_id.clone()),
+            job_status: crate::storage::JobStatus::Pending,
+            max_attempts: 3,
+            priority_no: 100,
+            required_capabilities: vec!["text".to_string()],
+            payload_json: ArtifactEnrichmentPayload::new_v1(
+                &claimed_job.artifact_id,
+                &payload.import_id,
+                source_type,
+                Some(window),
+            )
+            .to_json(),
+        })
+        .collect::<Vec<_>>();
+
+    job_store.enqueue_jobs(&jobs).map_err(|err| {
+        fail_job(
+            job_store,
+            worker_id,
+            &claimed_job.job_id,
+            "Failed to enqueue enrichment jobs from preprocess",
+            err,
+        )
+    })?;
+
+    job_store
+        .complete_job(worker_id, &claimed_job.job_id)
+        .map_err(|err| format!("failed to complete preprocess job {}: {err}", claimed_job.job_id))?;
+    Ok(())
+}
+
+fn build_preprocess_windows(
+    artifact_id: &str,
+    segments: &[crate::storage::LoadedSegment],
+) -> Vec<ConversationWindowRef> {
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    if segments.len() <= PREPROCESS_WINDOW_SEGMENTS {
+        return vec![ConversationWindowRef {
+            window_id: format!("{artifact_id}:window:0"),
+            label: "full conversation".to_string(),
+            start_sequence_no: segments.first().map(|segment| segment.sequence_no).unwrap_or(0),
+            end_sequence_no: segments.last().map(|segment| segment.sequence_no).unwrap_or(0),
+        }];
     }
 
-    Ok(())
+    let mut windows = Vec::new();
+    let mut start = 0usize;
+    let step = PREPROCESS_WINDOW_SEGMENTS
+        .saturating_sub(PREPROCESS_WINDOW_OVERLAP)
+        .max(1);
+    while start < segments.len() {
+        let end = (start + PREPROCESS_WINDOW_SEGMENTS).min(segments.len());
+        let first = &segments[start];
+        let last = &segments[end - 1];
+        windows.push(ConversationWindowRef {
+            window_id: format!("{artifact_id}:window:{}", windows.len()),
+            label: format!("messages {}-{}", first.sequence_no, last.sequence_no),
+            start_sequence_no: first.sequence_no,
+            end_sequence_no: last.sequence_no,
+        });
+        if end == segments.len() {
+            break;
+        }
+        start += step;
+    }
+    windows
 }
 
 fn process_claimed_job(
@@ -321,7 +260,7 @@ fn process_claimed_job(
         source_type,
         title: loaded.artifact.title.clone(),
         participants: loaded.participants,
-        segments: loaded.segments,
+        segments: filter_segments_for_payload(&loaded.segments, &payload),
     };
 
     let processor = processor_factory
@@ -562,6 +501,23 @@ fn build_evidence_links(derived_object_id: &str, segment_ids: &[String]) -> Vec<
         .collect()
 }
 
+fn filter_segments_for_payload(
+    segments: &[crate::storage::LoadedSegment],
+    payload: &ArtifactEnrichmentPayload,
+) -> Vec<crate::storage::LoadedSegment> {
+    let Some(window) = &payload.conversation_window else {
+        return segments.to_vec();
+    };
+    segments
+        .iter()
+        .filter(|segment| {
+            segment.sequence_no >= window.start_sequence_no
+                && segment.sequence_no <= window.end_sequence_no
+        })
+        .cloned()
+        .collect()
+}
+
 fn new_id(prefix: &str) -> String {
     static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
@@ -657,6 +613,13 @@ mod tests {
     }
 
     impl EnrichmentJobLifecycleStore for MockJobStore {
+        fn enqueue_jobs(
+            &self,
+            _jobs: &[NewEnrichmentJob],
+        ) -> crate::error::StorageResult<()> {
+            Ok(())
+        }
+
         fn claim_next_job(
             &self,
             _worker_id: &str,
@@ -711,6 +674,14 @@ mod tests {
             _artifact_id: &str,
         ) -> crate::error::StorageResult<Option<LoadedArtifactForEnrichment>> {
             Ok(self.loaded.clone())
+        }
+
+        fn load_brain_context_candidates(
+            &self,
+            _exclude_artifact_id: &str,
+            _limit: usize,
+        ) -> crate::error::StorageResult<Vec<crate::storage::BrainContextCandidate>> {
+            Ok(Vec::new())
         }
     }
 
@@ -806,6 +777,7 @@ mod tests {
                 "artifact-1",
                 "import-1",
                 crate::storage::SourceType::ChatGptExport,
+                None,
             )
             .to_json(),
         };
@@ -846,6 +818,7 @@ mod tests {
                 "artifact-2",
                 "import-2",
                 crate::storage::SourceType::ChatGptExport,
+                None,
             )
             .to_json(),
         };

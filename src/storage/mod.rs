@@ -43,8 +43,9 @@ pub use postgres::{
 };
 pub use segment_store::SegmentStore;
 pub use types::{
-    ArtifactClass, ArtifactIngestResult, ArtifactListItem, ArtifactStatus, ClaimedJob,
-    ClassificationObjectJson, ArtifactEnrichmentPayload, DerivationRunStatus,
+    ArtifactClass, ArtifactIngestResult, ArtifactListItem, ArtifactPreprocessPayload,
+    ArtifactStatus, BrainContextCandidate, ClaimedJob, ClassificationObjectJson,
+    ArtifactEnrichmentPayload, ConversationWindowRef, DerivationRunStatus,
     DerivationRunType, DerivedObjectPayload, DerivedObjectType, EnrichmentStatus, EvidenceRole,
     EnrichmentTier, ImportStatus, InputScopeType, JobStatus, JobType, LoadedArtifactForEnrichment,
     LoadedArtifactRecord, LoadedParticipant, LoadedSegment, MemoryObjectJson, NewArtifact,

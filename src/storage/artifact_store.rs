@@ -1,6 +1,6 @@
 use crate::error::StorageResult;
 
-use crate::storage::types::{LoadedArtifactForEnrichment, NewArtifact, NewParticipant};
+use crate::storage::types::{BrainContextCandidate, LoadedArtifactForEnrichment, NewArtifact, NewParticipant};
 use crate::storage::StorageTx;
 
 /// Stores canonical artifacts and their participants.
@@ -28,4 +28,11 @@ pub trait ArtifactReadStore: Send + Sync {
         &self,
         artifact_id: &str,
     ) -> StorageResult<Option<LoadedArtifactForEnrichment>>;
+
+    /// Load active derived objects that can be used as enrichment context.
+    fn load_brain_context_candidates(
+        &self,
+        exclude_artifact_id: &str,
+        limit: usize,
+    ) -> StorageResult<Vec<BrainContextCandidate>>;
 }

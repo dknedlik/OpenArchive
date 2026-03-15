@@ -13,7 +13,7 @@ use crate::parser::{
     CHATGPT_NORMALIZATION_VERSION,
 };
 use crate::storage::{
-    ArtifactClass, ArtifactStatus, ArtifactEnrichmentPayload, EnrichmentStatus, ImportStatus,
+    ArtifactClass, ArtifactPreprocessPayload, ArtifactStatus, EnrichmentStatus, ImportStatus,
     ImportWriteStore, JobStatus, JobType, NewArtifact, NewEnrichmentJob, NewImport,
     NewImportObjectRef, NewParticipant, NewSegment, PayloadFormat, SegmentType, SourceType,
     WriteArtifactSet, WriteImportSet,
@@ -231,14 +231,14 @@ fn build_artifact_set(
         job: NewEnrichmentJob {
             job_id: new_id("job"),
             artifact_id: artifact_id.clone(),
-            job_type: JobType::ArtifactEnrichment,
+            job_type: JobType::ArtifactPreprocess,
             enrichment_tier: crate::storage::EnrichmentTier::Standard,
             spawned_by_job_id: None,
             job_status: JobStatus::Pending,
             max_attempts: 3,
             priority_no: 100,
             required_capabilities: vec!["text".to_string()],
-            payload_json: ArtifactEnrichmentPayload::new_v1(
+            payload_json: ArtifactPreprocessPayload::new_v1(
                 &artifact_id,
                 import_id,
                 SourceType::ChatGptExport,
@@ -474,11 +474,11 @@ mod tests {
             EnrichmentStatus::Pending
         );
 
-        // Verify job payload matches ArtifactEnrichmentPayload v1 contract
+        // Verify job payload matches ArtifactPreprocessPayload v1 contract
         for artifact_set in &import_set.artifact_sets {
             let payload =
-                super::ArtifactEnrichmentPayload::from_json(&artifact_set.job.payload_json)
-                    .expect("payload must deserialize to ArtifactEnrichmentPayload");
+                crate::storage::ArtifactPreprocessPayload::from_json(&artifact_set.job.payload_json)
+                    .expect("payload must deserialize to ArtifactPreprocessPayload");
             assert_eq!(payload.schema_version, "1");
             assert_eq!(
                 payload.source_type,

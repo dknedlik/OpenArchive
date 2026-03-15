@@ -55,6 +55,15 @@ impl ArtifactReadStore for PostgresImportWriteStore {
         let mut client = postgres_db::connect(&self.config)?;
         artifact::load_artifact_for_enrichment(&mut client, artifact_id)
     }
+
+    fn load_brain_context_candidates(
+        &self,
+        exclude_artifact_id: &str,
+        limit: usize,
+    ) -> StorageResult<Vec<crate::storage::types::BrainContextCandidate>> {
+        let mut client = postgres_db::connect(&self.config)?;
+        artifact::load_brain_context_candidates(&mut client, exclude_artifact_id, limit)
+    }
 }
 
 impl ImportWriteStore for PostgresImportWriteStore {
@@ -214,6 +223,26 @@ impl PostgresEnrichmentJobStore {
 }
 
 impl EnrichmentJobLifecycleStore for PostgresEnrichmentJobStore {
+    fn enqueue_jobs(&self, jobs: &[crate::storage::types::NewEnrichmentJob]) -> StorageResult<()> {
+        let mut client = postgres_db::connect(&self.config)?;
+        client
+            .batch_execute("BEGIN")
+            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                connection_string: self.config.connection_string.clone(),
+                source,
+            }))?;
+        for job in jobs {
+            job::insert_job(&mut client, job)?;
+        }
+        client
+            .batch_execute("COMMIT")
+            .map_err(|source| crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
+                connection_string: self.config.connection_string.clone(),
+                source,
+            }))?;
+        Ok(())
+    }
+
     fn claim_next_job(&self, worker_id: &str) -> StorageResult<Option<ClaimedJob>> {
         let mut client = postgres_db::connect(&self.config)?;
         job::claim_next_job(&mut client, worker_id)

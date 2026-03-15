@@ -8,18 +8,23 @@ use crate::config::AnthropicConfig;
 use crate::storage::types::EnrichmentTier;
 
 use super::{
-    ArtifactProcessor, ArtifactProcessorFactory, ConversationEnrichmentStrategy, HostedArtifactProcessor,
-    InferenceClient, InferenceResult, InferenceUsage, ProcessorError, structured_output_schema,
+    ArtifactProcessor, ArtifactProcessorFactory, BrainContextProvider, ConversationEnrichmentStrategy,
+    HostedArtifactProcessor, InferenceClient, InferenceResult, InferenceUsage, ProcessorError,
+    structured_output_schema,
 };
 
 pub struct AnthropicProcessorFactory {
     client: Arc<dyn InferenceClient>,
     standard_model: String,
     quality_model: String,
+    brain_context_provider: Option<Arc<dyn BrainContextProvider>>,
 }
 
 impl AnthropicProcessorFactory {
-    pub fn new(config: AnthropicConfig) -> Result<Self, String> {
+    pub fn new(
+        config: AnthropicConfig,
+        brain_context_provider: Option<Arc<dyn BrainContextProvider>>,
+    ) -> Result<Self, String> {
         let client = AnthropicClient::new(&config).map_err(|err| err.to_string())?;
         let quality_model = config
             .quality_model
@@ -30,6 +35,7 @@ impl AnthropicProcessorFactory {
             client: Arc::new(client),
             standard_model: config.standard_model,
             quality_model,
+            brain_context_provider,
         })
     }
 }
@@ -47,6 +53,7 @@ impl ArtifactProcessorFactory for AnthropicProcessorFactory {
             pipeline_name: "anthropic_enrichment",
             provider_name: "anthropic",
             strategy: ConversationEnrichmentStrategy::openai_default(),
+            brain_context_provider: self.brain_context_provider.clone(),
         }))
     }
 }

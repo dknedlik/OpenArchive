@@ -104,7 +104,7 @@ fn main() -> Result<()> {
                     config.quality_model = Some(model.clone());
                     config.max_output_tokens = *budget;
                     Box::new(
-                        OpenAiProcessorFactory::new(config)
+                        OpenAiProcessorFactory::new(config, None)
                             .map_err(|err| anyhow!("failed to build OpenAI factory: {err}"))?,
                     )
                 }
@@ -115,7 +115,7 @@ fn main() -> Result<()> {
                     config.quality_model = Some(model.clone());
                     config.max_output_tokens = *budget;
                     Box::new(
-                        GeminiProcessorFactory::new(config)
+                        GeminiProcessorFactory::new(config, None)
                             .map_err(|err| anyhow!("failed to build Gemini factory: {err}"))?,
                     )
                 }
@@ -126,7 +126,7 @@ fn main() -> Result<()> {
                     config.quality_model = Some(model.clone());
                     config.max_output_tokens = *budget;
                     Box::new(
-                        AnthropicProcessorFactory::new(config)
+                        AnthropicProcessorFactory::new(config, None)
                             .map_err(|err| anyhow!("failed to build Anthropic factory: {err}"))?,
                     )
                 }
@@ -137,7 +137,7 @@ fn main() -> Result<()> {
                     config.quality_model = Some(model.clone());
                     config.max_output_tokens = *budget;
                     Box::new(
-                        GrokProcessorFactory::new(config)
+                        GrokProcessorFactory::new(config, None)
                             .map_err(|err| anyhow!("failed to build Grok factory: {err}"))?,
                     )
                 }

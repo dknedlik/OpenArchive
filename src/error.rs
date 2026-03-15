@@ -486,6 +486,9 @@ pub enum StorageError {
 
     #[error("invalid enrichment_status '{value}' for artifact {artifact_id}")]
     InvalidEnrichmentStatus { artifact_id: String, value: String },
+
+    #[error("invalid derived_object_type '{value}' while loading context for {artifact_id}")]
+    InvalidDerivedObjectType { artifact_id: String, value: String },
 }
 
 #[derive(Debug, Error)]

@@ -12,8 +12,9 @@ use crate::storage::types::EnrichmentTier;
 use super::{
     build_conversation_user_prompt, should_shape_conversation_input, structured_output_schema,
     ArtifactBatchProcessor, ArtifactProcessor, ArtifactProcessorFactory, ArtifactProcessorInput,
-    ArtifactProcessorOutput, ConversationEnrichmentStrategy, GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
-    HostedArtifactProcessor, InferenceClient, InferenceResult, InferenceUsage, ProcessorError,
+    ArtifactProcessorOutput, BrainContextProvider, ConversationEnrichmentStrategy,
+    GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, HostedArtifactProcessor, InferenceClient,
+    InferenceResult, InferenceUsage, ProcessorError,
 };
 
 pub struct GeminiProcessorFactory {
@@ -21,10 +22,14 @@ pub struct GeminiProcessorFactory {
     batch_client: Option<Arc<GeminiBatchClient>>,
     standard_model: String,
     quality_model: String,
+    brain_context_provider: Option<Arc<dyn BrainContextProvider>>,
 }
 
 impl GeminiProcessorFactory {
-    pub fn new(config: GeminiConfig) -> Result<Self, String> {
+    pub fn new(
+        config: GeminiConfig,
+        brain_context_provider: Option<Arc<dyn BrainContextProvider>>,
+    ) -> Result<Self, String> {
         let client = GeminiClient::new(&config).map_err(|err| err.to_string())?;
         let quality_model = config
             .quality_model
@@ -40,6 +45,7 @@ impl GeminiProcessorFactory {
             },
             standard_model: config.standard_model,
             quality_model,
+            brain_context_provider,
         })
     }
 }
@@ -57,6 +63,7 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
             pipeline_name: "gemini_enrichment",
             provider_name: "gemini",
             strategy: ConversationEnrichmentStrategy::gemini_default(),
+            brain_context_provider: self.brain_context_provider.clone(),
         }))
     }
 
@@ -97,7 +104,7 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
     }
 
     fn estimate_size_bytes(&self, input: &ArtifactProcessorInput) -> Result<usize, ProcessorError> {
-        let user_prompt = build_conversation_user_prompt(input)?;
+        let user_prompt = build_conversation_user_prompt(input, &[])?;
         Ok(GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT.len() + user_prompt.len())
     }
 
@@ -111,7 +118,7 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
 
         let mut requests = Vec::with_capacity(inputs.len());
         for input in inputs {
-            match build_conversation_user_prompt(input) {
+            match build_conversation_user_prompt(input, &[]) {
                 Ok(user_prompt) => requests.push(GeminiBatchEnrichmentRequest {
                     key: input.artifact_id.clone(),
                     system_prompt: GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT.to_string(),

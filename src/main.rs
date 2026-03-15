@@ -244,6 +244,15 @@ mod tests {
         > {
             Ok(None)
         }
+
+        fn load_brain_context_candidates(
+            &self,
+            _exclude_artifact_id: &str,
+            _limit: usize,
+        ) -> open_archive::error::StorageResult<Vec<open_archive::storage::BrainContextCandidate>>
+        {
+            Ok(Vec::new())
+        }
     }
 
     impl ObjectStore for MockStore {

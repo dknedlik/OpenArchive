@@ -61,6 +61,15 @@ impl ArtifactReadStore for OracleImportWriteStore {
         let conn = db::connect(&self.config)?;
         artifact::load_artifact_for_enrichment(&conn, artifact_id)
     }
+
+    fn load_brain_context_candidates(
+        &self,
+        exclude_artifact_id: &str,
+        limit: usize,
+    ) -> StorageResult<Vec<crate::storage::types::BrainContextCandidate>> {
+        let conn = db::connect(&self.config)?;
+        artifact::load_brain_context_candidates(&conn, exclude_artifact_id, limit)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +247,18 @@ impl OracleEnrichmentJobStore {
 }
 
 impl EnrichmentJobLifecycleStore for OracleEnrichmentJobStore {
+    fn enqueue_jobs(&self, jobs: &[crate::storage::types::NewEnrichmentJob]) -> StorageResult<()> {
+        let conn = db::connect(&self.config)?;
+        for job in jobs {
+            job::insert_job(&conn, job)?;
+        }
+        conn.commit().map_err(|source| StorageError::Commit {
+            operation: "enqueue enrichment jobs",
+            source,
+        })?;
+        Ok(())
+    }
+
     fn claim_next_job(&self, worker_id: &str) -> StorageResult<Option<ClaimedJob>> {
         let conn = db::connect(&self.config)?;
         job::claim_next_job(&conn, worker_id)
