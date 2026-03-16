@@ -16,8 +16,9 @@ use super::{
     OpenRouterResponsesTextConfig, PREPROCESS_PHASE_ONE_SYSTEM_PROMPT,
     PREPROCESS_PHASE_TWO_SYSTEM_PROMPT, PREPROCESS_PROMPT_VERSION, PreprocessBatchSubmitter,
     PreprocessPhaseOneSpanResolved, PreprocessProcessor, ProcessorError,
-    ReconciliationBatchSubmitter, ReconciliationProcessor, ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
-    OPENAI_PROMPT_VERSION, RECONCILIATION_SYSTEM_PROMPT,
+    ReconciliationBatchSubmitter, ReconciliationProcessor, GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+    GROK_PROMPT_VERSION,
+    RECONCILIATION_SYSTEM_PROMPT,
 };
 
 pub struct GrokProcessorFactory {
@@ -73,7 +74,7 @@ impl ArtifactProcessorFactory for GrokProcessorFactory {
             model,
             pipeline_name: "grok_enrichment",
             provider_name: "grok",
-            strategy: ConversationEnrichmentStrategy::openai_default(),
+            strategy: ConversationEnrichmentStrategy::grok_default(),
         }))
     }
 
@@ -373,7 +374,7 @@ impl ExtractionBatchSubmitter for GrokExtractionSubmitter {
         let requests = build_grok_requests(inputs, &self.model, |input| {
             Ok(self.client.build_chat_completion_body(
                 &self.model,
-                ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+                GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
                 &super::build_conversation_user_prompt(input)?,
                 &super::structured_output_schema(),
             ))
@@ -420,7 +421,7 @@ impl ExtractionBatchSubmitter for GrokExtractionSubmitter {
                 result.usage,
                 "grok_enrichment",
                 "grok",
-                OPENAI_PROMPT_VERSION,
+                GROK_PROMPT_VERSION,
             ))
         }) {
             Ok(outputs) => outputs,
@@ -687,12 +688,12 @@ where
                 message: format!("Grok batch item {} failed: {}", item.batch_request_id, error),
             });
         } else {
-            let response_value = item.response.ok_or_else(|| ProcessorError::Message {
+            let response_value = item.chat_completion_response().ok_or_else(|| ProcessorError::Message {
                 message: format!("Grok batch item {} missing response", item.batch_request_id),
             })?;
             GrokBatchParsedResult {
-                output_text: flatten_grok_response_text(&response_value)?,
-                usage: extract_grok_usage(&response_value),
+                output_text: flatten_grok_response_text(response_value)?,
+                usage: extract_grok_usage(response_value),
             }
         };
         by_id.insert(item.batch_request_id, parsed);
@@ -786,6 +787,7 @@ fn parse_grok_json_response<T: serde::de::DeserializeOwned>(
 
 #[derive(Debug, Deserialize)]
 struct GrokBatch {
+    #[serde(alias = "batch_id")]
     id: String,
     state: GrokBatchState,
 }
@@ -811,7 +813,7 @@ struct GrokBatchRequestBody {
 struct GrokBatchResultsPage {
     #[serde(default)]
     results: Vec<GrokBatchResultItem>,
-    #[serde(default)]
+    #[serde(default, alias = "pagination_token")]
     next_page_token: Option<String>,
 }
 
@@ -821,5 +823,32 @@ struct GrokBatchResultItem {
     #[serde(default)]
     response: Option<serde_json::Value>,
     #[serde(default)]
+    batch_result: Option<GrokBatchResultEnvelope>,
+    #[serde(default)]
     error_message: Option<String>,
+}
+
+impl GrokBatchResultItem {
+    fn chat_completion_response(&self) -> Option<&serde_json::Value> {
+        self.response
+            .as_ref()
+            .or_else(|| {
+                self.batch_result
+                    .as_ref()
+                    .and_then(|result| result.response.as_ref())
+                    .and_then(|response| response.chat_get_completion.as_ref())
+            })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GrokBatchResultEnvelope {
+    #[serde(default)]
+    response: Option<GrokBatchResponseEnvelope>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GrokBatchResponseEnvelope {
+    #[serde(default)]
+    chat_get_completion: Option<serde_json::Value>,
 }

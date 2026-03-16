@@ -120,6 +120,7 @@ pub trait StageBehavior {
         rate_limiter: &RateLimiter,
         read_store: &dyn ArtifactReadStore,
         state_store: &dyn EnrichmentStateStore,
+        derived_store: &dyn DerivedMetadataWriteStore,
         job_store: &dyn EnrichmentJobLifecycleStore,
         worker_id: &str,
     ) -> Result<InFlightBatch, ()>;
@@ -435,6 +436,7 @@ pub fn stage_poller_loop(
                         rate_limiter,
                         read_store,
                         state_store,
+                        derived_store,
                         job_store,
                         &worker_id,
                     ) {
@@ -577,6 +579,7 @@ impl StageBehavior for PreprocessStage {
         rate_limiter: &RateLimiter,
         read_store: &dyn ArtifactReadStore,
         _state_store: &dyn EnrichmentStateStore,
+        _derived_store: &dyn DerivedMetadataWriteStore,
         job_store: &dyn EnrichmentJobLifecycleStore,
         worker_id: &str,
     ) -> Result<InFlightBatch, ()> {
@@ -934,6 +937,7 @@ impl StageBehavior for ExtractStage {
         rate_limiter: &RateLimiter,
         read_store: &dyn ArtifactReadStore,
         _state_store: &dyn EnrichmentStateStore,
+        _derived_store: &dyn DerivedMetadataWriteStore,
         job_store: &dyn EnrichmentJobLifecycleStore,
         worker_id: &str,
     ) -> Result<InFlightBatch, ()> {
@@ -1226,6 +1230,7 @@ impl StageBehavior for ReconcileStage {
         rate_limiter: &RateLimiter,
         read_store: &dyn ArtifactReadStore,
         state_store: &dyn EnrichmentStateStore,
+        derived_store: &dyn DerivedMetadataWriteStore,
         job_store: &dyn EnrichmentJobLifecycleStore,
         worker_id: &str,
     ) -> Result<InFlightBatch, ()> {
@@ -1308,6 +1313,21 @@ impl StageBehavior for ReconcileStage {
                     continue;
                 }
             };
+            if extraction_result.memories.is_empty() && extraction_result.relationships.is_empty() {
+                if let Err(()) = complete_reconcile_without_candidates(
+                    &job,
+                    &loaded,
+                    &extraction_result,
+                    &retrieval_result_set,
+                    job_store,
+                    state_store,
+                    derived_store,
+                    worker_id,
+                ) {
+                    continue;
+                }
+                continue;
+            }
             let input = match build_reconciliation_input(
                 &job.artifact_id,
                 &payload.source_type,
@@ -1712,6 +1732,67 @@ fn poller_mark_retryable(
             );
         }
     }
+}
+
+fn complete_reconcile_without_candidates(
+    job: &ClaimedJob,
+    loaded: &LoadedArtifactForEnrichment,
+    extraction_result: &ArtifactExtractionResult,
+    retrieval_result_set: &RetrievalResultSet,
+    job_store: &dyn EnrichmentJobLifecycleStore,
+    state_store: &dyn EnrichmentStateStore,
+    derived_store: &dyn DerivedMetadataWriteStore,
+    worker_id: &str,
+) -> Result<(), ()> {
+    let decisions = vec![ReconciliationDecision {
+        reconciliation_decision_id: new_id("reconcile"),
+        artifact_id: extraction_result.artifact_id.clone(),
+        job_id: job.job_id.clone(),
+        extraction_result_id: extraction_result.extraction_result_id.clone(),
+        retrieval_result_set_id: retrieval_result_set.retrieval_result_set_id.clone(),
+        pipeline_name: "artifact_reconciliation".to_string(),
+        pipeline_version: "v1".to_string(),
+        decision_kind: ReconciliationDecisionKind::InsufficientEvidence,
+        target_kind: "artifact".to_string(),
+        target_key: extraction_result.artifact_id.clone(),
+        matched_object_id: None,
+        rationale: "No candidate memories or relationships were extracted for reconciliation."
+            .to_string(),
+        evidence_segment_ids: extraction_result.summary_evidence_segment_ids.clone(),
+        status: "completed".to_string(),
+        error_message: None,
+    }];
+    if let Err(err) = state_store.save_reconciliation_decisions(&decisions) {
+        poller_fail_job(
+            job_store,
+            worker_id,
+            &job.job_id,
+            "Failed to persist reconciliation decisions",
+            err,
+        );
+        return Err(());
+    }
+    let attempt = build_derivation_attempt(
+        job,
+        &loaded.artifact.artifact_id,
+        extraction_result,
+        &decisions,
+    );
+    if let Err(err) = derived_store.write_derivation_attempt(attempt) {
+        poller_fail_job(
+            job_store,
+            worker_id,
+            &job.job_id,
+            "Failed to write derivation attempt",
+            err,
+        );
+        return Err(());
+    }
+    if let Err(msg) = poller_complete_job(job_store, worker_id, &job.job_id) {
+        error!("{msg}");
+        return Err(());
+    }
+    Ok(())
 }
 
 const PREPROCESS_WINDOW_SEGMENTS: usize = 24;

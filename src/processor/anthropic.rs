@@ -14,7 +14,8 @@ use super::{
     InferenceUsage, PREPROCESS_PHASE_ONE_SYSTEM_PROMPT, PREPROCESS_PHASE_TWO_SYSTEM_PROMPT,
     PREPROCESS_PROMPT_VERSION, PreprocessBatchSubmitter, PreprocessPhaseOneSpanResolved,
     PreprocessProcessor, ProcessorError, ReconciliationBatchSubmitter, ReconciliationProcessor,
-    ARTIFACT_EXTRACTION_SYSTEM_PROMPT, OPENAI_PROMPT_VERSION, RECONCILIATION_SYSTEM_PROMPT,
+    ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, ANTHROPIC_PROMPT_VERSION,
+    RECONCILIATION_SYSTEM_PROMPT,
 };
 
 pub struct AnthropicProcessorFactory {
@@ -70,7 +71,7 @@ impl ArtifactProcessorFactory for AnthropicProcessorFactory {
             model,
             pipeline_name: "anthropic_enrichment",
             provider_name: "anthropic",
-            strategy: ConversationEnrichmentStrategy::openai_default(),
+            strategy: ConversationEnrichmentStrategy::anthropic_default(),
         }))
     }
 
@@ -195,7 +196,7 @@ impl InferenceClient for AnthropicClient {
             tools: vec![AnthropicToolDefinition {
                 name: "record_enrichment",
                 description: "Return the OpenArchive enrichment result as structured JSON.",
-                input_schema: schema.clone(),
+                input_schema: AnthropicClient::tool_input_schema(schema),
             }],
             tool_choice: AnthropicToolChoice {
                 choice_type: "tool",
@@ -266,6 +267,14 @@ impl InferenceClient for AnthropicClient {
 }
 
 impl AnthropicClient {
+    fn tool_input_schema(schema: &serde_json::Value) -> serde_json::Value {
+        schema
+            .get("schema")
+            .filter(|_| schema.get("type").and_then(serde_json::Value::as_str) == Some("json_schema"))
+            .cloned()
+            .unwrap_or_else(|| schema.clone())
+    }
+
     fn create_message_batch(
         &self,
         requests: &[AnthropicBatchRequestOwned],
@@ -347,7 +356,7 @@ impl ExtractionBatchSubmitter for AnthropicExtractionSubmitter {
     ) -> Result<BatchHandle, ProcessorError> {
         let requests = build_anthropic_batch_requests(inputs, &self.model, |input| {
             Ok((
-                ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+                ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
                 super::build_conversation_user_prompt(input)?,
                 super::structured_output_schema(),
             ))
@@ -395,7 +404,7 @@ impl ExtractionBatchSubmitter for AnthropicExtractionSubmitter {
                 result.usage,
                 "anthropic_enrichment",
                 "anthropic",
-                OPENAI_PROMPT_VERSION,
+                ANTHROPIC_PROMPT_VERSION,
             ))
         }) {
             Ok(outputs) => outputs,

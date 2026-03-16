@@ -561,6 +561,7 @@ pub trait ReconciliationBatchSubmitter {
 trait EnrichmentStrategy: Send + Sync {
     fn prompt_version(&self) -> &'static str;
     fn system_prompt(&self) -> &'static str;
+    fn extraction_schema(&self) -> serde_json::Value;
     fn process(
         &self,
         processor: &HostedArtifactProcessor,
@@ -713,7 +714,7 @@ impl HostedArtifactProcessor {
             &self.model,
             self.strategy.system_prompt(),
             user_prompt,
-            &structured_output_schema_wrapper(),
+            &self.strategy.extraction_schema(),
         )?;
         let parsed: ModelArtifactOutput = serde_json::from_str(&inference_result.output_text)
             .map_err(|source| ProcessorError::ParseModelJson {
@@ -775,13 +776,15 @@ impl ReconciliationProcessor for HostedReconciliationProcessor {
 struct ConversationEnrichmentStrategy {
     prompt_version: &'static str,
     system_prompt: &'static str,
+    extraction_schema: fn() -> serde_json::Value,
 }
 
 impl ConversationEnrichmentStrategy {
     fn openai_default() -> Arc<dyn EnrichmentStrategy> {
         Arc::new(Self {
             prompt_version: OPENAI_PROMPT_VERSION,
-            system_prompt: ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+            system_prompt: OPENAI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+            extraction_schema: openai_structured_output_schema_wrapper,
         })
     }
 
@@ -789,6 +792,23 @@ impl ConversationEnrichmentStrategy {
         Arc::new(Self {
             prompt_version: GEMINI_PROMPT_VERSION,
             system_prompt: GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+            extraction_schema: structured_output_schema_wrapper,
+        })
+    }
+
+    fn anthropic_default() -> Arc<dyn EnrichmentStrategy> {
+        Arc::new(Self {
+            prompt_version: ANTHROPIC_PROMPT_VERSION,
+            system_prompt: ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+            extraction_schema: structured_output_schema_wrapper,
+        })
+    }
+
+    fn grok_default() -> Arc<dyn EnrichmentStrategy> {
+        Arc::new(Self {
+            prompt_version: GROK_PROMPT_VERSION,
+            system_prompt: GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+            extraction_schema: structured_output_schema_wrapper,
         })
     }
 }
@@ -800,6 +820,10 @@ impl EnrichmentStrategy for ConversationEnrichmentStrategy {
 
     fn system_prompt(&self) -> &'static str {
         self.system_prompt
+    }
+
+    fn extraction_schema(&self) -> serde_json::Value {
+        (self.extraction_schema)()
     }
 
     fn process(
@@ -1010,6 +1034,132 @@ impl InferenceClient for OpenAiClient {
 }
 
 impl OpenAiClient {
+    fn responses_text_format(schema: &serde_json::Value) -> serde_json::Value {
+        let format_type = schema
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        match format_type {
+            "json_schema" => {
+                let mut wrapped = schema.clone();
+                if let Some(inner) = wrapped.get_mut("schema") {
+                    Self::normalize_schema_for_openai(inner);
+                }
+                wrapped
+            }
+            "json_object" | "text" => schema.clone(),
+            _ => {
+                let mut normalized = schema.clone();
+                Self::normalize_schema_for_openai(&mut normalized);
+                serde_json::json!({
+                    "type": "json_schema",
+                    "name": "openarchive_structured_output",
+                    "strict": true,
+                    "schema": normalized,
+                })
+            }
+        }
+    }
+
+    fn normalize_schema_for_openai(schema: &mut serde_json::Value) {
+        match schema {
+            serde_json::Value::Object(map) => {
+                let required_names: std::collections::HashSet<String> = map
+                    .get("required")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| {
+                        items.iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(ToOwned::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let Some(properties) = map.get_mut("properties").and_then(serde_json::Value::as_object_mut) {
+                    let property_names: Vec<String> = properties.keys().cloned().collect();
+                    for property_name in &property_names {
+                        if let Some(property_schema) = properties.get_mut(property_name) {
+                            Self::normalize_schema_for_openai(property_schema);
+                            if !required_names.contains(property_name) {
+                                Self::make_schema_nullable(property_schema);
+                            }
+                        }
+                    }
+                    map.insert(
+                        "required".to_string(),
+                        serde_json::Value::Array(
+                            property_names
+                                .into_iter()
+                                .map(serde_json::Value::String)
+                                .collect(),
+                        ),
+                    );
+                }
+
+                if let Some(items) = map.get_mut("items") {
+                    Self::normalize_schema_for_openai(items);
+                }
+
+                if let Some(schema) = map.get_mut("schema") {
+                    Self::normalize_schema_for_openai(schema);
+                }
+
+                if let Some(any_of) = map.get_mut("anyOf").and_then(serde_json::Value::as_array_mut) {
+                    for variant in any_of {
+                        Self::normalize_schema_for_openai(variant);
+                    }
+                }
+
+                if let Some(one_of) = map.get_mut("oneOf").and_then(serde_json::Value::as_array_mut) {
+                    for variant in one_of {
+                        Self::normalize_schema_for_openai(variant);
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    Self::normalize_schema_for_openai(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn make_schema_nullable(schema: &mut serde_json::Value) {
+        let Some(map) = schema.as_object_mut() else {
+            return;
+        };
+        match map.get_mut("type") {
+            Some(serde_json::Value::String(existing)) => {
+                if existing != "null" {
+                    let original = existing.clone();
+                    *schema = serde_json::json!({
+                        "anyOf": [
+                            { "type": original },
+                            { "type": "null" }
+                        ]
+                    });
+                }
+            }
+            Some(serde_json::Value::Array(items)) => {
+                let has_null = items.iter().any(|item| item.as_str() == Some("null"));
+                if !has_null {
+                    items.push(serde_json::Value::String("null".to_string()));
+                }
+            }
+            _ => {
+                if !map.contains_key("anyOf") {
+                    let original = schema.clone();
+                    *schema = serde_json::json!({
+                        "anyOf": [
+                            original,
+                            { "type": "null" }
+                        ]
+                    });
+                }
+            }
+        }
+    }
+
     fn complete_via_responses(
         &self,
         model: &str,
@@ -1028,7 +1178,7 @@ impl OpenAiClient {
                     .map(|effort| effort.as_str()),
             },
             text: OpenRouterResponsesTextConfig {
-                format: schema.clone(),
+                format: Self::responses_text_format(schema),
             },
             input: vec![
                 OpenRouterResponsesInputItem {
@@ -1107,7 +1257,7 @@ impl OpenAiClient {
                 "effort": self.reasoning_effort_for_model(model).map(|effort| effort.as_str())
             },
             "text": {
-                "format": schema
+                "format": Self::responses_text_format(schema)
             },
             "input": [
                 {
@@ -1298,9 +1448,9 @@ impl ExtractionBatchSubmitter for OpenAiExtractionSubmitter {
                 url: "/v1/responses".to_string(),
                 body: self.client.build_responses_request(
                     &self.model,
-                    ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+                    OPENAI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
                     &user_prompt,
-                    &structured_output_schema(),
+                    &openai_structured_output_schema(),
                 ),
             });
         }
@@ -1322,8 +1472,9 @@ impl ExtractionBatchSubmitter for OpenAiExtractionSubmitter {
                     Ok(BatchPollResult::Succeeded(Box::new(batch)))
                 } else {
                     Ok(BatchPollResult::Failed(format!(
-                        "OpenAI batch {} completed without output_file_id",
-                        handle.batch_id
+                        "OpenAI batch {} completed without output_file_id (error_file_id={})",
+                        handle.batch_id,
+                        batch.error_file_id.as_deref().unwrap_or("none")
                     )))
                 }
             }
@@ -1670,6 +1821,8 @@ struct OpenAiBatchJob {
     status: Option<String>,
     #[serde(default)]
     output_file_id: Option<String>,
+    #[serde(default)]
+    error_file_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3276,6 +3429,15 @@ pub(crate) fn structured_output_schema_wrapper() -> serde_json::Value {
     })
 }
 
+pub(crate) fn openai_structured_output_schema_wrapper() -> serde_json::Value {
+    json!({
+        "type": "json_schema",
+        "name": "openarchive_artifact_enrichment_openai",
+        "strict": true,
+        "schema": openai_structured_output_schema()
+    })
+}
+
 pub(crate) fn preprocess_output_schema_wrapper() -> serde_json::Value {
     json!({
         "type": "json_schema",
@@ -3542,6 +3704,40 @@ pub(crate) fn structured_output_schema() -> serde_json::Value {
     })
 }
 
+pub(crate) fn openai_structured_output_schema() -> serde_json::Value {
+    let mut schema = structured_output_schema();
+    if let Some(memories) = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|properties| properties.get_mut("memories"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        memories.insert("maxItems".to_string(), serde_json::json!(2));
+        if let Some(items) = memories.get_mut("items").and_then(serde_json::Value::as_object_mut) {
+            if let Some(properties) = items
+                .get_mut("properties")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                if let Some(memory_type) = properties
+                    .get_mut("memory_type")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    memory_type.insert(
+                        "enum".to_string(),
+                        serde_json::json!([
+                            "preference",
+                            "project_fact",
+                            "identity_fact",
+                            "ongoing_task"
+                        ]),
+                    );
+                }
+            }
+        }
+    }
+    schema
+}
+
 pub(crate) fn reconciliation_output_schema_wrapper() -> serde_json::Value {
     json!({
         "type": "json_schema",
@@ -3591,14 +3787,22 @@ pub(crate) fn reconciliation_output_schema() -> serde_json::Value {
     })
 }
 
-const OPENAI_PROMPT_VERSION: &str = "openai-strict-v1";
+const OPENAI_PROMPT_VERSION: &str = "openai-strict-v2";
+pub(crate) const ANTHROPIC_PROMPT_VERSION: &str = "anthropic-strict-v1";
 pub(crate) const GEMINI_PROMPT_VERSION: &str = "gemini-strict-v5";
+pub(crate) const GROK_PROMPT_VERSION: &str = "grok-strict-v1";
 const PREPROCESS_PROMPT_VERSION: &str = "preprocess-v3";
 pub(crate) const PREPROCESS_PHASE_ONE_SYSTEM_PROMPT: &str = "You are OpenArchive's local segmentation engine. Return ONLY valid JSON.\n\nRules:\n1. Partition the conversation into contiguous topic_spans.\n2. Every segment must be covered exactly once.\n3. Keep spans local and contiguous. Do not merge non-contiguous returns in this phase.\n4. Split when the active question, decision, troubleshooting target, work item, or named subject changes in a meaningful way.\n5. Do not create tiny spans for brief clarifications unless the thread actually changes.\n6. Labels must be short and specific.\n7. Summaries must be one short sentence.\n8. focus_key must be a short phrase naming the concrete thread target, such as the specific question, workflow, entity, or decision under discussion.\n9. start_evidence_ref and end_evidence_ref must be copied exactly from the provided evidence_ref strings.\n10. Never invent, transform, expand, or combine ids.\n11. Never output values like segment-*, seg-*, span-*, artifact ids, or sequence numbers in evidence ref fields.\n12. Output valid JSON only.";
 pub(crate) const PREPROCESS_PHASE_TWO_SYSTEM_PROMPT: &str = "You are OpenArchive's thread consolidation engine. Return ONLY valid JSON.\n\nRules:\n1. Merge local spans into durable topic_threads.\n2. Revisited topics should reuse one thread with multiple spans.\n3. Do not merge spans on broad domain overlap alone.\n4. Only merge when the later span clearly resumes the same specific thread of work, question, workflow, or investigation.\n5. Treat focus_key as a strong identity signal; different focus_key values usually imply different threads unless the excerpts show a clear return to the same exact thread.\n6. Prefer separate threads when unsure.\n7. In topic_threads.spans, start_evidence_ref and end_evidence_ref must be copied exactly from the provided spans.\n8. Never output span_id in evidence ref fields.\n9. Never invent, transform, expand, or combine ids.\n10. Never output values like segment-*, seg-*, span-*, artifact ids, or sequence numbers in evidence ref fields.\n11. Summaries must be one short sentence.\n12. Output valid JSON only.";
 const ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every summary, classification, memory, entity, relationship, and retrieval_intent must cite real evidence_segment_ids from the artifact.\n3. Do not use prior archive knowledge. Reason only from the provided artifact.\n4. Prefer explicit uncertainty over guessed continuity with prior brain state.\n5. Use retrieval_intents only for questions that require archive lookups to resolve ambiguity, duplicate detection, contradiction checks, or prior-state matching.\n6. Prefer fewer, stronger memories over weak ones.\n7. Emit entities only when there is explicit artifact support.\n8. Emit relationships only when the artifact explicitly supports the link.\n9. Memories must use only these memory_type values: preference, project_fact, identity_fact, ongoing_task, reference.\n10. relationship confidence_label must be low, medium, or high.\n11. retrieval_intent intent_type must be one of topic_lookup, memory_match, entity_lookup, relationship_lookup, contradiction_check.\n12. memory_scope is always artifact and memory_scope_value is the artifact_id.\n13. Summary must be 2-4 compact sentences focused on lasting engineering substance.\n14. Low-signal artifacts should usually have low importance and no classifications.\n15. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n16. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
+const OPENAI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for OpenAI. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Prefer fewer, stronger memories over weak ones.\n5. Generic how-to advice, recipes, troubleshooting steps, code snippets, schema conversions, bookkeeping guidance, API usage examples, and one-off utility answers should usually produce zero memories.\n6. If the artifact is primarily generic instructions, code examples, or reusable advice rather than durable user/project state, you must return `memories: []`.\n7. If importance_score is 4 or lower, memories should usually be empty. Do not create memories just because the content is useful.\n8. Do not create `project_fact` memories for generic instructions, implementation fragments, or topic summaries. `project_fact` requires a named project, system, migration, architecture decision, implementation plan, or durable operating model that would still matter later.\n9. `reference` memories are rare. Emit a reference memory only when the artifact contains a named durable reference, policy, design, migration plan, schema, or workflow the user is plausibly going to want recalled later. Do not create reference memories for generic instructions, cooking methods, finance categorization advice, or reusable code examples by default.\n10. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact or decomposes a generic artifact into multiple procedural memories.\n11. If the artifact mixes multiple topics and no single durable memory clearly stands out, keep the information in the summary/classification and emit zero memories.\n12. When uncertain, keep the information in the summary instead of emitting memories.\n13. Use retrieval_intents only for archive lookups that matter for duplicate detection, contradiction checks, or prior-state matching.\n14. Do not guess prior continuity; emit retrieval_intents instead.\n15. Emit relationships only when the artifact explicitly supports the link.\n16. relationship confidence_label must be low, medium, or high.\n17. memory_scope is always artifact and memory_scope_value is the artifact_id.\n18. Low-signal artifacts should usually have low importance and no classifications.\n19. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n20. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+
+pub(crate) const ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Anthropic. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Prefer fewer, stronger memories over weak ones.\n5. Generic how-to advice, recipes, troubleshooting steps, code snippets, schema conversions, API usage examples, and one-off utility answers should usually produce zero memories.\n6. Do not create `project_fact` memories for generic instructions, implementation fragments, or topic summaries. `project_fact` requires a named project, system, migration, architecture decision, implementation plan, or durable operating model that would still matter later.\n7. `reference` memories are rare. Emit them only for named durable references, policies, designs, migration plans, schemas, or workflows the user is plausibly going to want recalled later.\n8. If the artifact contains several unrelated tasks or code snippets, do not split them into multiple memory items. Keep them in the summary/classification and emit zero memories unless one durable item clearly stands out.\n9. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact.\n10. When uncertain, keep the information in the summary instead of emitting memories.\n11. Use retrieval_intents only for archive lookups that matter for duplicate detection, contradiction checks, or prior-state matching.\n12. Do not guess prior continuity; emit retrieval_intents instead.\n13. Emit relationships only when the artifact explicitly supports the link.\n14. relationship confidence_label must be low, medium, or high.\n15. memory_scope is always artifact and memory_scope_value is the artifact_id.\n16. Low-signal artifacts should usually have low importance and no classifications.\n17. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n18. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+
 pub(crate) const GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Gemini. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, or commitments.\n4. Keep the output compact, but do not overcompress rich artifacts.\n5. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n6. Do not guess prior continuity; emit retrieval_intents instead.\n7. Emit relationships only when the artifact explicitly supports the link.\n8. relationship confidence_label must be low, medium, or high.\n9. memory_scope is always artifact and memory_scope_value is the artifact_id.\n10. Low-signal artifacts should usually have low importance and no classifications.\n11. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n12. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+
+pub(crate) const GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Grok. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Prefer fewer, stronger memories over weak ones.\n5. Generic how-to advice, recipes, troubleshooting steps, product explanations, and one-off utility answers should usually produce zero memories unless the artifact clearly reveals a stable user preference, durable project fact, recurring workflow, named system architecture choice, or reusable reference the user is likely to need later.\n6. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, migration, architecture decision, implementation plan, or durable operating model that would still matter later.\n7. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact or bundles multiple unrelated subtopics together.\n8. If the artifact mixes multiple topics and no single durable memory clearly stands out, keep the information in the summary/classification and emit zero memories.\n9. Do not split one generic instructional artifact into multiple tiny procedural memories. When uncertain, keep the information in the summary instead of emitting memories.\n10. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n11. Do not guess prior continuity; emit retrieval_intents instead.\n12. Emit relationships only when the artifact explicitly supports the link.\n13. relationship confidence_label must be low, medium, or high.\n14. memory_scope is always artifact and memory_scope_value is the artifact_id.\n15. Low-signal artifacts should usually have low importance and no classifications.\n16. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n17. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
 pub(crate) const RECONCILIATION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict reconciliation engine. Use only the provided extraction candidates, retrieval results, and source evidence. Return ONLY valid JSON.\n\nRules:\n1. Prefer no merge over a weak merge.\n2. Choose create_new when the archive evidence is insufficient.\n3. Use attach_to_existing or strengthen_existing only when the retrieved object clearly matches the candidate.\n4. Use supersede_existing only when the new artifact clearly updates or replaces prior state.\n5. Use contradicts_existing only when the artifact clearly conflicts with retrieved prior state.\n6. Never merge identities, projects, or relationships on vague topical overlap.\n7. Every decision must cite real evidence_segment_ids from the extraction candidates.\n8. Output valid JSON only.";
 
