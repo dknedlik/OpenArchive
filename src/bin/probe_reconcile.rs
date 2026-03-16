@@ -7,11 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use open_archive::config::{GeminiConfig, PostgresConfig};
 use open_archive::processor::{
-    InferenceUsage, MemoryOutput, ReconciliationProcessorInput, RelationshipOutput,
-    SummaryOutput,
+    InferenceUsage, MemoryOutput, ReconciliationProcessorInput, RelationshipOutput, SummaryOutput,
 };
 use open_archive::storage::enrichment_state_store::EnrichmentStateStore;
-use open_archive::storage::types::{ArtifactReconcilePayload, ReconciliationDecisionKind, SourceType};
+use open_archive::storage::types::{ArtifactReconcilePayload, SourceType};
 use open_archive::storage::{
     ArtifactReadStore, PostgresDerivedMetadataStore, PostgresImportWriteStore,
 };
@@ -80,8 +79,8 @@ fn main() -> Result<()> {
         let payload_json: String = row.get(0);
         let artifact_id: String = row.get(1);
         let last_error_message: Option<String> = row.get(2);
-        let payload =
-            ArtifactReconcilePayload::from_json(&payload_json).context("invalid reconcile payload_json")?;
+        let payload = ArtifactReconcilePayload::from_json(&payload_json)
+            .context("invalid reconcile payload_json")?;
 
         let loaded = read_store
             .load_artifact_for_enrichment(&artifact_id)
@@ -89,12 +88,32 @@ fn main() -> Result<()> {
             .ok_or_else(|| anyhow!("artifact {artifact_id} not found"))?;
         let extraction_result = derived_store
             .load_extraction_result(&payload.extraction_result_id)
-            .with_context(|| format!("failed to load extraction result {}", payload.extraction_result_id))?
-            .ok_or_else(|| anyhow!("extraction result {} not found", payload.extraction_result_id))?;
+            .with_context(|| {
+                format!(
+                    "failed to load extraction result {}",
+                    payload.extraction_result_id
+                )
+            })?
+            .ok_or_else(|| {
+                anyhow!(
+                    "extraction result {} not found",
+                    payload.extraction_result_id
+                )
+            })?;
         let retrieval_result_set = derived_store
             .load_retrieval_result_set(&payload.retrieval_result_set_id)
-            .with_context(|| format!("failed to load retrieval result set {}", payload.retrieval_result_set_id))?
-            .ok_or_else(|| anyhow!("retrieval result set {} not found", payload.retrieval_result_set_id))?;
+            .with_context(|| {
+                format!(
+                    "failed to load retrieval result set {}",
+                    payload.retrieval_result_set_id
+                )
+            })?
+            .ok_or_else(|| {
+                anyhow!(
+                    "retrieval result set {} not found",
+                    payload.retrieval_result_set_id
+                )
+            })?;
 
         let input = build_reconciliation_input(
             &loaded.artifact.artifact_id,
@@ -132,7 +151,12 @@ fn main() -> Result<()> {
         println!("{}", response.output_text);
 
         let parsed: ModelReconciliationOutput = serde_json::from_str(&response.output_text)
-            .with_context(|| format!("failed to parse reconciliation JSON: {}", preview(&response.output_text)))?;
+            .with_context(|| {
+                format!(
+                    "failed to parse reconciliation JSON: {}",
+                    preview(&response.output_text)
+                )
+            })?;
 
         println!();
         println!("Decision target keys:");
@@ -217,7 +241,9 @@ fn build_reconciliation_input(
     })
 }
 
-fn candidate_target_keys(input: &ReconciliationProcessorInput) -> std::collections::BTreeSet<String> {
+fn candidate_target_keys(
+    input: &ReconciliationProcessorInput,
+) -> std::collections::BTreeSet<String> {
     input
         .memories
         .iter()
@@ -377,11 +403,8 @@ struct ModelReconciliationOutput {
 
 #[derive(Debug, Deserialize)]
 struct ModelDecision {
-    decision_kind: ReconciliationDecisionKind,
     target_kind: String,
     target_key: String,
-    #[serde(default)]
-    matched_object_id: Option<String>,
     rationale: String,
     #[serde(default)]
     evidence_segment_ids: Vec<String>,
@@ -396,7 +419,12 @@ fn validate_reconciliation_output(
         .summary
         .evidence_segment_ids
         .iter()
-        .chain(input.memories.iter().flat_map(|memory| memory.evidence_segment_ids.iter()))
+        .chain(
+            input
+                .memories
+                .iter()
+                .flat_map(|memory| memory.evidence_segment_ids.iter()),
+        )
         .chain(
             input
                 .relationships
@@ -497,7 +525,9 @@ impl GeminiProbeClient {
             .send()
             .context("failed to send inference request")?;
         let status = response.status();
-        let response_text = response.text().context("failed to read inference response")?;
+        let response_text = response
+            .text()
+            .context("failed to read inference response")?;
         if !status.is_success() {
             return Err(anyhow!(
                 "inference returned HTTP status {}: {}",
@@ -506,16 +536,18 @@ impl GeminiProbeClient {
             ));
         }
         let parsed: GeminiGenerateContentResponse = serde_json::from_str(&response_text)
-            .with_context(|| format!("failed to parse Gemini response: {}", preview(&response_text)))?;
+            .with_context(|| {
+                format!(
+                    "failed to parse Gemini response: {}",
+                    preview(&response_text)
+                )
+            })?;
         let output_text = parsed
             .flatten_text()
             .ok_or_else(|| anyhow!("Gemini returned empty content"))?;
         Ok(GeminiProbeResponse {
             output_text,
-            usage: parsed
-                .usage_metadata
-                .as_ref()
-                .map(InferenceUsage::from),
+            usage: parsed.usage_metadata.as_ref().map(InferenceUsage::from),
         })
     }
 }

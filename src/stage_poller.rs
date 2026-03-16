@@ -25,8 +25,8 @@ use crate::processor::{
 use crate::rate_limiter::RateLimiter;
 use crate::shutdown::ShutdownToken;
 use crate::storage::{
-    ArtifactExtractPayload, ArtifactExtractionResult, ArtifactPreprocessPayload,
-    ArtifactReadStore, ArtifactReconcilePayload, ArtifactRetrieveContextPayload, ClaimedJob,
+    ArtifactExtractPayload, ArtifactExtractionResult, ArtifactPreprocessPayload, ArtifactReadStore,
+    ArtifactReconcilePayload, ArtifactRetrieveContextPayload, ClaimedJob,
     DerivedMetadataWriteStore, EnrichmentJobLifecycleStore, EnrichmentStateStore, EnrichmentTier,
     JobType, LoadedArtifactForEnrichment, NewEnrichmentBatch, NewEnrichmentJob,
     PersistedEnrichmentBatch, ReconciliationDecision, ReconciliationDecisionKind,
@@ -192,11 +192,19 @@ pub fn stage_poller_loop(
     );
 
     let mut in_flight: HashMap<String, InFlightBatch> = HashMap::new();
+    if let Err(err) = job_store.reconcile_stale_running_batches(stage.stage_name()) {
+        error!(
+            "[{}] failed to reconcile stale running batches at startup: {}",
+            stage.stage_name(),
+            err
+        );
+    }
     match job_store.load_running_batches(stage.stage_name()) {
         Ok(persisted_batches) => {
             for persisted in persisted_batches {
                 let batch_id = persisted.provider_batch_id.clone();
-                match stage.recover_batch(persisted, read_store, state_store, job_store, &worker_id) {
+                match stage.recover_batch(persisted, read_store, state_store, job_store, &worker_id)
+                {
                     Ok(batch) => {
                         info!(
                             "[{}] recovered in-flight batch {} after startup",
@@ -233,6 +241,14 @@ pub fn stage_poller_loop(
                 in_flight.len()
             );
             break;
+        }
+
+        if let Err(err) = job_store.reconcile_stale_running_batches(stage.stage_name()) {
+            error!(
+                "[{}] failed to reconcile stale running batches: {}",
+                stage.stage_name(),
+                err
+            );
         }
 
         // -----------------------------------------------------------------
@@ -280,11 +296,7 @@ pub fn stage_poller_loop(
                     failed.push((batch_id.clone(), msg));
                 }
                 Ok(BatchPollResult::Pending) => {
-                    debug!(
-                        "[{}] batch {} still pending",
-                        stage.stage_name(),
-                        batch_id
-                    );
+                    debug!("[{}] batch {} still pending", stage.stage_name(), batch_id);
                 }
                 Err(ProcessorError::InferenceHttpStatus { status: 429, .. }) => {
                     warn!(
@@ -320,7 +332,14 @@ pub fn stage_poller_loop(
                 None => continue,
             };
             let owner_worker_id = batch.owner_worker_id.clone();
-            match stage.process_completed(batch, data, job_store, state_store, derived_store, &owner_worker_id) {
+            match stage.process_completed(
+                batch,
+                data,
+                job_store,
+                state_store,
+                derived_store,
+                &owner_worker_id,
+            ) {
                 Ok(Some(new_batch)) => {
                     // Phase transition (preprocess phase one -> phase two).
                     let new_id = new_batch.handle.batch_id.clone();
@@ -381,9 +400,21 @@ pub fn stage_poller_loop(
                             err
                         );
                     }
-                    info!("[{}] batch {} fully processed", stage.stage_name(), batch_id);
+                    info!(
+                        "[{}] batch {} fully processed",
+                        stage.stage_name(),
+                        batch_id
+                    );
                 }
                 Err(()) => {
+                    if let Err(err) = job_store.complete_batch(&batch_id) {
+                        error!(
+                            "[{}] failed to close completed batch record {} after per-job errors: {}",
+                            stage.stage_name(),
+                            batch_id,
+                            err
+                        );
+                    }
                     // Errors already handled inside process_completed per-job.
                     warn!(
                         "[{}] batch {} processing encountered errors (handled per-job)",
@@ -406,10 +437,7 @@ pub fn stage_poller_loop(
                     );
                 }
                 for job in batch.jobs {
-                    let msg = format!(
-                        "Batch {} failed: {}",
-                        batch_id, error_message
-                    );
+                    let msg = format!("Batch {} failed: {}", batch_id, error_message);
                     poller_fail_job_message(job_store, &batch.owner_worker_id, &job.job_id, msg);
                 }
             }
@@ -503,11 +531,7 @@ pub fn stage_poller_loop(
                     break;
                 }
                 Err(err) => {
-                    error!(
-                        "[{}] failed to claim jobs: {}",
-                        stage.stage_name(),
-                        err
-                    );
+                    error!("[{}] failed to claim jobs: {}", stage.stage_name(), err);
                     break;
                 }
             }
@@ -592,16 +616,24 @@ impl StageBehavior for PreprocessStage {
                 Ok(p) => p,
                 Err(err) => {
                     poller_fail_job(
-                        job_store, worker_id, &job.job_id,
-                        "Failed to parse preprocess payload JSON", err,
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        "Failed to parse preprocess payload JSON",
+                        err,
                     );
                     continue;
                 }
             };
             let Some(source_type) = SourceType::from_str(&payload.source_type) else {
                 poller_fail_job_message(
-                    job_store, worker_id, &job.job_id,
-                    format!("Invalid source_type in preprocess payload: {}", payload.source_type),
+                    job_store,
+                    worker_id,
+                    &job.job_id,
+                    format!(
+                        "Invalid source_type in preprocess payload: {}",
+                        payload.source_type
+                    ),
                 );
                 continue;
             };
@@ -609,15 +641,20 @@ impl StageBehavior for PreprocessStage {
                 Ok(Some(l)) => l,
                 Ok(None) => {
                     poller_fail_job_message(
-                        job_store, worker_id, &job.job_id,
+                        job_store,
+                        worker_id,
+                        &job.job_id,
                         format!("Artifact {} not found for preprocessing", job.artifact_id),
                     );
                     continue;
                 }
                 Err(err) => {
                     poller_fail_job(
-                        job_store, worker_id, &job.job_id,
-                        "Failed to load artifact for preprocessing", err,
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        "Failed to load artifact for preprocessing",
+                        err,
                     );
                     continue;
                 }
@@ -647,7 +684,13 @@ impl StageBehavior for PreprocessStage {
             );
             // Return the jobs to the pool by marking them retryable.
             for job in &valid_jobs {
-                poller_mark_retryable(job_store, worker_id, &job.job_id, "Rate limited before submit", 5);
+                poller_mark_retryable(
+                    job_store,
+                    worker_id,
+                    &job.job_id,
+                    "Rate limited before submit",
+                    5,
+                );
             }
             return Err(());
         }
@@ -690,14 +733,39 @@ impl StageBehavior for PreprocessStage {
                 let phase_one_data = match self.submitter.parse_phase_one(data, &inputs) {
                     Ok(d) => d,
                     Err(err) => {
-                        for job in &batch.jobs {
-                            poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
+                        if is_repairable_processor_error(&err) {
+                            match self.submitter.repair_phase_one_batch(&inputs, &err) {
+                                Ok(repaired) => repaired,
+                                Err(repair_err) => {
+                                    for job in &batch.jobs {
+                                        poller_handle_processor_error(
+                                            job_store,
+                                            worker_id,
+                                            &job.job_id,
+                                            &repair_err,
+                                        );
+                                    }
+                                    return Err(());
+                                }
+                            }
+                        } else {
+                            for job in &batch.jobs {
+                                poller_handle_processor_error(
+                                    job_store,
+                                    worker_id,
+                                    &job.job_id,
+                                    &err,
+                                );
+                            }
+                            return Err(());
                         }
-                        return Err(());
                     }
                 };
 
-                match self.submitter.submit_phase_two(&inputs, phase_one_data.as_ref()) {
+                match self
+                    .submitter
+                    .submit_phase_two(&inputs, phase_one_data.as_ref())
+                {
                     Ok(new_handle) => {
                         let new_batch = InFlightBatch {
                             handle: new_handle,
@@ -725,7 +793,9 @@ impl StageBehavior for PreprocessStage {
                 phase_one_data,
             } => {
                 // Parse phase two results and process each.
-                let results = self.submitter.parse_phase_two(data, &inputs, phase_one_data.as_ref());
+                let results =
+                    self.submitter
+                        .parse_phase_two(data, &inputs, phase_one_data.as_ref());
 
                 for ((job, (input, payload)), result) in batch
                     .jobs
@@ -761,17 +831,81 @@ impl StageBehavior for PreprocessStage {
                             };
                             if let Err(err) = job_store.enqueue_jobs(&[extract_job]) {
                                 poller_fail_job(
-                                    job_store, worker_id, &job.job_id,
-                                    "Failed to enqueue extraction job from preprocess", err,
+                                    job_store,
+                                    worker_id,
+                                    &job.job_id,
+                                    "Failed to enqueue extraction job from preprocess",
+                                    err,
                                 );
                                 continue;
                             }
-                            if let Err(msg) = poller_complete_job(job_store, worker_id, &job.job_id) {
+                            if let Err(msg) = poller_complete_job(job_store, worker_id, &job.job_id)
+                            {
                                 error!("[preprocess] {}", msg);
                             }
                         }
                         Err(err) => {
-                            poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
+                            if is_repairable_processor_error(&err) {
+                                match self.submitter.repair_phase_two(
+                                    &input,
+                                    phase_one_data.as_ref(),
+                                    &err,
+                                ) {
+                                    Ok(output) => {
+                                        let coverage_windows = build_preprocess_coverage_windows(
+                                            &job.artifact_id,
+                                            &input.segments,
+                                            &output.topic_threads,
+                                        );
+                                        let extract_job = NewEnrichmentJob {
+                                            job_id: new_id("job"),
+                                            artifact_id: job.artifact_id.clone(),
+                                            job_type: JobType::ArtifactExtract,
+                                            enrichment_tier: job.enrichment_tier,
+                                            spawned_by_job_id: Some(job.job_id.clone()),
+                                            job_status: crate::storage::JobStatus::Pending,
+                                            max_attempts: 3,
+                                            priority_no: 100,
+                                            required_capabilities: vec!["text".to_string()],
+                                            payload_json: ArtifactExtractPayload::new_v1(
+                                                &job.artifact_id,
+                                                &payload.import_id,
+                                                input.source_type,
+                                                coverage_windows,
+                                                output.topic_threads,
+                                            )
+                                            .to_json(),
+                                        };
+                                        if let Err(err) = job_store.enqueue_jobs(&[extract_job]) {
+                                            poller_fail_job(
+                                                job_store, worker_id, &job.job_id,
+                                                "Failed to enqueue extraction job from repaired preprocess", err,
+                                            );
+                                            continue;
+                                        }
+                                        if let Err(msg) =
+                                            poller_complete_job(job_store, worker_id, &job.job_id)
+                                        {
+                                            error!("[preprocess] {}", msg);
+                                        }
+                                    }
+                                    Err(repair_err) => {
+                                        poller_handle_processor_error(
+                                            job_store,
+                                            worker_id,
+                                            &job.job_id,
+                                            &repair_err,
+                                        );
+                                    }
+                                }
+                            } else {
+                                poller_handle_processor_error(
+                                    job_store,
+                                    worker_id,
+                                    &job.job_id,
+                                    &err,
+                                );
+                            }
                         }
                     }
                 }
@@ -795,9 +929,10 @@ impl StageBehavior for PreprocessStage {
     fn serialize_context(&self, batch: &InFlightBatch) -> Result<Option<String>, ProcessorError> {
         match &batch.context {
             InFlightContext::PreprocessPhaseOne { .. } => Ok(None),
-            InFlightContext::PreprocessPhaseTwo { phase_one_data, .. } => {
-                self.submitter.serialize_phase_one_data(phase_one_data.as_ref()).map(Some)
-            }
+            InFlightContext::PreprocessPhaseTwo { phase_one_data, .. } => self
+                .submitter
+                .serialize_phase_one_data(phase_one_data.as_ref())
+                .map(Some),
             _ => Ok(None),
         }
     }
@@ -816,22 +951,50 @@ impl StageBehavior for PreprocessStage {
             let payload = match ArtifactPreprocessPayload::from_json(&job.payload_json) {
                 Ok(p) => p,
                 Err(err) => {
-                    poller_fail_job(job_store, worker_id, &job.job_id, "Failed to parse preprocess payload JSON during recovery", err);
+                    poller_fail_job(
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        "Failed to parse preprocess payload JSON during recovery",
+                        err,
+                    );
                     return Err(());
                 }
             };
             let Some(source_type) = SourceType::from_str(&payload.source_type) else {
-                poller_fail_job_message(job_store, worker_id, &job.job_id, format!("Invalid source_type in preprocess recovery payload: {}", payload.source_type));
+                poller_fail_job_message(
+                    job_store,
+                    worker_id,
+                    &job.job_id,
+                    format!(
+                        "Invalid source_type in preprocess recovery payload: {}",
+                        payload.source_type
+                    ),
+                );
                 return Err(());
             };
             let loaded = match read_store.load_artifact_for_enrichment(&job.artifact_id) {
                 Ok(Some(l)) => l,
                 Ok(None) => {
-                    poller_fail_job_message(job_store, worker_id, &job.job_id, format!("Artifact {} not found for preprocessing recovery", job.artifact_id));
+                    poller_fail_job_message(
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        format!(
+                            "Artifact {} not found for preprocessing recovery",
+                            job.artifact_id
+                        ),
+                    );
                     return Err(());
                 }
                 Err(err) => {
-                    poller_fail_job(job_store, worker_id, &job.job_id, "Failed to load artifact for preprocessing recovery", err);
+                    poller_fail_job(
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        "Failed to load artifact for preprocessing recovery",
+                        err,
+                    );
                     return Err(());
                 }
             };
@@ -850,7 +1013,10 @@ impl StageBehavior for PreprocessStage {
             "phase_one" => InFlightContext::PreprocessPhaseOne { inputs, payloads },
             "phase_two" => {
                 let Some(serialized) = persisted.context_json.as_deref() else {
-                    error!("[preprocess] missing serialized context for recovered phase-two batch {}", persisted.provider_batch_id);
+                    error!(
+                        "[preprocess] missing serialized context for recovered phase-two batch {}",
+                        persisted.provider_batch_id
+                    );
                     return Err(());
                 };
                 let phase_one_data = match self.submitter.deserialize_phase_one_data(serialized) {
@@ -860,10 +1026,17 @@ impl StageBehavior for PreprocessStage {
                         return Err(());
                     }
                 };
-                InFlightContext::PreprocessPhaseTwo { inputs, payloads, phase_one_data }
+                InFlightContext::PreprocessPhaseTwo {
+                    inputs,
+                    payloads,
+                    phase_one_data,
+                }
             }
             other => {
-                error!("[preprocess] unknown persisted phase {} for batch {}", other, persisted.provider_batch_id);
+                error!(
+                    "[preprocess] unknown persisted phase {} for batch {}",
+                    other, persisted.provider_batch_id
+                );
                 return Err(());
             }
         };
@@ -879,7 +1052,6 @@ impl StageBehavior for PreprocessStage {
             context,
         })
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -950,16 +1122,24 @@ impl StageBehavior for ExtractStage {
                 Ok(p) => p,
                 Err(err) => {
                     poller_fail_job(
-                        job_store, worker_id, &job.job_id,
-                        "Failed to parse extract payload JSON", err,
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        "Failed to parse extract payload JSON",
+                        err,
                     );
                     continue;
                 }
             };
             let Some(source_type) = SourceType::from_str(&payload.source_type) else {
                 poller_fail_job_message(
-                    job_store, worker_id, &job.job_id,
-                    format!("Invalid source_type in extract payload: {}", payload.source_type),
+                    job_store,
+                    worker_id,
+                    &job.job_id,
+                    format!(
+                        "Invalid source_type in extract payload: {}",
+                        payload.source_type
+                    ),
                 );
                 continue;
             };
@@ -968,15 +1148,20 @@ impl StageBehavior for ExtractStage {
                 Ok(Some(l)) => l,
                 Ok(None) => {
                     poller_fail_job_message(
-                        job_store, worker_id, &job.job_id,
+                        job_store,
+                        worker_id,
+                        &job.job_id,
                         format!("Artifact {} not found for extraction", job.artifact_id),
                     );
                     continue;
                 }
                 Err(err) => {
                     poller_fail_job(
-                        job_store, worker_id, &job.job_id,
-                        "Failed to load artifact for extraction", err,
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        "Failed to load artifact for extraction",
+                        err,
                     );
                     continue;
                 }
@@ -1004,7 +1189,13 @@ impl StageBehavior for ExtractStage {
                 wait
             );
             for job in &valid_jobs {
-                poller_mark_retryable(job_store, worker_id, &job.job_id, "Rate limited before submit", 5);
+                poller_mark_retryable(
+                    job_store,
+                    worker_id,
+                    &job.job_id,
+                    "Rate limited before submit",
+                    5,
+                );
             }
             return Err(());
         }
@@ -1067,8 +1258,11 @@ impl StageBehavior for ExtractStage {
                     );
                     if let Err(err) = state_store.save_extraction_result(&extraction_result) {
                         poller_fail_job(
-                            job_store, worker_id, &job.job_id,
-                            "Failed to persist extraction result", err,
+                            job_store,
+                            worker_id,
+                            &job.job_id,
+                            "Failed to persist extraction result",
+                            err,
                         );
                         continue;
                     }
@@ -1092,8 +1286,11 @@ impl StageBehavior for ExtractStage {
                     };
                     if let Err(err) = job_store.enqueue_jobs(&[retrieve_job]) {
                         poller_fail_job(
-                            job_store, worker_id, &job.job_id,
-                            "Failed to enqueue retrieval-context job", err,
+                            job_store,
+                            worker_id,
+                            &job.job_id,
+                            "Failed to enqueue retrieval-context job",
+                            err,
                         );
                         continue;
                     }
@@ -1131,22 +1328,50 @@ impl StageBehavior for ExtractStage {
             let payload = match ArtifactExtractPayload::from_json(&job.payload_json) {
                 Ok(p) => p,
                 Err(err) => {
-                    poller_fail_job(job_store, worker_id, &job.job_id, "Failed to parse extract payload JSON during recovery", err);
+                    poller_fail_job(
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        "Failed to parse extract payload JSON during recovery",
+                        err,
+                    );
                     return Err(());
                 }
             };
             let Some(source_type) = SourceType::from_str(&payload.source_type) else {
-                poller_fail_job_message(job_store, worker_id, &job.job_id, format!("Invalid source_type in extract recovery payload: {}", payload.source_type));
+                poller_fail_job_message(
+                    job_store,
+                    worker_id,
+                    &job.job_id,
+                    format!(
+                        "Invalid source_type in extract recovery payload: {}",
+                        payload.source_type
+                    ),
+                );
                 return Err(());
             };
             let loaded = match read_store.load_artifact_for_enrichment(&job.artifact_id) {
                 Ok(Some(l)) => l,
                 Ok(None) => {
-                    poller_fail_job_message(job_store, worker_id, &job.job_id, format!("Artifact {} not found for extraction recovery", job.artifact_id));
+                    poller_fail_job_message(
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        format!(
+                            "Artifact {} not found for extraction recovery",
+                            job.artifact_id
+                        ),
+                    );
                     return Err(());
                 }
                 Err(err) => {
-                    poller_fail_job(job_store, worker_id, &job.job_id, "Failed to load artifact for extraction recovery", err);
+                    poller_fail_job(
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        "Failed to load artifact for extraction recovery",
+                        err,
+                    );
                     return Err(());
                 }
             };
@@ -1172,7 +1397,6 @@ impl StageBehavior for ExtractStage {
             context: InFlightContext::Extract { inputs, payloads },
         })
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1246,8 +1470,11 @@ impl StageBehavior for ReconcileStage {
                 Ok(p) => p,
                 Err(err) => {
                     poller_fail_job(
-                        job_store, worker_id, &job.job_id,
-                        "Failed to parse reconcile payload JSON", err,
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        "Failed to parse reconcile payload JSON",
+                        err,
                     );
                     continue;
                 }
@@ -1256,63 +1483,76 @@ impl StageBehavior for ReconcileStage {
                 Ok(Some(l)) => l,
                 Ok(None) => {
                     poller_fail_job_message(
-                        job_store, worker_id, &job.job_id,
+                        job_store,
+                        worker_id,
+                        &job.job_id,
                         format!("Artifact {} not found for reconciliation", job.artifact_id),
                     );
                     continue;
                 }
                 Err(err) => {
                     poller_fail_job(
-                        job_store, worker_id, &job.job_id,
-                        "Failed to load artifact for reconciliation", err,
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        "Failed to load artifact for reconciliation",
+                        err,
                     );
                     continue;
                 }
             };
-            let extraction_result = match state_store
-                .load_extraction_result(&payload.extraction_result_id)
-            {
-                Ok(Some(r)) => r,
-                Ok(None) => {
-                    poller_fail_job_message(
-                        job_store, worker_id, &job.job_id,
-                        format!(
-                            "Extraction result {} not found",
-                            payload.extraction_result_id
-                        ),
-                    );
-                    continue;
-                }
-                Err(err) => {
-                    poller_fail_job(
-                        job_store, worker_id, &job.job_id,
-                        "Failed to load extraction result for reconciliation", err,
-                    );
-                    continue;
-                }
-            };
-            let retrieval_result_set = match state_store
-                .load_retrieval_result_set(&payload.retrieval_result_set_id)
-            {
-                Ok(Some(r)) => r,
-                Ok(None) => {
-                    poller_fail_job_message(
-                        job_store, worker_id, &job.job_id,
-                        format!(
-                            "Retrieval result set {} not found",
-                            payload.retrieval_result_set_id
-                        ),
-                    );
-                    continue;
-                }
-                Err(err) => {
-                    poller_fail_job(
-                        job_store, worker_id, &job.job_id,
-                        "Failed to load retrieval result set for reconciliation", err,
-                    );
-                    continue;
-                }
-            };
+            let extraction_result =
+                match state_store.load_extraction_result(&payload.extraction_result_id) {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        poller_fail_job_message(
+                            job_store,
+                            worker_id,
+                            &job.job_id,
+                            format!(
+                                "Extraction result {} not found",
+                                payload.extraction_result_id
+                            ),
+                        );
+                        continue;
+                    }
+                    Err(err) => {
+                        poller_fail_job(
+                            job_store,
+                            worker_id,
+                            &job.job_id,
+                            "Failed to load extraction result for reconciliation",
+                            err,
+                        );
+                        continue;
+                    }
+                };
+            let retrieval_result_set =
+                match state_store.load_retrieval_result_set(&payload.retrieval_result_set_id) {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        poller_fail_job_message(
+                            job_store,
+                            worker_id,
+                            &job.job_id,
+                            format!(
+                                "Retrieval result set {} not found",
+                                payload.retrieval_result_set_id
+                            ),
+                        );
+                        continue;
+                    }
+                    Err(err) => {
+                        poller_fail_job(
+                            job_store,
+                            worker_id,
+                            &job.job_id,
+                            "Failed to load retrieval result set for reconciliation",
+                            err,
+                        );
+                        continue;
+                    }
+                };
             if extraction_result.memories.is_empty() && extraction_result.relationships.is_empty() {
                 if let Err(()) = complete_reconcile_without_candidates(
                     &job,
@@ -1337,8 +1577,11 @@ impl StageBehavior for ReconcileStage {
                 Ok(i) => i,
                 Err(err) => {
                     poller_fail_job(
-                        job_store, worker_id, &job.job_id,
-                        "Failed to build reconciliation input", err,
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        "Failed to build reconciliation input",
+                        err,
                     );
                     continue;
                 }
@@ -1361,7 +1604,13 @@ impl StageBehavior for ReconcileStage {
                 wait
             );
             for job in &valid_jobs {
-                poller_mark_retryable(job_store, worker_id, &job.job_id, "Rate limited before submit", 5);
+                poller_mark_retryable(
+                    job_store,
+                    worker_id,
+                    &job.job_id,
+                    "Rate limited before submit",
+                    5,
+                );
             }
             return Err(());
         }
@@ -1404,25 +1653,26 @@ impl StageBehavior for ReconcileStage {
         derived_store: &dyn DerivedMetadataWriteStore,
         worker_id: &str,
     ) -> Result<Option<InFlightBatch>, ()> {
-        let (
-            inputs,
-            _payloads,
-            extraction_results,
-            retrieval_result_sets,
-            loaded_artifacts,
-        ) = match batch.context {
-            InFlightContext::Reconcile {
-                inputs,
-                payloads,
-                extraction_results,
-                retrieval_result_sets,
-                loaded_artifacts,
-            } => (inputs, payloads, extraction_results, retrieval_result_sets, loaded_artifacts),
-            _ => {
-                error!("[reconcile] process_completed called with wrong context variant");
-                return Err(());
-            }
-        };
+        let (inputs, _payloads, extraction_results, retrieval_result_sets, loaded_artifacts) =
+            match batch.context {
+                InFlightContext::Reconcile {
+                    inputs,
+                    payloads,
+                    extraction_results,
+                    retrieval_result_sets,
+                    loaded_artifacts,
+                } => (
+                    inputs,
+                    payloads,
+                    extraction_results,
+                    retrieval_result_sets,
+                    loaded_artifacts,
+                ),
+                _ => {
+                    error!("[reconcile] process_completed called with wrong context variant");
+                    return Err(());
+                }
+            };
 
         let results = self.submitter.parse_results(data, &inputs);
 
@@ -1435,7 +1685,7 @@ impl StageBehavior for ReconcileStage {
             .zip(loaded_artifacts.into_iter())
             .zip(results.into_iter());
 
-        for ((((job, extraction_result, ), retrieval_result_set), loaded), result) in iter {
+        for ((((job, extraction_result), retrieval_result_set), loaded), result) in iter {
             match result {
                 Ok(outputs) => {
                     let decisions = if extraction_result.memories.is_empty()
@@ -1474,8 +1724,11 @@ impl StageBehavior for ReconcileStage {
                     };
                     if let Err(err) = state_store.save_reconciliation_decisions(&decisions) {
                         poller_fail_job(
-                            job_store, worker_id, &job.job_id,
-                            "Failed to persist reconciliation decisions", err,
+                            job_store,
+                            worker_id,
+                            &job.job_id,
+                            "Failed to persist reconciliation decisions",
+                            err,
                         );
                         continue;
                     }
@@ -1486,9 +1739,14 @@ impl StageBehavior for ReconcileStage {
                         &decisions,
                     );
                     if let Err(err) = derived_store.write_derivation_attempt(attempt) {
-                        poller_fail_job(
-                            job_store, worker_id, &job.job_id,
-                            "Failed to persist derivation output", err,
+                        poller_fail_job_message(
+                            job_store,
+                            worker_id,
+                            &job.job_id,
+                            format!(
+                                "Failed to persist derivation output: {}; debug={err:?}",
+                                err
+                            ),
                         );
                         continue;
                     }
@@ -1530,43 +1788,93 @@ impl StageBehavior for ReconcileStage {
             let payload = match ArtifactReconcilePayload::from_json(&job.payload_json) {
                 Ok(p) => p,
                 Err(err) => {
-                    poller_fail_job(job_store, worker_id, &job.job_id, "Failed to parse reconcile payload JSON during recovery", err);
+                    poller_fail_job(
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        "Failed to parse reconcile payload JSON during recovery",
+                        err,
+                    );
                     return Err(());
                 }
             };
             let loaded = match read_store.load_artifact_for_enrichment(&job.artifact_id) {
                 Ok(Some(l)) => l,
                 Ok(None) => {
-                    poller_fail_job_message(job_store, worker_id, &job.job_id, format!("Artifact {} not found for reconciliation recovery", job.artifact_id));
+                    poller_fail_job_message(
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        format!(
+                            "Artifact {} not found for reconciliation recovery",
+                            job.artifact_id
+                        ),
+                    );
                     return Err(());
                 }
                 Err(err) => {
-                    poller_fail_job(job_store, worker_id, &job.job_id, "Failed to load artifact for reconciliation recovery", err);
+                    poller_fail_job(
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        "Failed to load artifact for reconciliation recovery",
+                        err,
+                    );
                     return Err(());
                 }
             };
-            let extraction_result = match state_store.load_extraction_result(&payload.extraction_result_id) {
-                Ok(Some(r)) => r,
-                Ok(None) => {
-                    poller_fail_job_message(job_store, worker_id, &job.job_id, format!("Extraction result {} not found during reconciliation recovery", payload.extraction_result_id));
-                    return Err(());
-                }
-                Err(err) => {
-                    poller_fail_job(job_store, worker_id, &job.job_id, "Failed to load extraction result for reconciliation recovery", err);
-                    return Err(());
-                }
-            };
-            let retrieval_result_set = match state_store.load_retrieval_result_set(&payload.retrieval_result_set_id) {
-                Ok(Some(r)) => r,
-                Ok(None) => {
-                    poller_fail_job_message(job_store, worker_id, &job.job_id, format!("Retrieval result set {} not found during reconciliation recovery", payload.retrieval_result_set_id));
-                    return Err(());
-                }
-                Err(err) => {
-                    poller_fail_job(job_store, worker_id, &job.job_id, "Failed to load retrieval result set for reconciliation recovery", err);
-                    return Err(());
-                }
-            };
+            let extraction_result =
+                match state_store.load_extraction_result(&payload.extraction_result_id) {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        poller_fail_job_message(
+                            job_store,
+                            worker_id,
+                            &job.job_id,
+                            format!(
+                                "Extraction result {} not found during reconciliation recovery",
+                                payload.extraction_result_id
+                            ),
+                        );
+                        return Err(());
+                    }
+                    Err(err) => {
+                        poller_fail_job(
+                            job_store,
+                            worker_id,
+                            &job.job_id,
+                            "Failed to load extraction result for reconciliation recovery",
+                            err,
+                        );
+                        return Err(());
+                    }
+                };
+            let retrieval_result_set =
+                match state_store.load_retrieval_result_set(&payload.retrieval_result_set_id) {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        poller_fail_job_message(
+                            job_store,
+                            worker_id,
+                            &job.job_id,
+                            format!(
+                                "Retrieval result set {} not found during reconciliation recovery",
+                                payload.retrieval_result_set_id
+                            ),
+                        );
+                        return Err(());
+                    }
+                    Err(err) => {
+                        poller_fail_job(
+                            job_store,
+                            worker_id,
+                            &job.job_id,
+                            "Failed to load retrieval result set for reconciliation recovery",
+                            err,
+                        );
+                        return Err(());
+                    }
+                };
             let input = match build_reconciliation_input(
                 &job.artifact_id,
                 &payload.source_type,
@@ -1575,7 +1883,13 @@ impl StageBehavior for ReconcileStage {
             ) {
                 Ok(i) => i,
                 Err(err) => {
-                    poller_fail_job(job_store, worker_id, &job.job_id, "Failed to build reconciliation input during recovery", err);
+                    poller_fail_job(
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        "Failed to build reconciliation input during recovery",
+                        err,
+                    );
                     return Err(());
                 }
             };
@@ -1603,7 +1917,6 @@ impl StageBehavior for ReconcileStage {
             },
         })
     }
-
 }
 
 // ===========================================================================
@@ -1624,8 +1937,8 @@ use crate::storage::{
     DerivationRunStatus, DerivationRunType, DerivedObjectPayload, EvidenceRole,
     ExtractedClassification, ExtractedMemory, InputScopeType, LoadedSegment, MemoryObjectJson,
     NewDerivationRun, NewDerivedObject, NewEvidenceLink, ObjectStatus, OriginKind,
-    RelationshipObjectJson, RetrievalIntent,
-    ScopeType, SummaryObjectJson, SupportStrength, WriteDerivationAttempt, WriteDerivedObject,
+    RelationshipObjectJson, RetrievalIntent, ScopeType, SummaryObjectJson, SupportStrength,
+    WriteDerivationAttempt, WriteDerivedObject,
 };
 use rand::random;
 use std::collections::HashSet;
@@ -1660,12 +1973,7 @@ fn poller_fail_job(
     context: &str,
     err: impl std::fmt::Display,
 ) {
-    poller_fail_job_message(
-        job_store,
-        worker_id,
-        job_id,
-        format!("{context}: {err}"),
-    );
+    poller_fail_job_message(job_store, worker_id, job_id, format!("{context}: {err}"));
 }
 
 fn poller_fail_job_message(
@@ -1706,6 +2014,13 @@ fn poller_handle_processor_error(
         job_id,
         format!("Processor execution failed: {err}"),
     );
+}
+
+fn is_repairable_processor_error(err: &ProcessorError) -> bool {
+    matches!(
+        err,
+        ProcessorError::ParseModelJson { .. } | ProcessorError::InvalidModelOutput { .. }
+    )
 }
 
 fn poller_mark_retryable(
@@ -2126,9 +2441,9 @@ fn build_derivation_attempt(
     // Memory objects (with reconciliation decisions)
     let mut attached_existing = HashSet::new();
     for memory in &extraction_result.memories {
-        let decision = decisions.iter().find(|d| {
-            d.target_kind == "memory" && d.target_key == memory_target_key(memory)
-        });
+        let decision = decisions
+            .iter()
+            .find(|d| d.target_kind == "memory" && d.target_key == memory_target_key(memory));
         if let Some(decision) = decision {
             if matches!(
                 decision.decision_kind,
@@ -2173,18 +2488,14 @@ fn build_derivation_attempt(
                     },
                 },
             },
-            evidence_links: build_evidence_links(
-                &derived_object_id,
-                &memory.evidence_segment_ids,
-            ),
+            evidence_links: build_evidence_links(&derived_object_id, &memory.evidence_segment_ids),
         });
     }
 
     // Relationship objects (with reconciliation decisions)
     for relationship in &extraction_result.relationships {
         let decision = decisions.iter().find(|d| {
-            d.target_kind == "relationship"
-                && d.target_key == relationship_target_key(relationship)
+            d.target_kind == "relationship" && d.target_key == relationship_target_key(relationship)
         });
         let Some(decision) = decision else {
             continue;

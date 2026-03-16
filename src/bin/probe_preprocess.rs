@@ -8,7 +8,9 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
 use open_archive::config::{GeminiConfig, PostgresConfig};
-use open_archive::processor::{ArtifactProcessorFactory, GeminiProcessorFactory, InferenceUsage, PreprocessProcessorInput};
+use open_archive::processor::{
+    ArtifactProcessorFactory, GeminiProcessorFactory, InferenceUsage, PreprocessProcessorInput,
+};
 use open_archive::storage::types::{EnrichmentTier, LoadedSegment, SegmentSpanRef, TopicThreadRef};
 use open_archive::storage::{ArtifactReadStore, PostgresImportWriteStore};
 
@@ -188,8 +190,13 @@ fn run_two_phase(
         &phase_one_schema(),
     )?;
     let phase_one_elapsed = phase_one_started.elapsed().as_secs_f64();
-    let parsed_phase_one: PhaseOneOutput = serde_json::from_str(&phase_one.output_text)
-        .map_err(|source| anyhow!("failed to parse phase-one JSON: {source}: {}", preview(&phase_one.output_text)))?;
+    let parsed_phase_one: PhaseOneOutput =
+        serde_json::from_str(&phase_one.output_text).map_err(|source| {
+            anyhow!(
+                "failed to parse phase-one JSON: {source}: {}",
+                preview(&phase_one.output_text)
+            )
+        })?;
     let normalized_phase_one = normalize_phase_one(parsed_phase_one, input)?;
 
     let phase_two_started = Instant::now();
@@ -200,8 +207,13 @@ fn run_two_phase(
         &phase_two_schema(),
     )?;
     let phase_two_elapsed = phase_two_started.elapsed().as_secs_f64();
-    let parsed_phase_two: PhaseTwoOutput = serde_json::from_str(&phase_two.output_text)
-        .map_err(|source| anyhow!("failed to parse phase-two JSON: {source}: {}", preview(&phase_two.output_text)))?;
+    let parsed_phase_two: PhaseTwoOutput =
+        serde_json::from_str(&phase_two.output_text).map_err(|source| {
+            anyhow!(
+                "failed to parse phase-two JSON: {source}: {}",
+                preview(&phase_two.output_text)
+            )
+        })?;
     let topic_threads = normalize_phase_two(parsed_phase_two, &normalized_phase_one)?;
 
     let usage = combine_usage(phase_one.usage, phase_two.usage);
@@ -375,8 +387,12 @@ fn fill_phase_one_gaps(
             summary: "Recovered uncovered tail or transition segment.".to_string(),
             focus_key: "gap recovery".to_string(),
             confidence_label: "low".to_string(),
-            start_evidence_ref: segment_alias(index_for_sequence(input, segment.sequence_no).unwrap_or(0)),
-            end_evidence_ref: segment_alias(index_for_sequence(input, segment.sequence_no).unwrap_or(0)),
+            start_evidence_ref: segment_alias(
+                index_for_sequence(input, segment.sequence_no).unwrap_or(0),
+            ),
+            end_evidence_ref: segment_alias(
+                index_for_sequence(input, segment.sequence_no).unwrap_or(0),
+            ),
             start_sequence_no: segment.sequence_no,
             end_sequence_no: segment.sequence_no,
             start_excerpt: excerpt.clone(),
@@ -398,7 +414,8 @@ fn merge_adjacent_equal_spans(spans: Vec<PhaseOneSpanNormalized>) -> Vec<PhaseOn
                 if span.summary.len() > last.summary.len() {
                     last.summary = span.summary;
                 }
-                if confidence_rank(&span.confidence_label) > confidence_rank(&last.confidence_label) {
+                if confidence_rank(&span.confidence_label) > confidence_rank(&last.confidence_label)
+                {
                     last.confidence_label = span.confidence_label;
                 }
                 continue;
@@ -428,18 +445,31 @@ fn normalize_phase_two(
     let mut topic_threads = Vec::with_capacity(output.topic_threads.len());
     for thread in output.topic_threads {
         if thread.spans.is_empty() {
-            return Err(anyhow!("phase two thread {} has no spans", thread.thread_key));
+            return Err(anyhow!(
+                "phase two thread {} has no spans",
+                thread.thread_key
+            ));
         }
         let mut ordered = Vec::new();
         for span in &thread.spans {
             let start = valid_refs
                 .get(span.start_evidence_ref.as_str())
                 .copied()
-                .ok_or_else(|| anyhow!("phase two referenced unknown start ref {}", span.start_evidence_ref))?;
+                .ok_or_else(|| {
+                    anyhow!(
+                        "phase two referenced unknown start ref {}",
+                        span.start_evidence_ref
+                    )
+                })?;
             let end = valid_refs
                 .get(span.end_evidence_ref.as_str())
                 .copied()
-                .ok_or_else(|| anyhow!("phase two referenced unknown end ref {}", span.end_evidence_ref))?;
+                .ok_or_else(|| {
+                    anyhow!(
+                        "phase two referenced unknown end ref {}",
+                        span.end_evidence_ref
+                    )
+                })?;
             if start > end {
                 return Err(anyhow!(
                     "phase two thread {} has start > end for {} -> {}",
@@ -564,7 +594,12 @@ fn build_phase_two_user_prompt(
         PromptProfile::StrictIds => {
             let mut allowed_refs = spans
                 .iter()
-                .flat_map(|span| [span.start_evidence_ref.clone(), span.end_evidence_ref.clone()])
+                .flat_map(|span| {
+                    [
+                        span.start_evidence_ref.clone(),
+                        span.end_evidence_ref.clone(),
+                    ]
+                })
                 .collect::<Vec<_>>();
             allowed_refs.sort();
             allowed_refs.dedup();
@@ -717,7 +752,10 @@ fn print_segment_assignments(
     for thread in topic_threads {
         for span in &thread.spans {
             for sequence_no in span.start_sequence_no..=span.end_sequence_no {
-                assignments.entry(sequence_no).or_default().push(thread.label.as_str());
+                assignments
+                    .entry(sequence_no)
+                    .or_default()
+                    .push(thread.label.as_str());
             }
         }
     }
@@ -732,7 +770,11 @@ fn print_segment_assignments(
         println!(
             "    {:>3} | {:<30} | {}",
             segment.sequence_no,
-            if labels.is_empty() { "(unassigned)" } else { labels.as_str() },
+            if labels.is_empty() {
+                "(unassigned)"
+            } else {
+                labels.as_str()
+            },
             text
         );
     }
@@ -781,10 +823,22 @@ fn combine_usage(
     match (first, second) {
         (None, None) => None,
         (first, second) => Some(InferenceUsage {
-            input_tokens: sum_option(first.as_ref().and_then(|u| u.input_tokens), second.as_ref().and_then(|u| u.input_tokens)),
-            output_tokens: sum_option(first.as_ref().and_then(|u| u.output_tokens), second.as_ref().and_then(|u| u.output_tokens)),
-            reasoning_tokens: sum_option(first.as_ref().and_then(|u| u.reasoning_tokens), second.as_ref().and_then(|u| u.reasoning_tokens)),
-            total_tokens: sum_option(first.as_ref().and_then(|u| u.total_tokens), second.as_ref().and_then(|u| u.total_tokens)),
+            input_tokens: sum_option(
+                first.as_ref().and_then(|u| u.input_tokens),
+                second.as_ref().and_then(|u| u.input_tokens),
+            ),
+            output_tokens: sum_option(
+                first.as_ref().and_then(|u| u.output_tokens),
+                second.as_ref().and_then(|u| u.output_tokens),
+            ),
+            reasoning_tokens: sum_option(
+                first.as_ref().and_then(|u| u.reasoning_tokens),
+                second.as_ref().and_then(|u| u.reasoning_tokens),
+            ),
+            total_tokens: sum_option(
+                first.as_ref().and_then(|u| u.total_tokens),
+                second.as_ref().and_then(|u| u.total_tokens),
+            ),
             reported_cost_micros: sum_option(
                 first.as_ref().and_then(|u| u.reported_cost_micros),
                 second.as_ref().and_then(|u| u.reported_cost_micros),
@@ -886,7 +940,9 @@ impl GeminiProbeClient {
             .send()
             .context("failed to send inference request")?;
         let status = response.status();
-        let response_text = response.text().context("failed to read inference response")?;
+        let response_text = response
+            .text()
+            .context("failed to read inference response")?;
         if !status.is_success() {
             return Err(anyhow!(
                 "inference returned HTTP status {}: {}",
@@ -895,16 +951,18 @@ impl GeminiProbeClient {
             ));
         }
         let parsed: GeminiGenerateContentResponse = serde_json::from_str(&response_text)
-            .with_context(|| format!("failed to parse Gemini response: {}", preview(&response_text)))?;
+            .with_context(|| {
+                format!(
+                    "failed to parse Gemini response: {}",
+                    preview(&response_text)
+                )
+            })?;
         let output_text = parsed
             .flatten_text()
             .ok_or_else(|| anyhow!("Gemini returned empty content"))?;
         Ok(GeminiProbeResponse {
             output_text,
-            usage: parsed
-                .usage_metadata
-                .as_ref()
-                .map(InferenceUsage::from),
+            usage: parsed.usage_metadata.as_ref().map(InferenceUsage::from),
         })
     }
 }
@@ -937,10 +995,7 @@ fn normalize_gemini_schema(schema: &serde_json::Value) -> serde_json::Value {
                     sanitized.insert(
                         key.clone(),
                         serde_json::Value::String(
-                            child
-                                .as_str()
-                                .unwrap_or("object")
-                                .to_ascii_uppercase(),
+                            child.as_str().unwrap_or("object").to_ascii_uppercase(),
                         ),
                     );
                 } else {

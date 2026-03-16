@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn acquire_within_capacity() {
         let limiter = RateLimiter::new(60); // 1 per second, capacity 60
-        // Should be able to acquire up to capacity without waiting
+                                            // Should be able to acquire up to capacity without waiting
         for _ in 0..60 {
             assert!(limiter.try_acquire().is_ok());
         }
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn acquire_blocking_respects_shutdown() {
         let limiter = RateLimiter::new(1); // very slow refill
-        // Drain
+                                           // Drain
         let _ = limiter.try_acquire();
 
         let shutdown = ShutdownToken::new();

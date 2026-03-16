@@ -218,11 +218,12 @@ pub fn claim_matching_jobs(
                 job_id: job_id.clone(),
                 job_type: job_type_str.clone(),
             })?;
-        let enrichment_tier =
-            EnrichmentTier::from_str(&tier_str).ok_or_else(|| StorageError::InvalidEnrichmentTier {
+        let enrichment_tier = EnrichmentTier::from_str(&tier_str).ok_or_else(|| {
+            StorageError::InvalidEnrichmentTier {
                 job_id: job_id.clone(),
                 value: tier_str.clone(),
-            })?;
+            }
+        })?;
         let required_capabilities: Vec<String> = serde_json::from_str(&required_capabilities_json)
             .map_err(|err| StorageError::InvalidJobCapabilities {
                 job_id: job_id.clone(),
@@ -341,11 +342,12 @@ pub fn claim_jobs_by_type(
                 job_id: job_id.clone(),
                 job_type: job_type_str.clone(),
             })?;
-        let enrichment_tier =
-            EnrichmentTier::from_str(&tier_str).ok_or_else(|| StorageError::InvalidEnrichmentTier {
+        let enrichment_tier = EnrichmentTier::from_str(&tier_str).ok_or_else(|| {
+            StorageError::InvalidEnrichmentTier {
                 job_id: job_id.clone(),
                 value: tier_str.clone(),
-            })?;
+            }
+        })?;
         let required_capabilities: Vec<String> = serde_json::from_str(&required_capabilities_json)
             .map_err(|err| StorageError::InvalidJobCapabilities {
                 job_id: job_id.clone(),

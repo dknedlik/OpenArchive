@@ -598,7 +598,62 @@ pub fn load_running_batches(
     Ok(batches)
 }
 
-fn insert_batch_row(client: &mut postgres::Client, batch: &NewEnrichmentBatch) -> StorageResult<()> {
+pub fn reconcile_stale_running_batches(
+    client: &mut postgres::Client,
+    stage_name: &str,
+) -> StorageResult<usize> {
+    client
+        .execute(
+            "UPDATE oa_enrichment_batch b
+             SET batch_status = CASE
+                     WHEN EXISTS (
+                         SELECT 1
+                           FROM oa_enrichment_batch_job bj
+                           JOIN oa_enrichment_job j ON j.job_id = bj.job_id
+                          WHERE bj.provider_batch_id = b.provider_batch_id
+                            AND j.job_status IN ('failed', 'retryable')
+                     ) THEN 'failed'
+                     ELSE 'completed'
+                 END,
+                 completed_at = NOW(),
+                 last_error_message = CASE
+                     WHEN EXISTS (
+                         SELECT 1
+                           FROM oa_enrichment_batch_job bj
+                           JOIN oa_enrichment_job j ON j.job_id = bj.job_id
+                          WHERE bj.provider_batch_id = b.provider_batch_id
+                            AND j.job_status IN ('failed', 'retryable')
+                     ) THEN COALESCE((
+                         SELECT string_agg(
+                                    left(coalesce(j.last_error_message, j.job_status), 200),
+                                    ' | '
+                                )
+                           FROM oa_enrichment_batch_job bj
+                           JOIN oa_enrichment_job j ON j.job_id = bj.job_id
+                          WHERE bj.provider_batch_id = b.provider_batch_id
+                            AND j.job_status IN ('failed', 'retryable')
+                     ), 'linked jobs reached terminal state')
+                     ELSE last_error_message
+                 END
+             WHERE b.stage_name = $1
+               AND b.batch_status = 'running'
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM oa_enrichment_batch_job bj
+                     JOIN oa_enrichment_job j ON j.job_id = bj.job_id
+                    WHERE bj.provider_batch_id = b.provider_batch_id
+                      AND j.job_status = 'running'
+               )",
+            &[&stage_name],
+        )
+        .map(|rows| rows as usize)
+        .map_err(map_pg_storage_err)
+}
+
+fn insert_batch_row(
+    client: &mut postgres::Client,
+    batch: &NewEnrichmentBatch,
+) -> StorageResult<()> {
     client
         .execute(
             "INSERT INTO oa_enrichment_batch

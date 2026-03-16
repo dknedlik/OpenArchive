@@ -1,10 +1,14 @@
+use crate::config::EnrichmentPipelineConfig;
 use crate::domain::SourceTimestamp;
 use crate::processor::{
-    ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput, ClassificationOutput,
-    EntityOutput, MemoryOutput, PreprocessProcessorInput, ProcessorError,
+    ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
+    ClassificationOutput, EntityOutput, MemoryOutput, PreprocessProcessorInput, ProcessorError,
     ReconciliationProcessorInput, RelationshipOutput, StubProcessorFactory, SummaryOutput,
 };
+use crate::rate_limiter::RateLimiter;
 use crate::shutdown::ShutdownToken;
+use crate::stage_poller::{stage_poller_loop, ExtractStage, PreprocessStage, ReconcileStage};
+use crate::storage::JobType;
 use crate::storage::{
     ArchiveRetrievalStore, ArtifactExtractPayload, ArtifactExtractionResult,
     ArtifactPreprocessPayload, ArtifactReadStore, ArtifactReconcilePayload,
@@ -17,10 +21,6 @@ use crate::storage::{
     RelationshipObjectJson, RetrievalIntent, RetrievalResultSet, ScopeType, SummaryObjectJson,
     SupportStrength, TopicThreadRef, WriteDerivationAttempt, WriteDerivedObject,
 };
-use crate::config::EnrichmentPipelineConfig;
-use crate::rate_limiter::RateLimiter;
-use crate::stage_poller::{stage_poller_loop, ExtractStage, PreprocessStage, ReconcileStage};
-use crate::storage::JobType;
 use anyhow::Result;
 use log::{debug, error, info};
 use rand::random;
@@ -100,11 +100,23 @@ fn process_claimed_jobs(
         crate::storage::JobType::ArtifactPreprocess => {
             if let Some(batch_processor) = processor_factory
                 .build_preprocess_batch_processor(first_job.enrichment_tier)
-                .map_err(|err| fail_job(job_store, worker_id, &first_job.job_id, "Failed to build preprocess batch processor", err))?
+                .map_err(|err| {
+                    fail_job(
+                        job_store,
+                        worker_id,
+                        &first_job.job_id,
+                        "Failed to build preprocess batch processor",
+                        err,
+                    )
+                })?
             {
                 let mut jobs = vec![first_job];
                 let additional = job_store
-                    .claim_matching_jobs(worker_id, &jobs[0], batch_processor.max_batch_jobs().saturating_sub(1))
+                    .claim_matching_jobs(
+                        worker_id,
+                        &jobs[0],
+                        batch_processor.max_batch_jobs().saturating_sub(1),
+                    )
                     .map_err(|err| format!("failed to claim matching preprocess jobs: {err}"))?;
                 jobs.extend(additional);
                 return process_preprocess_job_batch(
@@ -120,11 +132,23 @@ fn process_claimed_jobs(
         crate::storage::JobType::ArtifactExtract => {
             if let Some(batch_processor) = processor_factory
                 .build_batch_processor(first_job.enrichment_tier)
-                .map_err(|err| fail_job(job_store, worker_id, &first_job.job_id, "Failed to build extraction batch processor", err))?
+                .map_err(|err| {
+                    fail_job(
+                        job_store,
+                        worker_id,
+                        &first_job.job_id,
+                        "Failed to build extraction batch processor",
+                        err,
+                    )
+                })?
             {
                 let mut jobs = vec![first_job];
                 let additional = job_store
-                    .claim_matching_jobs(worker_id, &jobs[0], batch_processor.max_batch_jobs().saturating_sub(1))
+                    .claim_matching_jobs(
+                        worker_id,
+                        &jobs[0],
+                        batch_processor.max_batch_jobs().saturating_sub(1),
+                    )
                     .map_err(|err| format!("failed to claim matching extraction jobs: {err}"))?;
                 jobs.extend(additional);
                 return process_extract_job_batch(
@@ -141,12 +165,26 @@ fn process_claimed_jobs(
         crate::storage::JobType::ArtifactReconcile => {
             if let Some(batch_processor) = processor_factory
                 .build_reconciliation_batch_processor(first_job.enrichment_tier)
-                .map_err(|err| fail_job(job_store, worker_id, &first_job.job_id, "Failed to build reconciliation batch processor", err))?
+                .map_err(|err| {
+                    fail_job(
+                        job_store,
+                        worker_id,
+                        &first_job.job_id,
+                        "Failed to build reconciliation batch processor",
+                        err,
+                    )
+                })?
             {
                 let mut jobs = vec![first_job];
                 let additional = job_store
-                    .claim_matching_jobs(worker_id, &jobs[0], batch_processor.max_batch_jobs().saturating_sub(1))
-                    .map_err(|err| format!("failed to claim matching reconciliation jobs: {err}"))?;
+                    .claim_matching_jobs(
+                        worker_id,
+                        &jobs[0],
+                        batch_processor.max_batch_jobs().saturating_sub(1),
+                    )
+                    .map_err(|err| {
+                        format!("failed to claim matching reconciliation jobs: {err}")
+                    })?;
                 jobs.extend(additional);
                 return process_reconcile_job_batch(
                     worker_id,
@@ -186,9 +224,13 @@ fn process_claimed_job(
     processor_factory: &dyn ArtifactProcessorFactory,
 ) -> std::result::Result<(), String> {
     match claimed_job.job_type {
-        crate::storage::JobType::ArtifactPreprocess => {
-            process_preprocess_job(worker_id, &claimed_job, job_store, read_store, processor_factory)
-        }
+        crate::storage::JobType::ArtifactPreprocess => process_preprocess_job(
+            worker_id,
+            &claimed_job,
+            job_store,
+            read_store,
+            processor_factory,
+        ),
         crate::storage::JobType::ArtifactExtract => process_extract_job(
             worker_id,
             &claimed_job,
@@ -232,22 +274,50 @@ fn process_extract_job_batch(
         let payload = match ArtifactExtractPayload::from_json(&claimed_job.payload_json) {
             Ok(payload) => payload,
             Err(err) => {
-                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to parse extract payload JSON", err);
+                fail_job(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    "Failed to parse extract payload JSON",
+                    err,
+                );
                 continue;
             }
         };
         let Some(source_type) = crate::storage::SourceType::from_str(&payload.source_type) else {
-            fail_job_message(job_store, worker_id, &claimed_job.job_id, format!("Invalid artifact source_type in extract payload: {}", payload.source_type));
+            fail_job_message(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                format!(
+                    "Invalid artifact source_type in extract payload: {}",
+                    payload.source_type
+                ),
+            );
             continue;
         };
         let loaded = match read_store.load_artifact_for_enrichment(&claimed_job.artifact_id) {
             Ok(Some(loaded)) => loaded,
             Ok(None) => {
-                fail_job_message(job_store, worker_id, &claimed_job.job_id, format!("Artifact {} not found for extraction", claimed_job.artifact_id));
+                fail_job_message(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    format!(
+                        "Artifact {} not found for extraction",
+                        claimed_job.artifact_id
+                    ),
+                );
                 continue;
             }
             Err(err) => {
-                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to load artifact for extraction", err);
+                fail_job(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    "Failed to load artifact for extraction",
+                    err,
+                );
                 continue;
             }
         };
@@ -270,14 +340,30 @@ fn process_extract_job_batch(
     }
 
     if !batchable.is_empty() {
-        let inputs: Vec<_> = batchable.iter().map(|(_, _, input)| input.clone()).collect();
+        let inputs: Vec<_> = batchable
+            .iter()
+            .map(|(_, _, input)| input.clone())
+            .collect();
         let results = batch_processor.process_batch(&inputs);
-        for ((claimed_job, payload, input), result) in batchable.into_iter().zip(results.into_iter()) {
+        for ((claimed_job, payload, input), result) in
+            batchable.into_iter().zip(results.into_iter())
+        {
             match result {
                 Ok(output) => {
-                    let extraction_result = build_extraction_result(&claimed_job, &input, &output, payload.conversation_windows);
+                    let extraction_result = build_extraction_result(
+                        &claimed_job,
+                        &input,
+                        &output,
+                        payload.conversation_windows,
+                    );
                     if let Err(err) = state_store.save_extraction_result(&extraction_result) {
-                        let _ = fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to persist extraction result", err);
+                        let _ = fail_job(
+                            job_store,
+                            worker_id,
+                            &claimed_job.job_id,
+                            "Failed to persist extraction result",
+                            err,
+                        );
                         continue;
                     }
                     let retrieve_job = NewEnrichmentJob {
@@ -299,7 +385,13 @@ fn process_extract_job_batch(
                         .to_json(),
                     };
                     if let Err(err) = job_store.enqueue_jobs(&[retrieve_job]) {
-                        let _ = fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to enqueue retrieval-context job", err);
+                        let _ = fail_job(
+                            job_store,
+                            worker_id,
+                            &claimed_job.job_id,
+                            "Failed to enqueue retrieval-context job",
+                            err,
+                        );
                         continue;
                     }
                     complete_job(job_store, worker_id, &claimed_job.job_id)?;
@@ -342,43 +434,93 @@ fn process_reconcile_job_batch(
         let payload = match ArtifactReconcilePayload::from_json(&claimed_job.payload_json) {
             Ok(payload) => payload,
             Err(err) => {
-                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to parse reconcile payload JSON", err);
+                fail_job(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    "Failed to parse reconcile payload JSON",
+                    err,
+                );
                 continue;
             }
         };
         let loaded = match read_store.load_artifact_for_enrichment(&claimed_job.artifact_id) {
             Ok(Some(loaded)) => loaded,
             Ok(None) => {
-                fail_job_message(job_store, worker_id, &claimed_job.job_id, format!("Artifact {} not found for reconciliation", claimed_job.artifact_id));
+                fail_job_message(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    format!(
+                        "Artifact {} not found for reconciliation",
+                        claimed_job.artifact_id
+                    ),
+                );
                 continue;
             }
             Err(err) => {
-                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to load artifact for reconciliation", err);
+                fail_job(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    "Failed to load artifact for reconciliation",
+                    err,
+                );
                 continue;
             }
         };
-        let extraction_result = match state_store.load_extraction_result(&payload.extraction_result_id) {
-            Ok(Some(result)) => result,
-            Ok(None) => {
-                fail_job_message(job_store, worker_id, &claimed_job.job_id, format!("Extraction result {} not found", payload.extraction_result_id));
-                continue;
-            }
-            Err(err) => {
-                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to load extraction result for reconciliation", err);
-                continue;
-            }
-        };
-        let retrieval_result_set = match state_store.load_retrieval_result_set(&payload.retrieval_result_set_id) {
-            Ok(Some(result)) => result,
-            Ok(None) => {
-                fail_job_message(job_store, worker_id, &claimed_job.job_id, format!("Retrieval result set {} not found", payload.retrieval_result_set_id));
-                continue;
-            }
-            Err(err) => {
-                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to load retrieval result set for reconciliation", err);
-                continue;
-            }
-        };
+        let extraction_result =
+            match state_store.load_extraction_result(&payload.extraction_result_id) {
+                Ok(Some(result)) => result,
+                Ok(None) => {
+                    fail_job_message(
+                        job_store,
+                        worker_id,
+                        &claimed_job.job_id,
+                        format!(
+                            "Extraction result {} not found",
+                            payload.extraction_result_id
+                        ),
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    fail_job(
+                        job_store,
+                        worker_id,
+                        &claimed_job.job_id,
+                        "Failed to load extraction result for reconciliation",
+                        err,
+                    );
+                    continue;
+                }
+            };
+        let retrieval_result_set =
+            match state_store.load_retrieval_result_set(&payload.retrieval_result_set_id) {
+                Ok(Some(result)) => result,
+                Ok(None) => {
+                    fail_job_message(
+                        job_store,
+                        worker_id,
+                        &claimed_job.job_id,
+                        format!(
+                            "Retrieval result set {} not found",
+                            payload.retrieval_result_set_id
+                        ),
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    fail_job(
+                        job_store,
+                        worker_id,
+                        &claimed_job.job_id,
+                        "Failed to load retrieval result set for reconciliation",
+                        err,
+                    );
+                    continue;
+                }
+            };
         let input = match build_reconciliation_input(
             &claimed_job.artifact_id,
             &payload.source_type,
@@ -387,19 +529,38 @@ fn process_reconcile_job_batch(
         ) {
             Ok(input) => input,
             Err(err) => {
-                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to build reconciliation input", err);
+                fail_job(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    "Failed to build reconciliation input",
+                    err,
+                );
                 continue;
             }
         };
-        if batch_processor.estimate_size_bytes(&input).unwrap_or(usize::MAX) <= batch_processor.max_batch_bytes() {
-            batchable.push((claimed_job, loaded, extraction_result, retrieval_result_set, input));
+        if batch_processor
+            .estimate_size_bytes(&input)
+            .unwrap_or(usize::MAX)
+            <= batch_processor.max_batch_bytes()
+        {
+            batchable.push((
+                claimed_job,
+                loaded,
+                extraction_result,
+                retrieval_result_set,
+                input,
+            ));
         } else {
             fallbacks.push(claimed_job);
         }
     }
 
     if !batchable.is_empty() {
-        let inputs: Vec<_> = batchable.iter().map(|(_, _, _, _, input)| input.clone()).collect();
+        let inputs: Vec<_> = batchable
+            .iter()
+            .map(|(_, _, _, _, input)| input.clone())
+            .collect();
         let results = batch_processor.process_batch(&inputs);
         for ((claimed_job, loaded, extraction_result, retrieval_result_set, _), result) in
             batchable.into_iter().zip(results.into_iter())
@@ -435,7 +596,13 @@ fn process_reconcile_job_batch(
                         )
                     };
                     if let Err(err) = state_store.save_reconciliation_decisions(&decisions) {
-                        let _ = fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to persist reconciliation decisions", err);
+                        let _ = fail_job(
+                            job_store,
+                            worker_id,
+                            &claimed_job.job_id,
+                            "Failed to persist reconciliation decisions",
+                            err,
+                        );
                         continue;
                     }
                     let attempt = build_derivation_attempt(
@@ -445,7 +612,13 @@ fn process_reconcile_job_batch(
                         &decisions,
                     );
                     if let Err(err) = derived_store.write_derivation_attempt(attempt) {
-                        let _ = fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to persist derivation output", err);
+                        let _ = fail_job(
+                            job_store,
+                            worker_id,
+                            &claimed_job.job_id,
+                            "Failed to persist derivation output",
+                            err,
+                        );
                         continue;
                     }
                     complete_job(job_store, worker_id, &claimed_job.job_id)?;
@@ -527,7 +700,15 @@ fn process_preprocess_job(
 
     let processor = processor_factory
         .build_preprocess_processor(claimed_job.enrichment_tier)
-        .map_err(|err| fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to build preprocess processor", err))?;
+        .map_err(|err| {
+            fail_job(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                "Failed to build preprocess processor",
+                err,
+            )
+        })?;
     let processor_input = PreprocessProcessorInput {
         artifact_id: loaded.artifact.artifact_id.clone(),
         import_id: payload.import_id.clone(),
@@ -593,22 +774,50 @@ fn process_preprocess_job_batch(
         let payload = match ArtifactPreprocessPayload::from_json(&claimed_job.payload_json) {
             Ok(payload) => payload,
             Err(err) => {
-                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to parse preprocess payload JSON", err);
+                fail_job(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    "Failed to parse preprocess payload JSON",
+                    err,
+                );
                 continue;
             }
         };
         let Some(source_type) = crate::storage::SourceType::from_str(&payload.source_type) else {
-            fail_job_message(job_store, worker_id, &claimed_job.job_id, format!("Invalid artifact source_type in preprocess payload: {}", payload.source_type));
+            fail_job_message(
+                job_store,
+                worker_id,
+                &claimed_job.job_id,
+                format!(
+                    "Invalid artifact source_type in preprocess payload: {}",
+                    payload.source_type
+                ),
+            );
             continue;
         };
         let loaded = match read_store.load_artifact_for_enrichment(&claimed_job.artifact_id) {
             Ok(Some(loaded)) => loaded,
             Ok(None) => {
-                fail_job_message(job_store, worker_id, &claimed_job.job_id, format!("Artifact {} not found for preprocessing", claimed_job.artifact_id));
+                fail_job_message(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    format!(
+                        "Artifact {} not found for preprocessing",
+                        claimed_job.artifact_id
+                    ),
+                );
                 continue;
             }
             Err(err) => {
-                fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to load artifact for preprocessing", err);
+                fail_job(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    "Failed to load artifact for preprocessing",
+                    err,
+                );
                 continue;
             }
         };
@@ -620,7 +829,11 @@ fn process_preprocess_job_batch(
             participants: loaded.participants,
             segments: loaded.segments,
         };
-        if batch_processor.estimate_size_bytes(&input).unwrap_or(usize::MAX) <= batch_processor.max_batch_bytes() {
+        if batch_processor
+            .estimate_size_bytes(&input)
+            .unwrap_or(usize::MAX)
+            <= batch_processor.max_batch_bytes()
+        {
             batchable.push((claimed_job, payload, input));
         } else {
             fallbacks.push(claimed_job);
@@ -628,9 +841,14 @@ fn process_preprocess_job_batch(
     }
 
     if !batchable.is_empty() {
-        let inputs: Vec<_> = batchable.iter().map(|(_, _, input)| input.clone()).collect();
+        let inputs: Vec<_> = batchable
+            .iter()
+            .map(|(_, _, input)| input.clone())
+            .collect();
         let results = batch_processor.process_batch(&inputs);
-        for ((claimed_job, payload, input), result) in batchable.into_iter().zip(results.into_iter()) {
+        for ((claimed_job, payload, input), result) in
+            batchable.into_iter().zip(results.into_iter())
+        {
             match result {
                 Ok(output) => {
                     let coverage_windows = build_preprocess_coverage_windows(
@@ -658,7 +876,13 @@ fn process_preprocess_job_batch(
                         .to_json(),
                     };
                     if let Err(err) = job_store.enqueue_jobs(&[extract_job]) {
-                        let _ = fail_job(job_store, worker_id, &claimed_job.job_id, "Failed to enqueue extraction job from preprocess", err);
+                        let _ = fail_job(
+                            job_store,
+                            worker_id,
+                            &claimed_job.job_id,
+                            "Failed to enqueue extraction job from preprocess",
+                            err,
+                        );
                         continue;
                     }
                     complete_job(job_store, worker_id, &claimed_job.job_id)?;
@@ -671,7 +895,13 @@ fn process_preprocess_job_batch(
     }
 
     for claimed_job in fallbacks {
-        process_preprocess_job(worker_id, &claimed_job, job_store, read_store, processor_factory)?;
+        process_preprocess_job(
+            worker_id,
+            &claimed_job,
+            job_store,
+            read_store,
+            processor_factory,
+        )?;
     }
 
     Ok(())
@@ -1173,8 +1403,14 @@ fn build_contiguous_windows(
         return vec![ConversationWindowRef {
             window_id: format!("{artifact_id}:window:0"),
             label: "coverage fallback".to_string(),
-            start_sequence_no: segments.first().map(|segment| segment.sequence_no).unwrap_or(0),
-            end_sequence_no: segments.last().map(|segment| segment.sequence_no).unwrap_or(0),
+            start_sequence_no: segments
+                .first()
+                .map(|segment| segment.sequence_no)
+                .unwrap_or(0),
+            end_sequence_no: segments
+                .last()
+                .map(|segment| segment.sequence_no)
+                .unwrap_or(0),
         }];
     }
 
@@ -1317,10 +1553,10 @@ fn build_topic_thread_inputs(
             .segments
             .iter()
             .filter(|segment| {
-                thread
-                    .spans
-                    .iter()
-                    .any(|span| segment.sequence_no >= span.start_sequence_no && segment.sequence_no <= span.end_sequence_no)
+                thread.spans.iter().any(|span| {
+                    segment.sequence_no >= span.start_sequence_no
+                        && segment.sequence_no <= span.end_sequence_no
+                })
             })
             .cloned()
             .collect();
@@ -1600,8 +1836,12 @@ fn extend_unique(target: &mut Vec<String>, values: &[String]) {
 
 fn merge_classification_output(target: &mut ClassificationOutput, incoming: &ClassificationOutput) {
     target.title = prefer_richer_optional_text(target.title.take(), incoming.title.clone());
-    target.body_text = prefer_richer_optional_text(target.body_text.take(), incoming.body_text.clone());
-    extend_unique(&mut target.evidence_segment_ids, &incoming.evidence_segment_ids);
+    target.body_text =
+        prefer_richer_optional_text(target.body_text.take(), incoming.body_text.clone());
+    extend_unique(
+        &mut target.evidence_segment_ids,
+        &incoming.evidence_segment_ids,
+    );
 }
 
 fn merge_memory_output(target: &mut MemoryOutput, incoming: &MemoryOutput) {
@@ -1609,7 +1849,10 @@ fn merge_memory_output(target: &mut MemoryOutput, incoming: &MemoryOutput) {
     if incoming.body_text.len() > target.body_text.len() {
         target.body_text = incoming.body_text.clone();
     }
-    extend_unique(&mut target.evidence_segment_ids, &incoming.evidence_segment_ids);
+    extend_unique(
+        &mut target.evidence_segment_ids,
+        &incoming.evidence_segment_ids,
+    );
 }
 
 fn merge_entity_output(target: &mut EntityOutput, incoming: &EntityOutput) {
@@ -1619,7 +1862,10 @@ fn merge_entity_output(target: &mut EntityOutput, incoming: &EntityOutput) {
     if incoming.entity_type.len() > target.entity_type.len() {
         target.entity_type = incoming.entity_type.clone();
     }
-    extend_unique(&mut target.evidence_segment_ids, &incoming.evidence_segment_ids);
+    extend_unique(
+        &mut target.evidence_segment_ids,
+        &incoming.evidence_segment_ids,
+    );
 }
 
 fn merge_relationship_output(target: &mut RelationshipOutput, incoming: &RelationshipOutput) {
@@ -1630,7 +1876,10 @@ fn merge_relationship_output(target: &mut RelationshipOutput, incoming: &Relatio
     if confidence_rank(&incoming.confidence_label) > confidence_rank(&target.confidence_label) {
         target.confidence_label = incoming.confidence_label.clone();
     }
-    extend_unique(&mut target.evidence_segment_ids, &incoming.evidence_segment_ids);
+    extend_unique(
+        &mut target.evidence_segment_ids,
+        &incoming.evidence_segment_ids,
+    );
 }
 
 fn merge_retrieval_intent(target: &mut RetrievalIntent, incoming: &RetrievalIntent) {
@@ -1640,10 +1889,16 @@ fn merge_retrieval_intent(target: &mut RetrievalIntent, incoming: &RetrievalInte
     if incoming.query_text.len() > target.query_text.len() {
         target.query_text = incoming.query_text.clone();
     }
-    extend_unique(&mut target.evidence_segment_ids, &incoming.evidence_segment_ids);
+    extend_unique(
+        &mut target.evidence_segment_ids,
+        &incoming.evidence_segment_ids,
+    );
 }
 
-fn prefer_richer_optional_text(current: Option<String>, incoming: Option<String>) -> Option<String> {
+fn prefer_richer_optional_text(
+    current: Option<String>,
+    incoming: Option<String>,
+) -> Option<String> {
     match (current, incoming) {
         (Some(current), Some(incoming)) => {
             if incoming.len() > current.len() {
@@ -2118,7 +2373,12 @@ pub fn start_enrichment_pipeline(
                     info!("No preprocess batch submitter available; preprocess poller exiting");
                     return;
                 };
-                let stage = PreprocessStage::new(submitter, crate::storage::EnrichmentTier::Standard, batch_size, max_concurrent);
+                let stage = PreprocessStage::new(
+                    submitter,
+                    crate::storage::EnrichmentTier::Standard,
+                    batch_size,
+                    max_concurrent,
+                );
                 stage_poller_loop(
                     &stage,
                     worker_id,
@@ -2159,7 +2419,12 @@ pub fn start_enrichment_pipeline(
                     info!("No extraction batch submitter available; extract poller exiting");
                     return;
                 };
-                let stage = ExtractStage::new(submitter, crate::storage::EnrichmentTier::Standard, batch_size, max_concurrent);
+                let stage = ExtractStage::new(
+                    submitter,
+                    crate::storage::EnrichmentTier::Standard,
+                    batch_size,
+                    max_concurrent,
+                );
                 stage_poller_loop(
                     &stage,
                     worker_id,
@@ -2200,7 +2465,12 @@ pub fn start_enrichment_pipeline(
                     info!("No reconciliation batch submitter available; reconcile poller exiting");
                     return;
                 };
-                let stage = ReconcileStage::new(submitter, crate::storage::EnrichmentTier::Standard, batch_size, max_concurrent);
+                let stage = ReconcileStage::new(
+                    submitter,
+                    crate::storage::EnrichmentTier::Standard,
+                    batch_size,
+                    max_concurrent,
+                );
                 stage_poller_loop(
                     &stage,
                     worker_id,
@@ -2277,7 +2547,10 @@ fn retrieve_context_worker_loop(
         ) {
             Ok(jobs) if !jobs.is_empty() => {
                 let job = &jobs[0];
-                debug!("Worker {} claimed retrieve-context job {}", worker_id, job.job_id);
+                debug!(
+                    "Worker {} claimed retrieve-context job {}",
+                    worker_id, job.job_id
+                );
                 if let Err(err) = process_retrieve_context_job(
                     &worker_id,
                     job,

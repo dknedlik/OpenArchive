@@ -605,11 +605,7 @@ impl EnrichmentJobLifecycleStore for PostgresEnrichmentJobStore {
         job::complete_batch(&mut client, provider_batch_id)
     }
 
-    fn fail_batch_record(
-        &self,
-        provider_batch_id: &str,
-        error_message: &str,
-    ) -> StorageResult<()> {
+    fn fail_batch_record(&self, provider_batch_id: &str, error_message: &str) -> StorageResult<()> {
         let mut client = postgres_db::connect(&self.config)?;
         job::fail_batch_record(&mut client, provider_batch_id, error_message)
     }
@@ -620,6 +616,11 @@ impl EnrichmentJobLifecycleStore for PostgresEnrichmentJobStore {
     ) -> StorageResult<Vec<PersistedEnrichmentBatch>> {
         let mut client = postgres_db::connect(&self.config)?;
         job::load_running_batches(&mut client, stage_name)
+    }
+
+    fn reconcile_stale_running_batches(&self, stage_name: &str) -> StorageResult<usize> {
+        let mut client = postgres_db::connect(&self.config)?;
+        job::reconcile_stale_running_batches(&mut client, stage_name)
     }
 }
 

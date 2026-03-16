@@ -6,15 +6,18 @@ use open_archive::error::StorageResult;
 use open_archive::processor::{ArtifactProcessor, ArtifactProcessorFactory, ProcessorError};
 use open_archive::shutdown::ShutdownToken;
 use open_archive::storage::types::{
-    ArtifactEnrichmentPayload, BrainContextCandidate, ClaimedJob, EnrichmentTier,
+    ArtifactExtractionResult, ArtifactPreprocessPayload, ClaimedJob, EnrichmentTier,
     LoadedArtifactForEnrichment, LoadedArtifactRecord, LoadedParticipant, LoadedSegment,
-    NewEnrichmentJob, RetryOutcome, SourceType,
+    NewEnrichmentBatch, NewEnrichmentJob, PersistedEnrichmentBatch, ReconciliationDecision,
+    RetrievalResultSet, RetryOutcome, SourceType,
 };
 use open_archive::storage::{
-    ArtifactListItem, ArtifactReadStore, DerivationWriteResult, DerivedMetadataWriteStore,
-    EnrichmentJobLifecycleStore, JobType, WriteDerivationAttempt,
+    ArchiveRetrievalStore, ArtifactListItem, ArtifactReadStore, DerivationWriteResult,
+    DerivedMetadataWriteStore, EnrichmentJobLifecycleStore, EnrichmentStateStore, JobType,
+    RetrievalIntent, RetrievedContextItem, WriteDerivationAttempt,
 };
 use open_archive::{ParticipantRole, VisibilityStatus};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -31,12 +34,22 @@ fn test_disabled_workers_start() {
     let config = test_config(0);
     let job_store = Arc::new(EmptyQueueMockStore::new());
     let read_store = Arc::new(FixedReadStore::default());
+    let retrieval_store = Arc::new(MockRetrievalStore);
+    let state_store = Arc::new(MockStateStore::default());
     let derived_store = Arc::new(MockDerivedStore::default());
     let shutdown = ShutdownToken::new();
 
-    let workers = start_enrichment_workers(&config, job_store, read_store, derived_store, shutdown)
-        .expect("disabled workers should start")
-        .len();
+    let workers = start_enrichment_workers(
+        &config,
+        job_store,
+        read_store,
+        retrieval_store,
+        state_store,
+        derived_store,
+        shutdown,
+    )
+    .expect("disabled workers should start")
+    .len();
 
     assert_eq!(workers, 0);
 }
@@ -46,6 +59,8 @@ fn test_enabled_workers_start_and_shutdown() {
     let config = test_config(2);
     let job_store = Arc::new(EmptyQueueMockStore::new());
     let read_store = Arc::new(FixedReadStore::default());
+    let retrieval_store = Arc::new(MockRetrievalStore);
+    let state_store = Arc::new(MockStateStore::default());
     let derived_store = Arc::new(MockDerivedStore::default());
     let shutdown = ShutdownToken::new();
 
@@ -53,6 +68,8 @@ fn test_enabled_workers_start_and_shutdown() {
         &config,
         job_store,
         read_store,
+        retrieval_store,
+        state_store,
         derived_store,
         shutdown.clone(),
     )
@@ -70,22 +87,28 @@ fn test_worker_persists_stub_outputs_and_completes_job() {
     let config = test_config(1);
     let job_store = Arc::new(SingleJobStore::new(valid_claimed_job()));
     let read_store = Arc::new(FixedReadStore::with_sample_artifact());
+    let retrieval_store = Arc::new(MockRetrievalStore);
+    let state_store = Arc::new(MockStateStore::default());
     let derived_store = Arc::new(MockDerivedStore::default());
     let shutdown = ShutdownToken::new();
     let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
     let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
+    let retrieval_store_trait: Arc<dyn ArchiveRetrievalStore> = retrieval_store;
+    let state_store_trait: Arc<dyn EnrichmentStateStore> = state_store;
     let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store.clone();
 
     let workers = start_enrichment_workers(
         &config,
         job_store_trait,
         read_store_trait,
+        retrieval_store_trait,
+        state_store_trait,
         derived_store_trait,
         shutdown.clone(),
     )
     .expect("worker should start");
 
-    std::thread::sleep(Duration::from_millis(75));
+    std::thread::sleep(Duration::from_millis(250));
     shutdown.signal();
     for worker in workers {
         worker.join().expect("worker should join cleanly");
@@ -111,23 +134,29 @@ fn test_worker_fails_job_when_factory_rejects_claimed_tier() {
 
     let job_store = Arc::new(SingleJobStore::new(claimed_job));
     let read_store = Arc::new(FixedReadStore::with_sample_artifact());
+    let retrieval_store = Arc::new(MockRetrievalStore);
+    let state_store = Arc::new(MockStateStore::default());
     let derived_store = Arc::new(MockDerivedStore::default());
     let shutdown = ShutdownToken::new();
     let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
     let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
+    let retrieval_store_trait: Arc<dyn ArchiveRetrievalStore> = retrieval_store;
+    let state_store_trait: Arc<dyn EnrichmentStateStore> = state_store;
     let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store;
 
     let workers = start_enrichment_workers_with_factory(
         &config,
         job_store_trait,
         read_store_trait,
+        retrieval_store_trait,
+        state_store_trait,
         derived_store_trait,
         shutdown.clone(),
         Arc::new(RejectAllFactory),
     )
     .expect("worker should start");
 
-    std::thread::sleep(Duration::from_millis(75));
+    std::thread::sleep(Duration::from_millis(150));
     shutdown.signal();
     for worker in workers {
         worker.join().expect("worker should join cleanly");
@@ -142,23 +171,29 @@ fn test_worker_marks_job_retryable_for_transient_inference_failures() {
     let config = test_config(1);
     let job_store = Arc::new(SingleJobStore::new(valid_claimed_job()));
     let read_store = Arc::new(FixedReadStore::with_sample_artifact());
+    let retrieval_store = Arc::new(MockRetrievalStore);
+    let state_store = Arc::new(MockStateStore::default());
     let derived_store = Arc::new(MockDerivedStore::default());
     let shutdown = ShutdownToken::new();
     let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
     let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
+    let retrieval_store_trait: Arc<dyn ArchiveRetrievalStore> = retrieval_store;
+    let state_store_trait: Arc<dyn EnrichmentStateStore> = state_store;
     let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store;
 
     let workers = start_enrichment_workers_with_factory(
         &config,
         job_store_trait,
         read_store_trait,
+        retrieval_store_trait,
+        state_store_trait,
         derived_store_trait,
         shutdown.clone(),
         Arc::new(RetryableProcessorFactory),
     )
     .expect("worker should start");
 
-    std::thread::sleep(Duration::from_millis(75));
+    std::thread::sleep(Duration::from_millis(150));
     shutdown.signal();
     for worker in workers {
         worker.join().expect("worker should join cleanly");
@@ -181,22 +216,28 @@ fn test_worker_fails_job_when_artifact_cannot_be_loaded() {
     let config = test_config(1);
     let job_store = Arc::new(SingleJobStore::new(valid_claimed_job()));
     let read_store = Arc::new(FixedReadStore::default());
+    let retrieval_store = Arc::new(MockRetrievalStore);
+    let state_store = Arc::new(MockStateStore::default());
     let derived_store = Arc::new(MockDerivedStore::default());
     let shutdown = ShutdownToken::new();
     let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
     let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
+    let retrieval_store_trait: Arc<dyn ArchiveRetrievalStore> = retrieval_store;
+    let state_store_trait: Arc<dyn EnrichmentStateStore> = state_store;
     let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store.clone();
 
     let workers = start_enrichment_workers(
         &config,
         job_store_trait,
         read_store_trait,
+        retrieval_store_trait,
+        state_store_trait,
         derived_store_trait,
         shutdown.clone(),
     )
     .expect("worker should start");
 
-    std::thread::sleep(Duration::from_millis(75));
+    std::thread::sleep(Duration::from_millis(150));
     shutdown.signal();
     for worker in workers {
         worker.join().expect("worker should join cleanly");
@@ -210,7 +251,7 @@ fn test_worker_fails_job_when_artifact_cannot_be_loaded() {
         .unwrap()
         .as_deref()
         .unwrap_or_default()
-        .contains("not found for enrichment"));
+        .contains("not found for preprocessing"));
     assert!(derived_store.attempts.lock().unwrap().is_empty());
 }
 
@@ -228,22 +269,28 @@ fn test_worker_fails_job_when_payload_source_type_is_invalid() {
 
     let job_store = Arc::new(SingleJobStore::new(claimed_job));
     let read_store = Arc::new(FixedReadStore::with_sample_artifact());
+    let retrieval_store = Arc::new(MockRetrievalStore);
+    let state_store = Arc::new(MockStateStore::default());
     let derived_store = Arc::new(MockDerivedStore::default());
     let shutdown = ShutdownToken::new();
     let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
     let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
+    let retrieval_store_trait: Arc<dyn ArchiveRetrievalStore> = retrieval_store;
+    let state_store_trait: Arc<dyn EnrichmentStateStore> = state_store;
     let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store.clone();
 
     let workers = start_enrichment_workers(
         &config,
         job_store_trait,
         read_store_trait,
+        retrieval_store_trait,
+        state_store_trait,
         derived_store_trait,
         shutdown.clone(),
     )
     .expect("worker should start");
 
-    std::thread::sleep(Duration::from_millis(75));
+    std::thread::sleep(Duration::from_millis(150));
     shutdown.signal();
     for worker in workers {
         worker.join().expect("worker should join cleanly");
@@ -257,7 +304,7 @@ fn test_worker_fails_job_when_payload_source_type_is_invalid() {
         .unwrap()
         .as_deref()
         .unwrap_or_default()
-        .contains("Invalid artifact source_type"));
+        .contains("Invalid artifact source_type in preprocess payload"));
     assert!(derived_store.attempts.lock().unwrap().is_empty());
 }
 
@@ -271,16 +318,12 @@ fn test_config(enrichment_worker_count: usize) -> HttpConfig {
 }
 
 fn valid_claimed_job() -> ClaimedJob {
-    let payload = ArtifactEnrichmentPayload::new_v1(
-        "artifact-1",
-        "import-1",
-        SourceType::ChatGptExport,
-        None,
-    );
+    let payload =
+        ArtifactPreprocessPayload::new_v1("artifact-1", "import-1", SourceType::ChatGptExport);
     ClaimedJob {
         job_id: "job-1".to_string(),
         artifact_id: "artifact-1".to_string(),
-        job_type: JobType::ArtifactEnrichment,
+        job_type: JobType::ArtifactPreprocess,
         enrichment_tier: EnrichmentTier::Standard,
         spawned_by_job_id: None,
         attempt_count: 1,
@@ -291,7 +334,7 @@ fn valid_claimed_job() -> ClaimedJob {
 }
 
 struct SingleJobStore {
-    claimed_job: Mutex<Option<ClaimedJob>>,
+    pending_jobs: Mutex<Vec<ClaimedJob>>,
     claim_count: AtomicUsize,
     complete_count: AtomicUsize,
     fail_count: AtomicUsize,
@@ -303,7 +346,10 @@ struct SingleJobStore {
 impl SingleJobStore {
     fn new(claimed_job: ClaimedJob) -> Self {
         Self {
-            claimed_job: Mutex::new(Some(claimed_job)),
+            pending_jobs: Mutex::new(vec![ClaimedJob {
+                attempt_count: 0,
+                ..claimed_job
+            }]),
             claim_count: AtomicUsize::new(0),
             complete_count: AtomicUsize::new(0),
             fail_count: AtomicUsize::new(0),
@@ -317,7 +363,13 @@ impl SingleJobStore {
 impl EnrichmentJobLifecycleStore for SingleJobStore {
     fn claim_next_job(&self, _worker_id: &str) -> StorageResult<Option<ClaimedJob>> {
         self.claim_count.fetch_add(1, Ordering::SeqCst);
-        Ok(self.claimed_job.lock().unwrap().take())
+        let mut pending = self.pending_jobs.lock().unwrap();
+        if pending.is_empty() {
+            return Ok(None);
+        }
+        let mut job = pending.remove(0);
+        job.attempt_count += 1;
+        Ok(Some(job))
     }
 
     fn complete_job(&self, _worker_id: &str, _job_id: &str) -> StorageResult<()> {
@@ -343,8 +395,79 @@ impl EnrichmentJobLifecycleStore for SingleJobStore {
         Ok(RetryOutcome::Retried)
     }
 
-    fn enqueue_jobs(&self, _jobs: &[NewEnrichmentJob]) -> StorageResult<()> {
+    fn enqueue_jobs(&self, jobs: &[NewEnrichmentJob]) -> StorageResult<()> {
+        let mut pending = self.pending_jobs.lock().unwrap();
+        pending.extend(jobs.iter().map(|job| ClaimedJob {
+            job_id: job.job_id.clone(),
+            artifact_id: job.artifact_id.clone(),
+            job_type: job.job_type,
+            enrichment_tier: job.enrichment_tier,
+            spawned_by_job_id: job.spawned_by_job_id.clone(),
+            attempt_count: 0,
+            max_attempts: job.max_attempts,
+            required_capabilities: job.required_capabilities.clone(),
+            payload_json: job.payload_json.clone(),
+        }));
         Ok(())
+    }
+
+    fn claim_matching_jobs(
+        &self,
+        _worker_id: &str,
+        _template_job: &ClaimedJob,
+        _limit: usize,
+    ) -> StorageResult<Vec<ClaimedJob>> {
+        Ok(Vec::new())
+    }
+
+    fn claim_jobs_by_type(
+        &self,
+        _worker_id: &str,
+        _job_type: JobType,
+        _enrichment_tier: Option<EnrichmentTier>,
+        _limit: usize,
+    ) -> StorageResult<Vec<ClaimedJob>> {
+        Ok(Vec::new())
+    }
+
+    fn record_batch_submission(
+        &self,
+        _batch: &NewEnrichmentBatch,
+        _jobs: &[ClaimedJob],
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    fn transition_batch_submission(
+        &self,
+        _completed_provider_batch_id: &str,
+        _next_batch: &NewEnrichmentBatch,
+        _jobs: &[ClaimedJob],
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    fn complete_batch(&self, _provider_batch_id: &str) -> StorageResult<()> {
+        Ok(())
+    }
+
+    fn fail_batch_record(
+        &self,
+        _provider_batch_id: &str,
+        _error_message: &str,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    fn load_running_batches(
+        &self,
+        _stage_name: &str,
+    ) -> StorageResult<Vec<PersistedEnrichmentBatch>> {
+        Ok(Vec::new())
+    }
+
+    fn reconcile_stale_running_batches(&self, _stage_name: &str) -> StorageResult<usize> {
+        Ok(0)
     }
 }
 
@@ -386,6 +509,65 @@ impl EnrichmentJobLifecycleStore for EmptyQueueMockStore {
 
     fn enqueue_jobs(&self, _jobs: &[NewEnrichmentJob]) -> StorageResult<()> {
         Ok(())
+    }
+
+    fn claim_matching_jobs(
+        &self,
+        _worker_id: &str,
+        _template_job: &ClaimedJob,
+        _limit: usize,
+    ) -> StorageResult<Vec<ClaimedJob>> {
+        Ok(Vec::new())
+    }
+
+    fn claim_jobs_by_type(
+        &self,
+        _worker_id: &str,
+        _job_type: JobType,
+        _enrichment_tier: Option<EnrichmentTier>,
+        _limit: usize,
+    ) -> StorageResult<Vec<ClaimedJob>> {
+        Ok(Vec::new())
+    }
+
+    fn record_batch_submission(
+        &self,
+        _batch: &NewEnrichmentBatch,
+        _jobs: &[ClaimedJob],
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    fn transition_batch_submission(
+        &self,
+        _completed_provider_batch_id: &str,
+        _next_batch: &NewEnrichmentBatch,
+        _jobs: &[ClaimedJob],
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    fn complete_batch(&self, _provider_batch_id: &str) -> StorageResult<()> {
+        Ok(())
+    }
+
+    fn fail_batch_record(
+        &self,
+        _provider_batch_id: &str,
+        _error_message: &str,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    fn load_running_batches(
+        &self,
+        _stage_name: &str,
+    ) -> StorageResult<Vec<PersistedEnrichmentBatch>> {
+        Ok(Vec::new())
+    }
+
+    fn reconcile_stale_running_batches(&self, _stage_name: &str) -> StorageResult<usize> {
+        Ok(0)
     }
 }
 
@@ -454,14 +636,6 @@ impl ArtifactReadStore for FixedReadStore {
     ) -> StorageResult<Option<LoadedArtifactForEnrichment>> {
         Ok(self.loaded.clone())
     }
-
-    fn load_brain_context_candidates(
-        &self,
-        _exclude_artifact_id: &str,
-        _limit: usize,
-    ) -> StorageResult<Vec<BrainContextCandidate>> {
-        Ok(Vec::new())
-    }
 }
 
 #[derive(Default)]
@@ -494,13 +668,123 @@ impl DerivedMetadataWriteStore for MockDerivedStore {
     }
 }
 
+struct MockRetrievalStore;
+
+impl ArchiveRetrievalStore for MockRetrievalStore {
+    fn retrieve_for_intents(
+        &self,
+        _artifact_id: &str,
+        _intents: &[RetrievalIntent],
+        _limit_per_intent: usize,
+    ) -> StorageResult<Vec<RetrievedContextItem>> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Default)]
+struct MockStateStore {
+    extraction_results: Mutex<HashMap<String, ArtifactExtractionResult>>,
+    retrieval_result_sets: Mutex<HashMap<String, RetrievalResultSet>>,
+    reconciliation_decisions: Mutex<HashMap<String, Vec<ReconciliationDecision>>>,
+}
+
+impl EnrichmentStateStore for MockStateStore {
+    fn save_extraction_result(&self, result: &ArtifactExtractionResult) -> StorageResult<()> {
+        self.extraction_results
+            .lock()
+            .unwrap()
+            .insert(result.extraction_result_id.clone(), result.clone());
+        Ok(())
+    }
+
+    fn load_extraction_result(
+        &self,
+        extraction_result_id: &str,
+    ) -> StorageResult<Option<ArtifactExtractionResult>> {
+        Ok(self
+            .extraction_results
+            .lock()
+            .unwrap()
+            .get(extraction_result_id)
+            .cloned())
+    }
+
+    fn save_retrieval_result_set(&self, result_set: &RetrievalResultSet) -> StorageResult<()> {
+        self.retrieval_result_sets.lock().unwrap().insert(
+            result_set.retrieval_result_set_id.clone(),
+            result_set.clone(),
+        );
+        Ok(())
+    }
+
+    fn load_retrieval_result_set(
+        &self,
+        retrieval_result_set_id: &str,
+    ) -> StorageResult<Option<RetrievalResultSet>> {
+        Ok(self
+            .retrieval_result_sets
+            .lock()
+            .unwrap()
+            .get(retrieval_result_set_id)
+            .cloned())
+    }
+
+    fn save_reconciliation_decisions(
+        &self,
+        decisions: &[ReconciliationDecision],
+    ) -> StorageResult<()> {
+        if let Some(first) = decisions.first() {
+            self.reconciliation_decisions
+                .lock()
+                .unwrap()
+                .insert(first.extraction_result_id.clone(), decisions.to_vec());
+        }
+        Ok(())
+    }
+
+    fn load_reconciliation_decisions(
+        &self,
+        extraction_result_id: &str,
+    ) -> StorageResult<Vec<ReconciliationDecision>> {
+        Ok(self
+            .reconciliation_decisions
+            .lock()
+            .unwrap()
+            .get(extraction_result_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+}
+
 struct RejectAllFactory;
 
 impl ArtifactProcessorFactory for RejectAllFactory {
+    fn build_preprocess_processor(
+        &self,
+        _tier: EnrichmentTier,
+    ) -> std::result::Result<Box<dyn open_archive::processor::PreprocessProcessor>, ProcessorError>
+    {
+        Err(ProcessorError::Message {
+            message: "tier rejected".to_string(),
+        })
+    }
+
     fn build(
         &self,
         _tier: EnrichmentTier,
     ) -> std::result::Result<Box<dyn ArtifactProcessor>, ProcessorError> {
+        Err(ProcessorError::Message {
+            message: "tier rejected".to_string(),
+        })
+    }
+
+    fn build_reconciliation_processor(
+        &self,
+        _tier: EnrichmentTier,
+    ) -> std::result::Result<
+        Box<dyn open_archive::processor::ReconciliationProcessor>,
+        ProcessorError,
+    > {
         Err(ProcessorError::Message {
             message: "tier rejected".to_string(),
         })
@@ -510,11 +794,29 @@ impl ArtifactProcessorFactory for RejectAllFactory {
 struct RetryableProcessorFactory;
 
 impl ArtifactProcessorFactory for RetryableProcessorFactory {
+    fn build_preprocess_processor(
+        &self,
+        _tier: EnrichmentTier,
+    ) -> std::result::Result<Box<dyn open_archive::processor::PreprocessProcessor>, ProcessorError>
+    {
+        Ok(Box::new(RetryablePreprocessProcessor))
+    }
+
     fn build(
         &self,
         _tier: EnrichmentTier,
     ) -> std::result::Result<Box<dyn ArtifactProcessor>, ProcessorError> {
         Ok(Box::new(RetryableProcessor))
+    }
+
+    fn build_reconciliation_processor(
+        &self,
+        _tier: EnrichmentTier,
+    ) -> std::result::Result<
+        Box<dyn open_archive::processor::ReconciliationProcessor>,
+        ProcessorError,
+    > {
+        Ok(Box::new(RetryableReconciliationProcessor))
     }
 }
 
@@ -525,6 +827,38 @@ impl ArtifactProcessor for RetryableProcessor {
         &self,
         _input: &open_archive::processor::ArtifactProcessorInput,
     ) -> std::result::Result<open_archive::processor::ArtifactProcessorOutput, ProcessorError> {
+        Err(ProcessorError::InferenceHttpStatus {
+            status: 429,
+            body_preview: "rate limited".to_string(),
+        })
+    }
+}
+
+struct RetryablePreprocessProcessor;
+
+impl open_archive::processor::PreprocessProcessor for RetryablePreprocessProcessor {
+    fn segment(
+        &self,
+        _input: &open_archive::processor::PreprocessProcessorInput,
+    ) -> std::result::Result<open_archive::processor::PreprocessProcessorOutput, ProcessorError>
+    {
+        Err(ProcessorError::InferenceHttpStatus {
+            status: 429,
+            body_preview: "rate limited".to_string(),
+        })
+    }
+}
+
+struct RetryableReconciliationProcessor;
+
+impl open_archive::processor::ReconciliationProcessor for RetryableReconciliationProcessor {
+    fn reconcile(
+        &self,
+        _input: &open_archive::processor::ReconciliationProcessorInput,
+    ) -> std::result::Result<
+        Vec<open_archive::processor::ReconciliationDecisionOutput>,
+        ProcessorError,
+    > {
         Err(ProcessorError::InferenceHttpStatus {
             status: 429,
             body_preview: "rate limited".to_string(),

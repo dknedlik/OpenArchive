@@ -5,7 +5,8 @@ use open_archive::enrichment_worker::start_enrichment_workers;
 use open_archive::migrations;
 use open_archive::shutdown::ShutdownToken;
 use open_archive::storage::{
-    ArtifactReadStore, DerivedMetadataWriteStore, EnrichmentJobLifecycleStore, ImportWriteStore,
+    ArchiveRetrievalStore, ArtifactReadStore, DerivedMetadataWriteStore,
+    EnrichmentJobLifecycleStore, EnrichmentStateStore, ImportWriteStore,
     OracleDerivedMetadataStore, OracleEnrichmentJobStore, OracleImportWriteStore,
 };
 use std::sync::Arc;
@@ -64,6 +65,14 @@ impl OracleHarness {
     fn derived_store(&self) -> Arc<dyn DerivedMetadataWriteStore> {
         Arc::new(OracleDerivedMetadataStore::new(self.0.clone()))
     }
+
+    fn retrieval_store(&self) -> Arc<dyn ArchiveRetrievalStore> {
+        Arc::new(OracleImportWriteStore::new(self.0.clone()))
+    }
+
+    fn state_store(&self) -> Arc<dyn EnrichmentStateStore> {
+        Arc::new(OracleDerivedMetadataStore::new(self.0.clone()))
+    }
 }
 
 #[test]
@@ -90,6 +99,8 @@ fn test_stub_worker_persists_derivations_and_completes_job() {
         },
         harness.job_store(),
         harness.read_store(),
+        harness.retrieval_store(),
+        harness.state_store(),
         harness.derived_store(),
         shutdown.clone(),
     )

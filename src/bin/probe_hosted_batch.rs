@@ -4,9 +4,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 
-use open_archive::config::{
-    AnthropicConfig, GrokConfig, OpenAiConfig, PostgresConfig,
-};
+use open_archive::config::{AnthropicConfig, GrokConfig, OpenAiConfig, PostgresConfig};
 use open_archive::processor::{
     AnthropicProcessorFactory, ArtifactProcessorFactory, ArtifactProcessorInput, BatchPollResult,
     GrokProcessorFactory, MemoryOutput, OpenAiProcessorFactory, PreprocessProcessorInput,
@@ -21,7 +19,9 @@ use postgres::NoTls;
 
 #[derive(Debug, Parser)]
 #[command(name = "probe_hosted_batch")]
-#[command(about = "Exercise hosted provider batch submit/poll/parse for preprocess, extract, or reconcile")]
+#[command(
+    about = "Exercise hosted provider batch submit/poll/parse for preprocess, extract, or reconcile"
+)]
 struct Args {
     #[command(subcommand)]
     command: Command,
@@ -120,7 +120,8 @@ fn build_factory(
             Ok((Box::new(factory), model))
         }
         HostedProvider::Grok => {
-            let mut config = GrokConfig::from_env().context("failed to load Grok config from env")?;
+            let mut config =
+                GrokConfig::from_env().context("failed to load Grok config from env")?;
             if let Some(model) = override_model {
                 config.standard_model = model.to_string();
                 config.quality_model = Some(model.to_string());
@@ -283,10 +284,20 @@ fn run_reconcile(
             .ok_or_else(|| anyhow!("artifact {artifact_id} not found"))?;
         let extraction_result = derived_store
             .load_extraction_result(&payload.extraction_result_id)?
-            .ok_or_else(|| anyhow!("extraction result {} not found", payload.extraction_result_id))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "extraction result {} not found",
+                    payload.extraction_result_id
+                )
+            })?;
         let retrieval_result_set = derived_store
             .load_retrieval_result_set(&payload.retrieval_result_set_id)?
-            .ok_or_else(|| anyhow!("retrieval result set {} not found", payload.retrieval_result_set_id))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "retrieval result set {} not found",
+                    payload.retrieval_result_set_id
+                )
+            })?;
 
         inputs.push(ReconciliationProcessorInput {
             artifact_id,
@@ -379,7 +390,11 @@ fn wait_for_batch<T: BatchProbe + ?Sized>(
             }
             BatchPollResult::Succeeded(data) => return Ok(data),
             BatchPollResult::Failed(message) => {
-                return Err(anyhow!("{label} batch {} failed: {}", handle.batch_id, message));
+                return Err(anyhow!(
+                    "{label} batch {} failed: {}",
+                    handle.batch_id,
+                    message
+                ));
             }
         }
     }

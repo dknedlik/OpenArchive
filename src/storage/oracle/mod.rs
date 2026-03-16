@@ -402,6 +402,10 @@ impl EnrichmentJobLifecycleStore for OracleEnrichmentJobStore {
     ) -> StorageResult<Vec<PersistedEnrichmentBatch>> {
         Ok(Vec::new())
     }
+
+    fn reconcile_stale_running_batches(&self, _stage_name: &str) -> StorageResult<usize> {
+        Ok(0)
+    }
 }
 
 pub struct OracleDerivedMetadataStore {

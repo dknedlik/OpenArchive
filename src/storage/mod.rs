@@ -56,11 +56,10 @@ pub use types::{
     JobStatus, JobType, LoadedArtifactForEnrichment, LoadedArtifactRecord, LoadedParticipant,
     LoadedSegment, MemoryObjectJson, NewArtifact, NewDerivationRun, NewDerivedObject,
     NewEnrichmentBatch, NewEnrichmentJob, NewEvidenceLink, NewImport, NewImportObjectRef,
-    NewParticipant, NewSegment, ObjectStatus, OriginKind, PayloadFormat,
-    PersistedEnrichmentBatch, ReconciliationDecision, ReconciliationDecisionKind,
-    RelationshipObjectJson, RetrievalIntent, RetrievalResultSet, RetrievedContextItem,
-    RetryOutcome, ScopeType, SegmentSpanRef, SegmentType, SourceType, SummaryObjectJson,
-    SupportStrength, TopicThreadRef,
+    NewParticipant, NewSegment, ObjectStatus, OriginKind, PayloadFormat, PersistedEnrichmentBatch,
+    ReconciliationDecision, ReconciliationDecisionKind, RelationshipObjectJson, RetrievalIntent,
+    RetrievalResultSet, RetrievedContextItem, RetryOutcome, ScopeType, SegmentSpanRef, SegmentType,
+    SourceType, SummaryObjectJson, SupportStrength, TopicThreadRef,
 };
 
 use crate::error::StorageResult;

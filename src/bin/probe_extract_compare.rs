@@ -65,15 +65,20 @@ fn main() -> Result<()> {
             extract_input.segments.len()
         );
 
-        let baseline = run_extract(&gemini, &args, &extract_input)
-            .context("baseline extraction failed")?;
+        let baseline =
+            run_extract(&gemini, &args, &extract_input).context("baseline extraction failed")?;
         let preprocess_output = run_two_phase_preprocess(&gemini, &args, &preprocess_input)
             .context("two-phase preprocess failed")?;
-        let chunk_inputs = build_topic_thread_inputs(&extract_input, &preprocess_output.topic_threads);
+        let chunk_inputs =
+            build_topic_thread_inputs(&extract_input, &preprocess_output.topic_threads);
         let mut chunk_outputs = Vec::new();
         for chunk_input in &chunk_inputs {
-            let output = run_extract(&gemini, &args, chunk_input)
-                .with_context(|| format!("segmented extraction failed for chunk {:?}", chunk_input.title))?;
+            let output = run_extract(&gemini, &args, chunk_input).with_context(|| {
+                format!(
+                    "segmented extraction failed for chunk {:?}",
+                    chunk_input.title
+                )
+            })?;
             chunk_outputs.push(output);
         }
         let segmented = merge_chunk_outputs(&extract_input, &chunk_outputs);
@@ -104,8 +109,12 @@ fn run_extract(
         &build_extract_user_prompt(input)?,
         &extract_schema(),
     )?;
-    let parsed: ExtractModelOutput = serde_json::from_str(&body)
-        .map_err(|source| anyhow!("failed to parse extraction JSON: {source}: {}", preview(&body)))?;
+    let parsed: ExtractModelOutput = serde_json::from_str(&body).map_err(|source| {
+        anyhow!(
+            "failed to parse extraction JSON: {source}: {}",
+            preview(&body)
+        )
+    })?;
     Ok(parsed.into_output())
 }
 
@@ -136,7 +145,11 @@ fn print_extract_summary(output: &ArtifactProcessorOutput) {
         let values = output
             .memories
             .iter()
-            .map(|item| item.title.clone().unwrap_or_else(|| item.memory_type.clone()))
+            .map(|item| {
+                item.title
+                    .clone()
+                    .unwrap_or_else(|| item.memory_type.clone())
+            })
             .collect::<Vec<_>>()
             .join(" | ");
         println!("    memories: {}", truncate(&values, 220));
@@ -323,7 +336,9 @@ impl ExtractModelOutput {
                 .collect(),
             importance_score: self.importance_score,
             escalate_to_frontier: self.escalate_to_frontier,
-            escalation_reason: if self.escalate_to_frontier && !self.escalation_reason.trim().is_empty() {
+            escalation_reason: if self.escalate_to_frontier
+                && !self.escalation_reason.trim().is_empty()
+            {
                 Some(self.escalation_reason)
             } else {
                 None
@@ -397,8 +412,12 @@ fn run_two_phase_preprocess(
         &build_phase_one_user_prompt(input)?,
         &phase_one_schema(),
     )?;
-    let parsed_phase_one: PhaseOneOutput = serde_json::from_str(&phase_one)
-        .map_err(|source| anyhow!("failed to parse phase-one JSON: {source}: {}", preview(&phase_one)))?;
+    let parsed_phase_one: PhaseOneOutput = serde_json::from_str(&phase_one).map_err(|source| {
+        anyhow!(
+            "failed to parse phase-one JSON: {source}: {}",
+            preview(&phase_one)
+        )
+    })?;
     let normalized_phase_one = normalize_phase_one(parsed_phase_one, input)?;
 
     let phase_two = client.complete_json(
@@ -407,8 +426,12 @@ fn run_two_phase_preprocess(
         &build_phase_two_user_prompt(input, &normalized_phase_one)?,
         &phase_two_schema(),
     )?;
-    let parsed_phase_two: PhaseTwoOutput = serde_json::from_str(&phase_two)
-        .map_err(|source| anyhow!("failed to parse phase-two JSON: {source}: {}", preview(&phase_two)))?;
+    let parsed_phase_two: PhaseTwoOutput = serde_json::from_str(&phase_two).map_err(|source| {
+        anyhow!(
+            "failed to parse phase-two JSON: {source}: {}",
+            preview(&phase_two)
+        )
+    })?;
     let topic_threads = normalize_phase_two(parsed_phase_two, &normalized_phase_one)?;
 
     Ok(PreprocessResult { topic_threads })
@@ -545,7 +568,10 @@ fn merge_chunk_outputs(
         prompt_version: first.prompt_version,
         usage: None,
         summary: SummaryOutput {
-            title: summary_titles.first().cloned().or_else(|| input.title.clone()),
+            title: summary_titles
+                .first()
+                .cloned()
+                .or_else(|| input.title.clone()),
             body_text: summary_bodies.join(" "),
             evidence_segment_ids: summary_evidence,
         },
@@ -572,8 +598,14 @@ fn extend_unique(target: &mut Vec<String>, incoming: &[String]) {
     }
 }
 
-fn merge_classification_output(existing: &mut ClassificationOutput, incoming: &ClassificationOutput) {
-    extend_unique(&mut existing.evidence_segment_ids, &incoming.evidence_segment_ids);
+fn merge_classification_output(
+    existing: &mut ClassificationOutput,
+    incoming: &ClassificationOutput,
+) {
+    extend_unique(
+        &mut existing.evidence_segment_ids,
+        &incoming.evidence_segment_ids,
+    );
     if existing.body_text.as_ref().map(|v| v.len()).unwrap_or(0)
         < incoming.body_text.as_ref().map(|v| v.len()).unwrap_or(0)
     {
@@ -587,7 +619,10 @@ fn merge_classification_output(existing: &mut ClassificationOutput, incoming: &C
 }
 
 fn merge_memory_output(existing: &mut MemoryOutput, incoming: &MemoryOutput) {
-    extend_unique(&mut existing.evidence_segment_ids, &incoming.evidence_segment_ids);
+    extend_unique(
+        &mut existing.evidence_segment_ids,
+        &incoming.evidence_segment_ids,
+    );
     if incoming.body_text.len() > existing.body_text.len() {
         existing.body_text = incoming.body_text.clone();
     }
@@ -599,14 +634,20 @@ fn merge_memory_output(existing: &mut MemoryOutput, incoming: &MemoryOutput) {
 }
 
 fn merge_entity_output(existing: &mut EntityOutput, incoming: &EntityOutput) {
-    extend_unique(&mut existing.evidence_segment_ids, &incoming.evidence_segment_ids);
+    extend_unique(
+        &mut existing.evidence_segment_ids,
+        &incoming.evidence_segment_ids,
+    );
     if incoming.display_name.len() > existing.display_name.len() {
         existing.display_name = incoming.display_name.clone();
     }
 }
 
 fn merge_relationship_output(existing: &mut RelationshipOutput, incoming: &RelationshipOutput) {
-    extend_unique(&mut existing.evidence_segment_ids, &incoming.evidence_segment_ids);
+    extend_unique(
+        &mut existing.evidence_segment_ids,
+        &incoming.evidence_segment_ids,
+    );
     if incoming.body_text.len() > existing.body_text.len() {
         existing.body_text = incoming.body_text.clone();
     }
@@ -621,7 +662,10 @@ fn merge_relationship_output(existing: &mut RelationshipOutput, incoming: &Relat
 }
 
 fn merge_retrieval_intent(existing: &mut RetrievalIntent, incoming: &RetrievalIntent) {
-    extend_unique(&mut existing.evidence_segment_ids, &incoming.evidence_segment_ids);
+    extend_unique(
+        &mut existing.evidence_segment_ids,
+        &incoming.evidence_segment_ids,
+    );
     if incoming.question.len() > existing.question.len() {
         existing.question = incoming.question.clone();
     }
@@ -630,7 +674,9 @@ fn merge_retrieval_intent(existing: &mut RetrievalIntent, incoming: &RetrievalIn
 fn memory_target_key_from_output(memory: &MemoryOutput) -> String {
     format!(
         "{}:{}:{}",
-        memory.memory_type, memory.memory_scope.as_str(), memory.memory_scope_value
+        memory.memory_type,
+        memory.memory_scope.as_str(),
+        memory.memory_scope_value
     )
 }
 
@@ -720,8 +766,10 @@ fn normalize_phase_two(
     output: PhaseTwoOutput,
     spans: &[PhaseOneSpanNormalized],
 ) -> Result<Vec<TopicThreadRef>> {
-    let span_map: HashMap<&str, &PhaseOneSpanNormalized> =
-        spans.iter().map(|span| (span.span_id.as_str(), span)).collect();
+    let span_map: HashMap<&str, &PhaseOneSpanNormalized> = spans
+        .iter()
+        .map(|span| (span.span_id.as_str(), span))
+        .collect();
     let mut topic_threads = Vec::new();
     for thread in output.topic_threads {
         let mut ordered = Vec::new();
@@ -774,7 +822,10 @@ fn build_phase_one_user_prompt(input: &PreprocessProcessorInput) -> Result<Strin
         .map(|(index, segment)| PromptSegment {
             evidence_ref: segment_alias(index),
             sequence_no: segment.sequence_no,
-            participant_role: segment.participant_role.map(|role| role.as_str()).unwrap_or("unknown"),
+            participant_role: segment
+                .participant_role
+                .map(|role| role.as_str())
+                .unwrap_or("unknown"),
             text: segment.text_content.as_str(),
         })
         .collect();
@@ -801,7 +852,10 @@ fn build_extract_user_prompt(input: &ArtifactProcessorInput) -> Result<String> {
         .map(|(index, segment)| PromptSegment {
             evidence_ref: segment_alias(index),
             sequence_no: segment.sequence_no,
-            participant_role: segment.participant_role.map(|role| role.as_str()).unwrap_or("unknown"),
+            participant_role: segment
+                .participant_role
+                .map(|role| role.as_str())
+                .unwrap_or("unknown"),
             text: segment.text_content.as_str(),
         })
         .collect();
@@ -1017,7 +1071,10 @@ struct ProbeClient {
 
 fn probe_preprocess_client(config: &GeminiConfig) -> Result<ProbeClient> {
     let mut default_headers = reqwest::header::HeaderMap::new();
-    default_headers.insert(reqwest::header::CONTENT_TYPE, reqwest::header::HeaderValue::from_static("application/json"));
+    default_headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        reqwest::header::HeaderValue::from_static("application/json"),
+    );
     let api_key_header = reqwest::header::HeaderName::from_static("x-goog-api-key");
     let api_key_value = reqwest::header::HeaderValue::from_str(&config.api_key)
         .map_err(|err| anyhow!("invalid Gemini API key header: {err}"))?;
@@ -1062,12 +1119,23 @@ impl ProbeClient {
             .send()
             .context("failed to send inference request")?;
         let status = response.status();
-        let response_text = response.text().context("failed to read inference response")?;
+        let response_text = response
+            .text()
+            .context("failed to read inference response")?;
         if !status.is_success() {
-            return Err(anyhow!("inference returned HTTP status {}: {}", status.as_u16(), preview(&response_text)));
+            return Err(anyhow!(
+                "inference returned HTTP status {}: {}",
+                status.as_u16(),
+                preview(&response_text)
+            ));
         }
-        let parsed: serde_json::Value = serde_json::from_str(&response_text)
-            .with_context(|| format!("failed to parse inference response: {}", preview(&response_text)))?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&response_text).with_context(|| {
+                format!(
+                    "failed to parse inference response: {}",
+                    preview(&response_text)
+                )
+            })?;
         let text = parsed["candidates"][0]["content"]["parts"][0]["text"]
             .as_str()
             .ok_or_else(|| anyhow!("Gemini returned no text"))?;
@@ -1102,7 +1170,9 @@ fn normalize_gemini_schema(schema: &serde_json::Value) -> serde_json::Value {
                 if key == "type" {
                     sanitized.insert(
                         key.clone(),
-                        serde_json::Value::String(child.as_str().unwrap_or("object").to_ascii_uppercase()),
+                        serde_json::Value::String(
+                            child.as_str().unwrap_or("object").to_ascii_uppercase(),
+                        ),
                     );
                 } else {
                     sanitized.insert(key.clone(), normalize_gemini_schema(child));
@@ -1110,7 +1180,9 @@ fn normalize_gemini_schema(schema: &serde_json::Value) -> serde_json::Value {
             }
             serde_json::Value::Object(sanitized)
         }
-        serde_json::Value::Array(values) => serde_json::Value::Array(values.iter().map(normalize_gemini_schema).collect()),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(normalize_gemini_schema).collect())
+        }
         _ => schema.clone(),
     }
 }

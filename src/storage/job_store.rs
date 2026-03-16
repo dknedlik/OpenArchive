@@ -138,15 +138,14 @@ pub trait EnrichmentJobLifecycleStore: Sync + Send {
     fn complete_batch(&self, provider_batch_id: &str) -> StorageResult<()>;
 
     /// Mark a persisted provider batch as failed.
-    fn fail_batch_record(
-        &self,
-        provider_batch_id: &str,
-        error_message: &str,
-    ) -> StorageResult<()>;
+    fn fail_batch_record(&self, provider_batch_id: &str, error_message: &str) -> StorageResult<()>;
 
     /// Load in-flight provider batches for restart recovery.
     fn load_running_batches(
         &self,
         stage_name: &str,
     ) -> StorageResult<Vec<PersistedEnrichmentBatch>>;
+
+    /// Close persisted running batches whose linked jobs are no longer running.
+    fn reconcile_stale_running_batches(&self, stage_name: &str) -> StorageResult<usize>;
 }

@@ -1,5 +1,5 @@
-use std::collections::HashSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use reqwest::blocking::{multipart, Client};
@@ -301,12 +301,18 @@ impl PreprocessProcessor for StubPreprocessProcessor {
     ) -> Result<PreprocessProcessorOutput, ProcessorError> {
         let Some(first) = input.segments.first() else {
             return Err(ProcessorError::InvalidInput {
-                detail: format!("artifact {} has no segments to preprocess", input.artifact_id),
+                detail: format!(
+                    "artifact {} has no segments to preprocess",
+                    input.artifact_id
+                ),
             });
         };
         let Some(last) = input.segments.last() else {
             return Err(ProcessorError::InvalidInput {
-                detail: format!("artifact {} has no segments to preprocess", input.artifact_id),
+                detail: format!(
+                    "artifact {} has no segments to preprocess",
+                    input.artifact_id
+                ),
             });
         };
         Ok(PreprocessProcessorOutput {
@@ -322,7 +328,8 @@ impl PreprocessProcessor for StubPreprocessProcessor {
                     .title
                     .clone()
                     .unwrap_or_else(|| "full conversation".to_string()),
-                summary: "Stub preprocess keeps the full conversation as one topic thread.".to_string(),
+                summary: "Stub preprocess keeps the full conversation as one topic thread."
+                    .to_string(),
                 confidence_label: "medium".to_string(),
                 spans: vec![SegmentSpanRef {
                     start_sequence_no: first.sequence_no,
@@ -451,7 +458,10 @@ pub trait ArtifactBatchProcessor: Send + Sync {
 pub trait PreprocessBatchProcessor: Send + Sync {
     fn max_batch_jobs(&self) -> usize;
     fn max_batch_bytes(&self) -> usize;
-    fn estimate_size_bytes(&self, input: &PreprocessProcessorInput) -> Result<usize, ProcessorError>;
+    fn estimate_size_bytes(
+        &self,
+        input: &PreprocessProcessorInput,
+    ) -> Result<usize, ProcessorError>;
     fn process_batch(
         &self,
         inputs: &[PreprocessProcessorInput],
@@ -541,6 +551,17 @@ pub trait PreprocessBatchSubmitter {
         inputs: &[PreprocessProcessorInput],
         phase_one_data: &dyn std::any::Any,
     ) -> Vec<Result<PreprocessProcessorOutput, ProcessorError>>;
+    fn repair_phase_one_batch(
+        &self,
+        inputs: &[PreprocessProcessorInput],
+        error: &ProcessorError,
+    ) -> Result<Box<dyn std::any::Any>, ProcessorError>;
+    fn repair_phase_two(
+        &self,
+        input: &PreprocessProcessorInput,
+        phase_one_data: &dyn std::any::Any,
+        error: &ProcessorError,
+    ) -> Result<PreprocessProcessorOutput, ProcessorError>;
 }
 
 /// Non-blocking batch submission for reconciliation.
@@ -645,47 +666,130 @@ impl PreprocessProcessor for HostedPreprocessProcessor {
         input: &PreprocessProcessorInput,
     ) -> Result<PreprocessProcessorOutput, ProcessorError> {
         validate_preprocess_input(input)?;
-        let phase_one_prompt = build_preprocess_phase_one_user_prompt(input)?;
-        let phase_one_result = self.client.complete_json(
+        let (phase_one_resolved, phase_one_usage) =
+            run_preprocess_phase_one_with_repair(self.client.as_ref(), &self.model, input)?;
+        let mut output = run_preprocess_phase_two_with_repair(
+            self.client.as_ref(),
             &self.model,
-            PREPROCESS_PHASE_ONE_SYSTEM_PROMPT,
-            &phase_one_prompt,
-            &preprocess_phase_one_schema_wrapper(),
-        )?;
-        let phase_one_parsed: ModelPreprocessPhaseOneOutput =
-            serde_json::from_str(&phase_one_result.output_text).map_err(|source| {
-                ProcessorError::ParseModelJson {
-                    source,
-                    body_preview: preview(&phase_one_result.output_text),
-                }
-            })?;
-        let phase_one_resolved = phase_one_parsed.resolve_and_validate(input)?;
-
-        let phase_two_prompt = build_preprocess_phase_two_user_prompt(input, &phase_one_resolved)?;
-        let phase_two_result = self.client.complete_json(
-            &self.model,
-            PREPROCESS_PHASE_TWO_SYSTEM_PROMPT,
-            &phase_two_prompt,
-            &preprocess_output_schema_wrapper(),
-        )?;
-        let phase_two_parsed: ModelPreprocessOutput =
-            serde_json::from_str(&phase_two_result.output_text).map_err(|source| {
-                ProcessorError::ParseModelJson {
-                    source,
-                    body_preview: preview(&phase_two_result.output_text),
-                }
-            })?;
-        let phase_two_parsed =
-            phase_two_parsed.resolve_segment_aliases(input, &phase_one_resolved);
-        phase_two_parsed.validate_against(input)?;
-        Ok(phase_two_parsed.into_processor_output(
             input,
-            self.model.clone(),
-            combine_inference_usage(phase_one_result.usage, phase_two_result.usage),
+            &phase_one_resolved,
             self.pipeline_name,
             self.provider_name,
-            self.prompt_version,
-        ))
+        )?;
+        output.usage = combine_inference_usage(phase_one_usage, output.usage);
+        output.prompt_version = Some(self.prompt_version.to_string());
+        output.model_name = Some(self.model.clone());
+        output.pipeline_name = self.pipeline_name.to_string();
+        output.provider_name = Some(self.provider_name.to_string());
+        Ok(output)
+    }
+}
+
+fn run_preprocess_phase_one_once(
+    client: &dyn InferenceClient,
+    model: &str,
+    input: &PreprocessProcessorInput,
+    user_prompt: &str,
+) -> Result<(Vec<PreprocessPhaseOneSpanResolved>, Option<InferenceUsage>), ProcessorError> {
+    let phase_one_result = client.complete_json(
+        model,
+        PREPROCESS_PHASE_ONE_SYSTEM_PROMPT,
+        user_prompt,
+        &preprocess_phase_one_schema_wrapper(),
+    )?;
+    let phase_one_parsed: ModelPreprocessPhaseOneOutput =
+        serde_json::from_str(&phase_one_result.output_text).map_err(|source| {
+            ProcessorError::ParseModelJson {
+                source,
+                body_preview: preview(&phase_one_result.output_text),
+            }
+        })?;
+    let phase_one_resolved = phase_one_parsed.resolve_and_validate(input)?;
+    Ok((phase_one_resolved, phase_one_result.usage))
+}
+
+pub(crate) fn run_preprocess_phase_one_with_repair(
+    client: &dyn InferenceClient,
+    model: &str,
+    input: &PreprocessProcessorInput,
+) -> Result<(Vec<PreprocessPhaseOneSpanResolved>, Option<InferenceUsage>), ProcessorError> {
+    let prompt = build_preprocess_phase_one_user_prompt(input)?;
+    match run_preprocess_phase_one_once(client, model, input, &prompt) {
+        Ok(output) => Ok(output),
+        Err(error) if should_retry_with_repair(&error) => {
+            let repair_prompt = build_repair_prompt(&prompt, &error);
+            run_preprocess_phase_one_once(client, model, input, &repair_prompt)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn run_preprocess_phase_two_once(
+    client: &dyn InferenceClient,
+    model: &str,
+    input: &PreprocessProcessorInput,
+    phase_one_resolved: &[PreprocessPhaseOneSpanResolved],
+    user_prompt: &str,
+    pipeline_name: &'static str,
+    provider_name: &'static str,
+) -> Result<PreprocessProcessorOutput, ProcessorError> {
+    let phase_two_result = client.complete_json(
+        model,
+        PREPROCESS_PHASE_TWO_SYSTEM_PROMPT,
+        user_prompt,
+        &preprocess_output_schema_wrapper(),
+    )?;
+    let phase_two_parsed: ModelPreprocessOutput =
+        serde_json::from_str(&phase_two_result.output_text).map_err(|source| {
+            ProcessorError::ParseModelJson {
+                source,
+                body_preview: preview(&phase_two_result.output_text),
+            }
+        })?;
+    let phase_two_parsed = phase_two_parsed.resolve_segment_aliases(input, phase_one_resolved);
+    phase_two_parsed.validate_against(input)?;
+    Ok(phase_two_parsed.into_processor_output(
+        input,
+        model.to_string(),
+        phase_two_result.usage,
+        pipeline_name,
+        provider_name,
+        PREPROCESS_PROMPT_VERSION,
+    ))
+}
+
+pub(crate) fn run_preprocess_phase_two_with_repair(
+    client: &dyn InferenceClient,
+    model: &str,
+    input: &PreprocessProcessorInput,
+    phase_one_resolved: &[PreprocessPhaseOneSpanResolved],
+    pipeline_name: &'static str,
+    provider_name: &'static str,
+) -> Result<PreprocessProcessorOutput, ProcessorError> {
+    let prompt = build_preprocess_phase_two_user_prompt(input, phase_one_resolved)?;
+    match run_preprocess_phase_two_once(
+        client,
+        model,
+        input,
+        phase_one_resolved,
+        &prompt,
+        pipeline_name,
+        provider_name,
+    ) {
+        Ok(output) => Ok(output),
+        Err(error) if should_retry_with_repair(&error) => {
+            let repair_prompt = build_repair_prompt(&prompt, &error);
+            run_preprocess_phase_two_once(
+                client,
+                model,
+                input,
+                phase_one_resolved,
+                &repair_prompt,
+                pipeline_name,
+                provider_name,
+            )
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -974,7 +1078,7 @@ impl ArtifactProcessorFactory for OpenAiProcessorFactory {
     }
 }
 
-trait InferenceClient: Send + Sync {
+pub(crate) trait InferenceClient: Send + Sync {
     fn complete_json(
         &self,
         model: &str,
@@ -985,7 +1089,7 @@ trait InferenceClient: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-struct InferenceResult {
+pub(crate) struct InferenceResult {
     output_text: String,
     usage: Option<InferenceUsage>,
 }
@@ -1068,13 +1172,17 @@ impl OpenAiClient {
                     .get("required")
                     .and_then(serde_json::Value::as_array)
                     .map(|items| {
-                        items.iter()
+                        items
+                            .iter()
                             .filter_map(serde_json::Value::as_str)
                             .map(ToOwned::to_owned)
                             .collect()
                     })
                     .unwrap_or_default();
-                if let Some(properties) = map.get_mut("properties").and_then(serde_json::Value::as_object_mut) {
+                if let Some(properties) = map
+                    .get_mut("properties")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
                     let property_names: Vec<String> = properties.keys().cloned().collect();
                     for property_name in &property_names {
                         if let Some(property_schema) = properties.get_mut(property_name) {
@@ -1103,13 +1211,19 @@ impl OpenAiClient {
                     Self::normalize_schema_for_openai(schema);
                 }
 
-                if let Some(any_of) = map.get_mut("anyOf").and_then(serde_json::Value::as_array_mut) {
+                if let Some(any_of) = map
+                    .get_mut("anyOf")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
                     for variant in any_of {
                         Self::normalize_schema_for_openai(variant);
                     }
                 }
 
-                if let Some(one_of) = map.get_mut("oneOf").and_then(serde_json::Value::as_array_mut) {
+                if let Some(one_of) = map
+                    .get_mut("oneOf")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
                     for variant in one_of {
                         Self::normalize_schema_for_openai(variant);
                     }
@@ -1380,9 +1494,11 @@ impl OpenAiClient {
                 body_preview: preview(&response_text),
             });
         }
-        serde_json::from_str(&response_text).map_err(|source| ProcessorError::ParseInferenceResponse {
-            source,
-            body_preview: preview(&response_text),
+        serde_json::from_str(&response_text).map_err(|source| {
+            ProcessorError::ParseInferenceResponse {
+                source,
+                body_preview: preview(&response_text),
+            }
         })
     }
 
@@ -1495,30 +1611,43 @@ impl ExtractionBatchSubmitter for OpenAiExtractionSubmitter {
         let batch = match completed.downcast::<OpenAiBatchJob>() {
             Ok(batch) => *batch,
             Err(_) => {
-                return inputs.iter().map(|_| Err(ProcessorError::Message {
-                    message: "failed to downcast OpenAI extraction batch result".to_string(),
-                })).collect();
+                return inputs
+                    .iter()
+                    .map(|_| {
+                        Err(ProcessorError::Message {
+                            message: "failed to downcast OpenAI extraction batch result"
+                                .to_string(),
+                        })
+                    })
+                    .collect();
             }
         };
-        match parse_openai_output_file(&self.client, batch.output_file_id.as_deref(), inputs, |result, input| {
-            let parsed: ModelArtifactOutput = serde_json::from_str(&result.output_text).map_err(|source| {
-                ProcessorError::ParseModelJson {
-                    source,
-                    body_preview: preview(&result.output_text),
-                }
-            })?;
-            let parsed = parsed.resolve_evidence_aliases(input);
-            parsed.validate_against(input)?;
-            Ok(parsed.into_processor_output(
-                self.model.clone(),
-                result.usage,
-                "openai_enrichment",
-                "openai",
-                OPENAI_PROMPT_VERSION,
-            ))
-        }) {
+        match parse_openai_output_file(
+            &self.client,
+            batch.output_file_id.as_deref(),
+            inputs,
+            |result, input| {
+                let parsed: ModelArtifactOutput = serde_json::from_str(&result.output_text)
+                    .map_err(|source| ProcessorError::ParseModelJson {
+                        source,
+                        body_preview: preview(&result.output_text),
+                    })?;
+                let parsed = parsed.resolve_evidence_aliases(input);
+                parsed.validate_against(input)?;
+                Ok(parsed.into_processor_output(
+                    self.model.clone(),
+                    result.usage,
+                    "openai_enrichment",
+                    "openai",
+                    OPENAI_PROMPT_VERSION,
+                ))
+            },
+        ) {
             Ok(outputs) => outputs,
-            Err(err) => inputs.iter().map(|_| Err(message_processor_error(&err))).collect(),
+            Err(err) => inputs
+                .iter()
+                .map(|_| Err(message_processor_error(&err)))
+                .collect(),
         }
     }
 }
@@ -1570,20 +1699,29 @@ impl PreprocessBatchSubmitter for OpenAiPreprocessSubmitter {
         completed: Box<dyn std::any::Any>,
         inputs: &[PreprocessProcessorInput],
     ) -> Result<Box<dyn std::any::Any>, ProcessorError> {
-        let batch = completed.downcast::<OpenAiBatchJob>().map_err(|_| ProcessorError::Message {
-            message: "failed to downcast OpenAI preprocess phase-one batch result".to_string(),
-        })?;
-        let outputs = parse_openai_output_file(&self.client, batch.output_file_id.as_deref(), inputs, |result, input| {
-            let parsed: ModelPreprocessPhaseOneOutput =
-                serde_json::from_str(&result.output_text).map_err(|source| {
-                    ProcessorError::ParseModelJson {
-                        source,
-                        body_preview: preview(&result.output_text),
-                    }
+        let batch =
+            completed
+                .downcast::<OpenAiBatchJob>()
+                .map_err(|_| ProcessorError::Message {
+                    message: "failed to downcast OpenAI preprocess phase-one batch result"
+                        .to_string(),
                 })?;
-            let resolved = parsed.resolve_and_validate(input)?;
-            Ok((resolved, result.usage))
-        })?;
+        let outputs = parse_openai_output_file(
+            &self.client,
+            batch.output_file_id.as_deref(),
+            inputs,
+            |result, input| {
+                let parsed: ModelPreprocessPhaseOneOutput =
+                    serde_json::from_str(&result.output_text).map_err(|source| {
+                        ProcessorError::ParseModelJson {
+                            source,
+                            body_preview: preview(&result.output_text),
+                        }
+                    })?;
+                let resolved = parsed.resolve_and_validate(input)?;
+                Ok((resolved, result.usage))
+            },
+        )?;
         let mut resolved = HashMap::new();
         let mut usage = HashMap::new();
         for (input, item) in inputs.iter().zip(outputs.into_iter()) {
@@ -1606,12 +1744,12 @@ impl PreprocessBatchSubmitter for OpenAiPreprocessSubmitter {
             })?;
         let mut requests = Vec::with_capacity(inputs.len());
         for input in inputs {
-            let spans = data
-                .resolved
-                .get(&input.artifact_id)
-                .ok_or_else(|| ProcessorError::Message {
-                    message: format!("missing phase-one spans for {}", input.artifact_id),
-                })?;
+            let spans =
+                data.resolved
+                    .get(&input.artifact_id)
+                    .ok_or_else(|| ProcessorError::Message {
+                        message: format!("missing phase-one spans for {}", input.artifact_id),
+                    })?;
             let user_prompt = build_preprocess_phase_two_user_prompt(input, spans)?;
             requests.push(OpenAiBatchRequest {
                 custom_id: input.artifact_id.clone(),
@@ -1670,42 +1808,111 @@ impl PreprocessBatchSubmitter for OpenAiPreprocessSubmitter {
         let batch = match completed.downcast::<OpenAiBatchJob>() {
             Ok(batch) => *batch,
             Err(_) => {
-                return inputs.iter().map(|_| Err(ProcessorError::Message {
-                    message: "failed to downcast OpenAI preprocess phase-two batch result".to_string(),
-                })).collect();
+                return inputs
+                    .iter()
+                    .map(|_| {
+                        Err(ProcessorError::Message {
+                            message: "failed to downcast OpenAI preprocess phase-two batch result"
+                                .to_string(),
+                        })
+                    })
+                    .collect();
             }
         };
         let Some(data) = phase_one_data.downcast_ref::<OpenAiPhaseOneData>() else {
-            return inputs.iter().map(|_| Err(ProcessorError::Message {
-                message: "failed to downcast OpenAI preprocess phase-one data".to_string(),
-            })).collect();
+            return inputs
+                .iter()
+                .map(|_| {
+                    Err(ProcessorError::Message {
+                        message: "failed to downcast OpenAI preprocess phase-one data".to_string(),
+                    })
+                })
+                .collect();
         };
-        match parse_openai_output_file(&self.client, batch.output_file_id.as_deref(), inputs, |result, input| {
-            let parsed: ModelPreprocessOutput =
-                serde_json::from_str(&result.output_text).map_err(|source| ProcessorError::ParseModelJson {
-                    source,
-                    body_preview: preview(&result.output_text),
+        match parse_openai_output_file(
+            &self.client,
+            batch.output_file_id.as_deref(),
+            inputs,
+            |result, input| {
+                let parsed: ModelPreprocessOutput = serde_json::from_str(&result.output_text)
+                    .map_err(|source| ProcessorError::ParseModelJson {
+                        source,
+                        body_preview: preview(&result.output_text),
+                    })?;
+                let spans = data.resolved.get(&input.artifact_id).ok_or_else(|| {
+                    ProcessorError::Message {
+                        message: format!("missing phase-one spans for {}", input.artifact_id),
+                    }
                 })?;
-            let spans = data.resolved.get(&input.artifact_id).ok_or_else(|| ProcessorError::Message {
-                message: format!("missing phase-one spans for {}", input.artifact_id),
-            })?;
-            let parsed = parsed.resolve_segment_aliases(input, spans);
-            parsed.validate_against(input)?;
-            Ok(parsed.into_processor_output(
-                input,
-                self.model.clone(),
-                combine_inference_usage(
-                    data.usage.get(&input.artifact_id).cloned().unwrap_or(None),
-                    result.usage,
-                ),
-                "openai_preprocess",
-                "openai",
-                PREPROCESS_PROMPT_VERSION,
-            ))
-        }) {
+                let parsed = parsed.resolve_segment_aliases(input, spans);
+                parsed.validate_against(input)?;
+                Ok(parsed.into_processor_output(
+                    input,
+                    self.model.clone(),
+                    combine_inference_usage(
+                        data.usage.get(&input.artifact_id).cloned().unwrap_or(None),
+                        result.usage,
+                    ),
+                    "openai_preprocess",
+                    "openai",
+                    PREPROCESS_PROMPT_VERSION,
+                ))
+            },
+        ) {
             Ok(outputs) => outputs,
-            Err(err) => inputs.iter().map(|_| Err(message_processor_error(&err))).collect(),
+            Err(err) => inputs
+                .iter()
+                .map(|_| Err(message_processor_error(&err)))
+                .collect(),
         }
+    }
+
+    fn repair_phase_one_batch(
+        &self,
+        inputs: &[PreprocessProcessorInput],
+        _error: &ProcessorError,
+    ) -> Result<Box<dyn std::any::Any>, ProcessorError> {
+        let mut resolved = HashMap::new();
+        let mut usage = HashMap::new();
+        for input in inputs {
+            let (spans, item_usage) =
+                run_preprocess_phase_one_with_repair(self.client.as_ref(), &self.model, input)?;
+            resolved.insert(input.artifact_id.clone(), spans);
+            usage.insert(input.artifact_id.clone(), item_usage);
+        }
+        Ok(Box::new(OpenAiPhaseOneData { resolved, usage }))
+    }
+
+    fn repair_phase_two(
+        &self,
+        input: &PreprocessProcessorInput,
+        phase_one_data: &dyn std::any::Any,
+        _error: &ProcessorError,
+    ) -> Result<PreprocessProcessorOutput, ProcessorError> {
+        let data = phase_one_data
+            .downcast_ref::<OpenAiPhaseOneData>()
+            .ok_or_else(|| ProcessorError::Message {
+                message: "failed to downcast OpenAI preprocess phase-one data".to_string(),
+            })?;
+        let spans =
+            data.resolved
+                .get(&input.artifact_id)
+                .ok_or_else(|| ProcessorError::Message {
+                    message: format!("missing phase-one spans for {}", input.artifact_id),
+                })?;
+        let mut output = run_preprocess_phase_two_with_repair(
+            self.client.as_ref(),
+            &self.model,
+            input,
+            spans,
+            "openai_preprocess",
+            "openai",
+        )?;
+        output.usage = combine_inference_usage(
+            data.usage.get(&input.artifact_id).cloned().unwrap_or(None),
+            output.usage,
+        );
+        Ok(output)
     }
 }
 
@@ -1759,22 +1966,38 @@ impl ReconciliationBatchSubmitter for OpenAiReconciliationSubmitter {
         let batch = match completed.downcast::<OpenAiBatchJob>() {
             Ok(batch) => *batch,
             Err(_) => {
-                return inputs.iter().map(|_| Err(ProcessorError::Message {
-                    message: "failed to downcast OpenAI reconciliation batch result".to_string(),
-                })).collect();
+                return inputs
+                    .iter()
+                    .map(|_| {
+                        Err(ProcessorError::Message {
+                            message: "failed to downcast OpenAI reconciliation batch result"
+                                .to_string(),
+                        })
+                    })
+                    .collect();
             }
         };
-        match parse_openai_output_file(&self.client, batch.output_file_id.as_deref(), inputs, |result, input| {
-            let parsed: ModelReconciliationOutput =
-                serde_json::from_str(&result.output_text).map_err(|source| ProcessorError::ParseModelJson {
-                    source,
-                    body_preview: preview(&result.output_text),
+        match parse_openai_output_file(
+            &self.client,
+            batch.output_file_id.as_deref(),
+            inputs,
+            |result, input| {
+                let parsed: ModelReconciliationOutput = serde_json::from_str(&result.output_text)
+                    .map_err(|source| {
+                    ProcessorError::ParseModelJson {
+                        source,
+                        body_preview: preview(&result.output_text),
+                    }
                 })?;
-            parsed.validate_against(input)?;
-            Ok(parsed.into_outputs())
-        }) {
+                parsed.validate_against(input)?;
+                Ok(parsed.into_outputs())
+            },
+        ) {
             Ok(outputs) => outputs,
-            Err(err) => inputs.iter().map(|_| Err(message_processor_error(&err))).collect(),
+            Err(err) => inputs
+                .iter()
+                .map(|_| Err(message_processor_error(&err)))
+                .collect(),
         }
     }
 }
@@ -1869,7 +2092,11 @@ where
         })?;
         let parsed = match (item.response, item.error) {
             (Some(response), _) if response.status_code / 100 == 2 => {
-                let usage = response.body.usage.clone().and_then(InferenceUsage::from_openrouter_usage);
+                let usage = response
+                    .body
+                    .usage
+                    .clone()
+                    .and_then(InferenceUsage::from_openrouter_usage);
                 OpenAiBatchParsedResult {
                     output_text: response.body.flatten_text(),
                     usage,
@@ -1899,9 +2126,14 @@ where
 
     let mut outputs = Vec::with_capacity(inputs.len());
     for input in inputs {
-        let result = parsed_by_id.remove(input.batch_custom_id()).ok_or_else(|| ProcessorError::Message {
-            message: format!("OpenAI batch missing result for {}", input.batch_custom_id()),
-        })?;
+        let result = parsed_by_id
+            .remove(input.batch_custom_id())
+            .ok_or_else(|| ProcessorError::Message {
+                message: format!(
+                    "OpenAI batch missing result for {}",
+                    input.batch_custom_id()
+                ),
+            })?;
         outputs.push(parse(result, input));
     }
     Ok(outputs)
@@ -2353,6 +2585,16 @@ impl ModelArtifactOutput {
                     detail: format!("memories[{index}].memory_scope_value must not be empty"),
                 });
             }
+            if memory.memory_scope == ScopeType::Artifact
+                && memory.memory_scope_value != input.artifact_id
+            {
+                return Err(ProcessorError::InvalidModelOutput {
+                    detail: format!(
+                        "memories[{index}].memory_scope_value must equal artifact_id {:?}, got {:?}",
+                        input.artifact_id, memory.memory_scope_value
+                    ),
+                });
+            }
             validate_evidence_ids(
                 &format!("memories[{index}].evidence_segment_ids"),
                 &memory.evidence_segment_ids,
@@ -2620,7 +2862,10 @@ impl ModelPreprocessOutput {
             .collect();
 
         for (index, thread) in self.topic_threads.iter().enumerate() {
-            validate_text_field(&format!("topic_threads[{index}].thread_key"), &thread.thread_key)?;
+            validate_text_field(
+                &format!("topic_threads[{index}].thread_key"),
+                &thread.thread_key,
+            )?;
             validate_text_field(&format!("topic_threads[{index}].label"), &thread.label)?;
             validate_text_field(&format!("topic_threads[{index}].summary"), &thread.summary)?;
             match thread.confidence_label.as_str() {
@@ -2920,7 +3165,10 @@ fn validate_input(input: &ArtifactProcessorInput) -> Result<(), ProcessorError> 
 fn validate_preprocess_input(input: &PreprocessProcessorInput) -> Result<(), ProcessorError> {
     if input.segments.is_empty() {
         return Err(ProcessorError::InvalidInput {
-            detail: format!("artifact {} has no segments to preprocess", input.artifact_id),
+            detail: format!(
+                "artifact {} has no segments to preprocess",
+                input.artifact_id
+            ),
         });
     }
     Ok(())
@@ -2974,11 +3222,26 @@ pub(crate) fn combine_inference_usage(
     match (first, second) {
         (None, None) => None,
         (first, second) => Some(InferenceUsage {
-            input_tokens: sum_usage_field(first.as_ref().and_then(|u| u.input_tokens), second.as_ref().and_then(|u| u.input_tokens)),
-            output_tokens: sum_usage_field(first.as_ref().and_then(|u| u.output_tokens), second.as_ref().and_then(|u| u.output_tokens)),
-            reasoning_tokens: sum_usage_field(first.as_ref().and_then(|u| u.reasoning_tokens), second.as_ref().and_then(|u| u.reasoning_tokens)),
-            total_tokens: sum_usage_field(first.as_ref().and_then(|u| u.total_tokens), second.as_ref().and_then(|u| u.total_tokens)),
-            reported_cost_micros: sum_usage_field(first.as_ref().and_then(|u| u.reported_cost_micros), second.as_ref().and_then(|u| u.reported_cost_micros)),
+            input_tokens: sum_usage_field(
+                first.as_ref().and_then(|u| u.input_tokens),
+                second.as_ref().and_then(|u| u.input_tokens),
+            ),
+            output_tokens: sum_usage_field(
+                first.as_ref().and_then(|u| u.output_tokens),
+                second.as_ref().and_then(|u| u.output_tokens),
+            ),
+            reasoning_tokens: sum_usage_field(
+                first.as_ref().and_then(|u| u.reasoning_tokens),
+                second.as_ref().and_then(|u| u.reasoning_tokens),
+            ),
+            total_tokens: sum_usage_field(
+                first.as_ref().and_then(|u| u.total_tokens),
+                second.as_ref().and_then(|u| u.total_tokens),
+            ),
+            reported_cost_micros: sum_usage_field(
+                first.as_ref().and_then(|u| u.reported_cost_micros),
+                second.as_ref().and_then(|u| u.reported_cost_micros),
+            ),
         }),
     }
 }
@@ -3713,7 +3976,10 @@ pub(crate) fn openai_structured_output_schema() -> serde_json::Value {
         .and_then(serde_json::Value::as_object_mut)
     {
         memories.insert("maxItems".to_string(), serde_json::json!(2));
-        if let Some(items) = memories.get_mut("items").and_then(serde_json::Value::as_object_mut) {
+        if let Some(items) = memories
+            .get_mut("items")
+            .and_then(serde_json::Value::as_object_mut)
+        {
             if let Some(properties) = items
                 .get_mut("properties")
                 .and_then(serde_json::Value::as_object_mut)
@@ -3790,19 +4056,17 @@ pub(crate) fn reconciliation_output_schema() -> serde_json::Value {
 const OPENAI_PROMPT_VERSION: &str = "openai-strict-v2";
 pub(crate) const ANTHROPIC_PROMPT_VERSION: &str = "anthropic-strict-v1";
 pub(crate) const GEMINI_PROMPT_VERSION: &str = "gemini-strict-v5";
-pub(crate) const GROK_PROMPT_VERSION: &str = "grok-strict-v1";
+pub(crate) const GROK_PROMPT_VERSION: &str = "grok-strict-v2";
 const PREPROCESS_PROMPT_VERSION: &str = "preprocess-v3";
 pub(crate) const PREPROCESS_PHASE_ONE_SYSTEM_PROMPT: &str = "You are OpenArchive's local segmentation engine. Return ONLY valid JSON.\n\nRules:\n1. Partition the conversation into contiguous topic_spans.\n2. Every segment must be covered exactly once.\n3. Keep spans local and contiguous. Do not merge non-contiguous returns in this phase.\n4. Split when the active question, decision, troubleshooting target, work item, or named subject changes in a meaningful way.\n5. Do not create tiny spans for brief clarifications unless the thread actually changes.\n6. Labels must be short and specific.\n7. Summaries must be one short sentence.\n8. focus_key must be a short phrase naming the concrete thread target, such as the specific question, workflow, entity, or decision under discussion.\n9. start_evidence_ref and end_evidence_ref must be copied exactly from the provided evidence_ref strings.\n10. Never invent, transform, expand, or combine ids.\n11. Never output values like segment-*, seg-*, span-*, artifact ids, or sequence numbers in evidence ref fields.\n12. Output valid JSON only.";
 pub(crate) const PREPROCESS_PHASE_TWO_SYSTEM_PROMPT: &str = "You are OpenArchive's thread consolidation engine. Return ONLY valid JSON.\n\nRules:\n1. Merge local spans into durable topic_threads.\n2. Revisited topics should reuse one thread with multiple spans.\n3. Do not merge spans on broad domain overlap alone.\n4. Only merge when the later span clearly resumes the same specific thread of work, question, workflow, or investigation.\n5. Treat focus_key as a strong identity signal; different focus_key values usually imply different threads unless the excerpts show a clear return to the same exact thread.\n6. Prefer separate threads when unsure.\n7. In topic_threads.spans, start_evidence_ref and end_evidence_ref must be copied exactly from the provided spans.\n8. Never output span_id in evidence ref fields.\n9. Never invent, transform, expand, or combine ids.\n10. Never output values like segment-*, seg-*, span-*, artifact ids, or sequence numbers in evidence ref fields.\n11. Summaries must be one short sentence.\n12. Output valid JSON only.";
-const ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every summary, classification, memory, entity, relationship, and retrieval_intent must cite real evidence_segment_ids from the artifact.\n3. Do not use prior archive knowledge. Reason only from the provided artifact.\n4. Prefer explicit uncertainty over guessed continuity with prior brain state.\n5. Use retrieval_intents only for questions that require archive lookups to resolve ambiguity, duplicate detection, contradiction checks, or prior-state matching.\n6. Prefer fewer, stronger memories over weak ones.\n7. Emit entities only when there is explicit artifact support.\n8. Emit relationships only when the artifact explicitly supports the link.\n9. Memories must use only these memory_type values: preference, project_fact, identity_fact, ongoing_task, reference.\n10. relationship confidence_label must be low, medium, or high.\n11. retrieval_intent intent_type must be one of topic_lookup, memory_match, entity_lookup, relationship_lookup, contradiction_check.\n12. memory_scope is always artifact and memory_scope_value is the artifact_id.\n13. Summary must be 2-4 compact sentences focused on lasting engineering substance.\n14. Low-signal artifacts should usually have low importance and no classifications.\n15. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n16. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
-
 const OPENAI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for OpenAI. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Prefer fewer, stronger memories over weak ones.\n5. Generic how-to advice, recipes, troubleshooting steps, code snippets, schema conversions, bookkeeping guidance, API usage examples, and one-off utility answers should usually produce zero memories.\n6. If the artifact is primarily generic instructions, code examples, or reusable advice rather than durable user/project state, you must return `memories: []`.\n7. If importance_score is 4 or lower, memories should usually be empty. Do not create memories just because the content is useful.\n8. Do not create `project_fact` memories for generic instructions, implementation fragments, or topic summaries. `project_fact` requires a named project, system, migration, architecture decision, implementation plan, or durable operating model that would still matter later.\n9. `reference` memories are rare. Emit a reference memory only when the artifact contains a named durable reference, policy, design, migration plan, schema, or workflow the user is plausibly going to want recalled later. Do not create reference memories for generic instructions, cooking methods, finance categorization advice, or reusable code examples by default.\n10. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact or decomposes a generic artifact into multiple procedural memories.\n11. If the artifact mixes multiple topics and no single durable memory clearly stands out, keep the information in the summary/classification and emit zero memories.\n12. When uncertain, keep the information in the summary instead of emitting memories.\n13. Use retrieval_intents only for archive lookups that matter for duplicate detection, contradiction checks, or prior-state matching.\n14. Do not guess prior continuity; emit retrieval_intents instead.\n15. Emit relationships only when the artifact explicitly supports the link.\n16. relationship confidence_label must be low, medium, or high.\n17. memory_scope is always artifact and memory_scope_value is the artifact_id.\n18. Low-signal artifacts should usually have low importance and no classifications.\n19. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n20. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
 pub(crate) const ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Anthropic. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Prefer fewer, stronger memories over weak ones.\n5. Generic how-to advice, recipes, troubleshooting steps, code snippets, schema conversions, API usage examples, and one-off utility answers should usually produce zero memories.\n6. Do not create `project_fact` memories for generic instructions, implementation fragments, or topic summaries. `project_fact` requires a named project, system, migration, architecture decision, implementation plan, or durable operating model that would still matter later.\n7. `reference` memories are rare. Emit them only for named durable references, policies, designs, migration plans, schemas, or workflows the user is plausibly going to want recalled later.\n8. If the artifact contains several unrelated tasks or code snippets, do not split them into multiple memory items. Keep them in the summary/classification and emit zero memories unless one durable item clearly stands out.\n9. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact.\n10. When uncertain, keep the information in the summary instead of emitting memories.\n11. Use retrieval_intents only for archive lookups that matter for duplicate detection, contradiction checks, or prior-state matching.\n12. Do not guess prior continuity; emit retrieval_intents instead.\n13. Emit relationships only when the artifact explicitly supports the link.\n14. relationship confidence_label must be low, medium, or high.\n15. memory_scope is always artifact and memory_scope_value is the artifact_id.\n16. Low-signal artifacts should usually have low importance and no classifications.\n17. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n18. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
 pub(crate) const GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Gemini. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, or commitments.\n4. Keep the output compact, but do not overcompress rich artifacts.\n5. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n6. Do not guess prior continuity; emit retrieval_intents instead.\n7. Emit relationships only when the artifact explicitly supports the link.\n8. relationship confidence_label must be low, medium, or high.\n9. memory_scope is always artifact and memory_scope_value is the artifact_id.\n10. Low-signal artifacts should usually have low importance and no classifications.\n11. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n12. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
-pub(crate) const GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Grok. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Prefer fewer, stronger memories over weak ones.\n5. Generic how-to advice, recipes, troubleshooting steps, product explanations, and one-off utility answers should usually produce zero memories unless the artifact clearly reveals a stable user preference, durable project fact, recurring workflow, named system architecture choice, or reusable reference the user is likely to need later.\n6. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, migration, architecture decision, implementation plan, or durable operating model that would still matter later.\n7. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact or bundles multiple unrelated subtopics together.\n8. If the artifact mixes multiple topics and no single durable memory clearly stands out, keep the information in the summary/classification and emit zero memories.\n9. Do not split one generic instructional artifact into multiple tiny procedural memories. When uncertain, keep the information in the summary instead of emitting memories.\n10. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n11. Do not guess prior continuity; emit retrieval_intents instead.\n12. Emit relationships only when the artifact explicitly supports the link.\n13. relationship confidence_label must be low, medium, or high.\n14. memory_scope is always artifact and memory_scope_value is the artifact_id.\n15. Low-signal artifacts should usually have low importance and no classifications.\n16. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n17. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+pub(crate) const GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Grok. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Prefer fewer, stronger memories over weak ones.\n5. Generic how-to advice, recipes, troubleshooting steps, product explanations, and one-off utility answers should usually produce zero memories unless the artifact clearly reveals a stable user preference, durable project fact, recurring workflow, named system architecture choice, reusable reference, or durable personal plan the user is likely to need later.\n6. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, migration, architecture decision, implementation plan, durable operating model, or explicit workflow choice that would still matter later.\n7. Named projects, workflows, architecture choices, migration plans, integration patterns, durable finance plans, and repeated operating preferences should be preserved as memories when the artifact provides explicit evidence and the resulting memory can stand alone later.\n8. If an artifact contains both generic instructions and one durable project/workflow/plan decision, keep the generic material in the summary and still emit the durable memory.\n9. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact or bundles multiple unrelated subtopics together.\n10. On named project, workflow, architecture, or finance-plan artifacts, prefer concrete memories for the specific durable items discussed, such as one implementation decision, one operating preference, one migration step, one persistent constraint, or one long-lived plan.\n11. Do not collapse several concrete durable items into one broad rollup memory like a conversation summary. If multiple durable items are clearly supported, emit separate concrete memories instead of one catch-all memory.\n12. If the artifact mixes multiple topics and no single durable memory clearly stands out, keep the information in the summary/classification and emit zero memories.\n13. Do not split one generic instructional artifact into multiple tiny procedural memories. When uncertain on a low-signal artifact, keep the information in the summary instead of emitting memories.\n14. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n15. Do not guess prior continuity; emit retrieval_intents instead.\n16. Emit relationships only when the artifact explicitly supports the link.\n17. relationship confidence_label must be low, medium, or high.\n18. memory_scope is always artifact and memory_scope_value is the artifact_id.\n19. Low-signal artifacts should usually have low importance and no classifications.\n20. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n21. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
 pub(crate) const RECONCILIATION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict reconciliation engine. Use only the provided extraction candidates, retrieval results, and source evidence. Return ONLY valid JSON.\n\nRules:\n1. Prefer no merge over a weak merge.\n2. Choose create_new when the archive evidence is insufficient.\n3. Use attach_to_existing or strengthen_existing only when the retrieved object clearly matches the candidate.\n4. Use supersede_existing only when the new artifact clearly updates or replaces prior state.\n5. Use contradicts_existing only when the artifact clearly conflicts with retrieved prior state.\n6. Never merge identities, projects, or relationships on vague topical overlap.\n7. Every decision must cite real evidence_segment_ids from the extraction candidates.\n8. Output valid JSON only.";
 
@@ -4201,5 +4465,45 @@ mod tests {
         assert_eq!(output.memories.len(), 1);
         assert_eq!(output.importance_score, 7);
         assert!(!output.escalate_to_frontier);
+    }
+
+    #[test]
+    fn openai_processor_rejects_artifact_memory_scope_mismatch() {
+        let client = Arc::new(FixedInferenceClient {
+            response: serde_json::json!({
+                "summary": {
+                    "title": "Logo symbol preferences",
+                    "body_text": "The artifact prefers the original hash-in-book symbol.",
+                    "evidence_segment_ids": ["seg-1"]
+                },
+                "classifications": [],
+                "memories": [
+                    {
+                        "memory_type": "preference",
+                        "memory_scope": "artifact",
+                        "memory_scope_value": "artifact-1-truncated",
+                        "title": "Preferred HashBooks Logo Symbol",
+                        "body_text": "The original hash-in-book symbol should remain the preferred logo mark.",
+                        "evidence_segment_ids": ["seg-1"]
+                    }
+                ],
+                "entities": [],
+                "relationships": [],
+                "retrieval_intents": [],
+                "importance_score": 6,
+                "escalate_to_frontier": false,
+                "escalation_reason": ""
+            })
+            .to_string(),
+        });
+        let factory = OpenAiProcessorFactory::with_client(client, "gpt-5-mini", "gpt-5.4");
+        let processor = factory
+            .build(EnrichmentTier::Standard)
+            .expect("processor should build");
+
+        let err = processor
+            .process(&sample_input())
+            .expect_err("processor should fail");
+        assert!(matches!(err, ProcessorError::InvalidModelOutput { .. }));
     }
 }

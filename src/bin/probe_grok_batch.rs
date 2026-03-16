@@ -7,13 +7,11 @@ use clap::{Parser, Subcommand};
 use open_archive::config::{GrokConfig, PostgresConfig};
 use open_archive::processor::{
     ArtifactProcessorFactory, ArtifactProcessorInput, BatchPollResult, GrokProcessorFactory,
-    MemoryOutput, PreprocessProcessorInput, RelationshipOutput, ReconciliationProcessorInput,
+    MemoryOutput, PreprocessProcessorInput, ReconciliationProcessorInput, RelationshipOutput,
     SummaryOutput,
 };
 use open_archive::storage::enrichment_state_store::EnrichmentStateStore;
-use open_archive::storage::types::{
-    ArtifactReconcilePayload, EnrichmentTier,
-};
+use open_archive::storage::types::{ArtifactReconcilePayload, EnrichmentTier};
 use open_archive::storage::{
     ArtifactReadStore, PostgresDerivedMetadataStore, PostgresImportWriteStore,
 };
@@ -38,15 +36,9 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    Preprocess {
-        artifact_ids: Vec<String>,
-    },
-    Extract {
-        artifact_ids: Vec<String>,
-    },
-    Reconcile {
-        job_ids: Vec<String>,
-    },
+    Preprocess { artifact_ids: Vec<String> },
+    Extract { artifact_ids: Vec<String> },
+    Reconcile { job_ids: Vec<String> },
 }
 
 fn main() -> Result<()> {
@@ -58,8 +50,8 @@ fn main() -> Result<()> {
         grok.quality_model = Some(model.clone());
     }
     let model = grok.standard_model.clone();
-    let factory =
-        GrokProcessorFactory::new(grok).map_err(|err| anyhow!("failed to build Grok factory: {err}"))?;
+    let factory = GrokProcessorFactory::new(grok)
+        .map_err(|err| anyhow!("failed to build Grok factory: {err}"))?;
     let read_store = PostgresImportWriteStore::new(postgres.clone());
     let derived_store = PostgresDerivedMetadataStore::new(postgres.clone());
 
@@ -254,10 +246,20 @@ fn run_reconcile(
             .ok_or_else(|| anyhow!("artifact {artifact_id} not found"))?;
         let extraction_result = derived_store
             .load_extraction_result(&payload.extraction_result_id)?
-            .ok_or_else(|| anyhow!("extraction result {} not found", payload.extraction_result_id))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "extraction result {} not found",
+                    payload.extraction_result_id
+                )
+            })?;
         let retrieval_result_set = derived_store
             .load_retrieval_result_set(&payload.retrieval_result_set_id)?
-            .ok_or_else(|| anyhow!("retrieval result set {} not found", payload.retrieval_result_set_id))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "retrieval result set {} not found",
+                    payload.retrieval_result_set_id
+                )
+            })?;
 
         inputs.push(ReconciliationProcessorInput {
             artifact_id,
@@ -309,11 +311,7 @@ fn run_reconcile(
     for (input, result) in inputs.iter().zip(results.iter()) {
         match result {
             Ok(decisions) => {
-                println!(
-                    "  ok {} | decisions={}",
-                    input.artifact_id,
-                    decisions.len()
-                );
+                println!("  ok {} | decisions={}", input.artifact_id, decisions.len());
                 for decision in decisions {
                     println!(
                         "    - {} | {} | {}",
@@ -351,7 +349,11 @@ fn wait_for_batch<T: BatchProbe + ?Sized>(
             }
             BatchPollResult::Succeeded(data) => return Ok(data),
             BatchPollResult::Failed(message) => {
-                return Err(anyhow!("{label} batch {} failed: {}", handle.batch_id, message))
+                return Err(anyhow!(
+                    "{label} batch {} failed: {}",
+                    handle.batch_id,
+                    message
+                ))
             }
         }
     }
