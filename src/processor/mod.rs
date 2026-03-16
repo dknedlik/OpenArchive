@@ -704,7 +704,9 @@ fn run_preprocess_phase_one_once(
                 body_preview: preview(&phase_one_result.output_text),
             }
         })?;
-    let phase_one_resolved = phase_one_parsed.resolve_and_validate(input)?;
+    let phase_one_resolved = phase_one_parsed
+        .resolve_and_validate(input)
+        .map_err(|err| attach_output_preview(err, &phase_one_result.output_text))?;
     Ok((phase_one_resolved, phase_one_result.usage))
 }
 
@@ -747,7 +749,9 @@ fn run_preprocess_phase_two_once(
             }
         })?;
     let phase_two_parsed = phase_two_parsed.resolve_segment_aliases(input, phase_one_resolved);
-    phase_two_parsed.validate_against(input)?;
+    phase_two_parsed
+        .validate_against(input)
+        .map_err(|err| attach_output_preview(err, &phase_two_result.output_text))?;
     Ok(phase_two_parsed.into_processor_output(
         input,
         model.to_string(),
@@ -3593,6 +3597,7 @@ fn build_segment_alias_map_for_preprocess(
     for (index, segment) in input.segments.iter().enumerate() {
         let ordinal = index + 1;
         let actual = segment.segment_id.clone();
+        aliases.insert(segment_alias(index), actual.clone());
         for alias in [
             format!("s{ordinal}"),
             format!("s_{ordinal}"),
@@ -3614,7 +3619,7 @@ fn build_segment_alias_map_for_preprocess(
 }
 
 fn segment_alias(index: usize) -> String {
-    format!("s{}", index + 1)
+    format!("evidence_ref_{}", index + 1)
 }
 
 fn resolve_preprocess_evidence_ref(
@@ -3645,25 +3650,40 @@ fn resolve_preprocess_evidence_ref(
 
 fn extract_segment_aliases(raw: &str) -> Vec<String> {
     let lowered = raw.to_ascii_lowercase();
-    let bytes = lowered.as_bytes();
     let mut aliases = Vec::new();
+    extract_prefixed_numeric_aliases(&lowered, "evidence_ref_", &mut aliases);
+    extract_prefixed_numeric_aliases(&lowered, "s", &mut aliases);
+    aliases
+}
+
+fn extract_prefixed_numeric_aliases(raw: &str, prefix: &str, aliases: &mut Vec<String>) {
+    let bytes = raw.as_bytes();
+    let prefix_bytes = prefix.as_bytes();
     let mut index = 0usize;
-    while index < bytes.len() {
-        if bytes[index] != b's' {
+    while index + prefix_bytes.len() < bytes.len() {
+        if &bytes[index..index + prefix_bytes.len()] != prefix_bytes {
             index += 1;
             continue;
         }
         let start = index;
-        index += 1;
+        index += prefix_bytes.len();
         let digit_start = index;
         while index < bytes.len() && bytes[index].is_ascii_digit() {
             index += 1;
         }
         if index > digit_start {
-            aliases.push(lowered[start..index].to_string());
+            aliases.push(raw[start..index].to_string());
         }
     }
-    aliases
+}
+
+fn attach_output_preview(err: ProcessorError, output_text: &str) -> ProcessorError {
+    match err {
+        ProcessorError::InvalidModelOutput { detail } => ProcessorError::InvalidModelOutput {
+            detail: format!("{detail}; output preview: {}", preview(output_text)),
+        },
+        other => other,
+    }
 }
 
 fn should_retry_with_repair(error: &ProcessorError) -> bool {

@@ -12,6 +12,7 @@ pub struct AppConfig {
     pub relational_store: RelationalStoreConfig,
     pub object_store: ObjectStoreConfig,
     pub inference: InferenceConfig,
+    pub inference_mode: InferenceExecutionMode,
 }
 
 impl AppConfig {
@@ -21,7 +22,29 @@ impl AppConfig {
             relational_store: RelationalStoreConfig::from_env()?,
             object_store: ObjectStoreConfig::from_env()?,
             inference: InferenceConfig::from_env()?,
+            inference_mode: InferenceExecutionMode::from_env()?,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferenceExecutionMode {
+    Direct,
+    Batch,
+}
+
+impl InferenceExecutionMode {
+    pub fn from_env() -> ConfigResult<Self> {
+        let value = env::var("OA_INFERENCE_MODE").unwrap_or_else(|_| "batch".to_string());
+        match value.as_str() {
+            "direct" => Ok(Self::Direct),
+            "batch" => Ok(Self::Batch),
+            _ => Err(ConfigError::InvalidEnumEnv {
+                key: "OA_INFERENCE_MODE",
+                value,
+                expected: "direct, batch",
+            }),
+        }
     }
 }
 
@@ -514,8 +537,11 @@ pub struct StageConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnrichmentPipelineConfig {
     pub poll_interval: Duration,
+    pub preprocess_workers: usize,
     pub preprocess: StageConfig,
+    pub extract_workers: usize,
     pub extract: StageConfig,
+    pub reconcile_workers: usize,
     pub reconcile: StageConfig,
     pub retrieve_context_workers: usize,
     pub rate_limit_requests_per_minute: u32,
@@ -523,19 +549,26 @@ pub struct EnrichmentPipelineConfig {
 
 impl EnrichmentPipelineConfig {
     pub fn from_env() -> ConfigResult<Self> {
+        let shared_worker_default = optional_usize_env("OA_ENRICHMENT_WORKERS")?.unwrap_or(1);
         Ok(Self {
             poll_interval: optional_duration_env_ms("OA_ENRICHMENT_POLL_INTERVAL_MS")?
                 .unwrap_or(Duration::from_millis(2000)),
+            preprocess_workers: positive_usize_env("OA_PREPROCESS_WORKERS")?
+                .unwrap_or(shared_worker_default),
             preprocess: StageConfig {
                 batch_size: positive_usize_env("OA_PREPROCESS_BATCH_SIZE")?.unwrap_or(3),
                 max_concurrent_batches: positive_usize_env("OA_PREPROCESS_MAX_CONCURRENT")?
                     .unwrap_or(2),
             },
+            extract_workers: positive_usize_env("OA_EXTRACT_WORKERS")?
+                .unwrap_or(shared_worker_default),
             extract: StageConfig {
                 batch_size: positive_usize_env("OA_EXTRACT_BATCH_SIZE")?.unwrap_or(5),
                 max_concurrent_batches: positive_usize_env("OA_EXTRACT_MAX_CONCURRENT")?
                     .unwrap_or(3),
             },
+            reconcile_workers: positive_usize_env("OA_RECONCILE_WORKERS")?
+                .unwrap_or(shared_worker_default),
             reconcile: StageConfig {
                 batch_size: positive_usize_env("OA_RECONCILE_BATCH_SIZE")?.unwrap_or(5),
                 max_concurrent_batches: positive_usize_env("OA_RECONCILE_MAX_CONCURRENT")?
@@ -570,6 +603,7 @@ mod tests {
             "OA_S3_KEY_PREFIX",
             "OA_S3_URL_STYLE",
             "OA_INFERENCE_PROVIDER",
+            "OA_INFERENCE_MODE",
             "OA_OPENAI_API_KEY",
             "OA_OPENAI_BASE_URL",
             "OA_OPENAI_MAX_OUTPUT_TOKENS",
@@ -629,6 +663,7 @@ mod tests {
         ));
         assert!(matches!(config.object_store, ObjectStoreConfig::LocalFs(_)));
         assert_eq!(config.inference, InferenceConfig::Stub);
+        assert_eq!(config.inference_mode, InferenceExecutionMode::Batch);
     }
 
     #[test]
@@ -744,6 +779,20 @@ mod tests {
         assert_eq!(config.max_output_tokens, 4000);
         assert_eq!(config.standard_model, "gpt-4.1-mini");
         assert_eq!(config.quality_model, None);
+    }
+
+    #[test]
+    fn inference_execution_mode_loads_when_configured() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
+        std::env::set_var("OA_INFERENCE_MODE", "direct");
+
+        let config = AppConfig::from_env().expect("inference execution mode should load");
+        assert_eq!(config.inference_mode, InferenceExecutionMode::Direct);
     }
 
     #[test]

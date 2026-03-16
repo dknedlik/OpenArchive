@@ -119,3 +119,74 @@ Interpretation:
 - For future comparisons:
   - use this corpus to ring out provider behavior, prompts, and batch modes
   - use richer Gemini/Grok/Claude exports to judge actual brain quality
+
+## 2026-03-16 ChatGPT Export Gemini Direct Baseline
+
+- Corpus: same small OpenAI/ChatGPT export used as the primary smoke-test
+  corpus
+- Import id: `import-189d5a43e2d51e2c-1`
+- Primary inference provider for this run: Gemini direct pipeline
+- Audit command:
+  `cargo run --quiet --bin audit_knowledge -- --import-id import-189d5a43e2d51e2c-1`
+
+### Pipeline Outcome
+
+- `65/65` conversations imported
+- `64/65` preprocess jobs completed
+- `64/65` extract/retrieve/reconcile/derivation paths completed
+- 1 preprocess artifact failed on a pathological prompt-contaminated source
+  artifact (`OpenArchive architecture shift`)
+- Direct mode now uses the same stage-separated topology as batch mode, so
+  stages flowed concurrently instead of starving behind preprocess
+
+### Knowledge Audit
+
+- Overall score: `69.1 / 100`
+- Audited artifacts: `64`
+- Signature reported by audit: `deterministic |  |`
+
+#### Subscores
+
+- Summary: `20.0 / 20.0`
+- Evidence: `20.0 / 20.0`
+- Memories: `13.6 / 15.0`
+- Classifications: `3.5 / 10.0`
+- Compression: `9.0 / 10.0`
+- Importance: `3.0 / 10.0`
+- Duplication penalty: `0.0`
+
+#### Output Mix
+
+- Summaries: `64`
+- Classifications: `116`
+- Memories: `129`
+- Memory coverage: `91%`
+- Classification coverage: `97%`
+- Escalations: `0`
+
+#### Top Audit Issues
+
+- `missing_importance_score = 64`
+- `too_many_classifications = 17`
+- `summary_overcompressed = 16`
+- `no_memories_on_rich_artifact = 6`
+- `memory_type_monoculture = 4`
+- `too_many_memories = 2`
+
+### Comparison To Gemini Batch Baseline
+
+- Direct-mode Gemini scored slightly higher than the earlier Gemini batch run
+  on the same corpus (`69.1` vs `68.6`)
+- The quality difference is small; the more important takeaway is that direct
+  mode now works through the real provider path and shares the same stage
+  topology as batch mode
+- Gemini remains the strongest overall provider observed so far for this
+  extraction/reconciliation workload
+
+### Known Gaps
+
+- Importance scoring is still effectively absent in persisted output
+- Classification output is somewhat noisy / overproduced on this corpus
+- Pathological prompt- or probe-contaminated artifacts can still confuse
+  preprocess evidence refs, though preprocess aliasing was hardened after this
+  run to use `evidence_ref_*` tokens and include output previews in failures

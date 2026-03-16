@@ -1,4 +1,4 @@
-use crate::config::EnrichmentPipelineConfig;
+use crate::config::{EnrichmentPipelineConfig, InferenceExecutionMode};
 use crate::domain::SourceTimestamp;
 use crate::processor::{
     ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
@@ -15,9 +15,9 @@ use crate::storage::{
     ArtifactRetrieveContextPayload, CandidateEntity, CandidateRelationship, ClaimedJob,
     ClassificationObjectJson, ConversationWindowRef, DerivationRunStatus, DerivationRunType,
     DerivedMetadataWriteStore, DerivedObjectPayload, EnrichmentJobLifecycleStore,
-    EnrichmentStateStore, EvidenceRole, ExtractedClassification, ExtractedMemory, InputScopeType,
-    MemoryObjectJson, NewDerivationRun, NewDerivedObject, NewEnrichmentJob, NewEvidenceLink,
-    ObjectStatus, OriginKind, ReconciliationDecision, ReconciliationDecisionKind,
+    EnrichmentStateStore, EnrichmentTier, EvidenceRole, ExtractedClassification, ExtractedMemory,
+    InputScopeType, MemoryObjectJson, NewDerivationRun, NewDerivedObject, NewEnrichmentJob,
+    NewEvidenceLink, ObjectStatus, OriginKind, ReconciliationDecision, ReconciliationDecisionKind,
     RelationshipObjectJson, RetrievalIntent, RetrievalResultSet, ScopeType, SummaryObjectJson,
     SupportStrength, TopicThreadRef, WriteDerivationAttempt, WriteDerivedObject,
 };
@@ -70,6 +70,7 @@ fn enrichment_worker(
                     state_store.as_ref(),
                     derived_store.as_ref(),
                     processor_factory.as_ref(),
+                    InferenceExecutionMode::Direct,
                 ) {
                     error!(
                         "Worker {} failed to process claimed work: {}",
@@ -95,110 +96,117 @@ fn process_claimed_jobs(
     state_store: &dyn EnrichmentStateStore,
     derived_store: &dyn DerivedMetadataWriteStore,
     processor_factory: &dyn ArtifactProcessorFactory,
+    execution_mode: InferenceExecutionMode,
 ) -> std::result::Result<(), String> {
-    match first_job.job_type {
-        crate::storage::JobType::ArtifactPreprocess => {
-            if let Some(batch_processor) = processor_factory
-                .build_preprocess_batch_processor(first_job.enrichment_tier)
-                .map_err(|err| {
-                    fail_job(
-                        job_store,
-                        worker_id,
-                        &first_job.job_id,
-                        "Failed to build preprocess batch processor",
-                        err,
-                    )
-                })?
-            {
-                let mut jobs = vec![first_job];
-                let additional = job_store
-                    .claim_matching_jobs(
-                        worker_id,
-                        &jobs[0],
-                        batch_processor.max_batch_jobs().saturating_sub(1),
-                    )
-                    .map_err(|err| format!("failed to claim matching preprocess jobs: {err}"))?;
-                jobs.extend(additional);
-                return process_preprocess_job_batch(
-                    worker_id,
-                    jobs,
-                    job_store,
-                    read_store,
-                    processor_factory,
-                    batch_processor.as_ref(),
-                );
-            }
-        }
-        crate::storage::JobType::ArtifactExtract => {
-            if let Some(batch_processor) = processor_factory
-                .build_batch_processor(first_job.enrichment_tier)
-                .map_err(|err| {
-                    fail_job(
-                        job_store,
-                        worker_id,
-                        &first_job.job_id,
-                        "Failed to build extraction batch processor",
-                        err,
-                    )
-                })?
-            {
-                let mut jobs = vec![first_job];
-                let additional = job_store
-                    .claim_matching_jobs(
-                        worker_id,
-                        &jobs[0],
-                        batch_processor.max_batch_jobs().saturating_sub(1),
-                    )
-                    .map_err(|err| format!("failed to claim matching extraction jobs: {err}"))?;
-                jobs.extend(additional);
-                return process_extract_job_batch(
-                    worker_id,
-                    jobs,
-                    job_store,
-                    read_store,
-                    state_store,
-                    processor_factory,
-                    batch_processor.as_ref(),
-                );
-            }
-        }
-        crate::storage::JobType::ArtifactReconcile => {
-            if let Some(batch_processor) = processor_factory
-                .build_reconciliation_batch_processor(first_job.enrichment_tier)
-                .map_err(|err| {
-                    fail_job(
-                        job_store,
-                        worker_id,
-                        &first_job.job_id,
-                        "Failed to build reconciliation batch processor",
-                        err,
-                    )
-                })?
-            {
-                let mut jobs = vec![first_job];
-                let additional = job_store
-                    .claim_matching_jobs(
-                        worker_id,
-                        &jobs[0],
-                        batch_processor.max_batch_jobs().saturating_sub(1),
-                    )
+    if execution_mode == InferenceExecutionMode::Batch {
+        match first_job.job_type {
+            crate::storage::JobType::ArtifactPreprocess => {
+                if let Some(batch_processor) = processor_factory
+                    .build_preprocess_batch_processor(first_job.enrichment_tier)
                     .map_err(|err| {
-                        format!("failed to claim matching reconciliation jobs: {err}")
-                    })?;
-                jobs.extend(additional);
-                return process_reconcile_job_batch(
-                    worker_id,
-                    jobs,
-                    job_store,
-                    read_store,
-                    state_store,
-                    derived_store,
-                    processor_factory,
-                    batch_processor.as_ref(),
-                );
+                        fail_job(
+                            job_store,
+                            worker_id,
+                            &first_job.job_id,
+                            "Failed to build preprocess batch processor",
+                            err,
+                        )
+                    })?
+                {
+                    let mut jobs = vec![first_job];
+                    let additional = job_store
+                        .claim_matching_jobs(
+                            worker_id,
+                            &jobs[0],
+                            batch_processor.max_batch_jobs().saturating_sub(1),
+                        )
+                        .map_err(|err| {
+                            format!("failed to claim matching preprocess jobs: {err}")
+                        })?;
+                    jobs.extend(additional);
+                    return process_preprocess_job_batch(
+                        worker_id,
+                        jobs,
+                        job_store,
+                        read_store,
+                        processor_factory,
+                        batch_processor.as_ref(),
+                    );
+                }
             }
+            crate::storage::JobType::ArtifactExtract => {
+                if let Some(batch_processor) = processor_factory
+                    .build_batch_processor(first_job.enrichment_tier)
+                    .map_err(|err| {
+                        fail_job(
+                            job_store,
+                            worker_id,
+                            &first_job.job_id,
+                            "Failed to build extraction batch processor",
+                            err,
+                        )
+                    })?
+                {
+                    let mut jobs = vec![first_job];
+                    let additional = job_store
+                        .claim_matching_jobs(
+                            worker_id,
+                            &jobs[0],
+                            batch_processor.max_batch_jobs().saturating_sub(1),
+                        )
+                        .map_err(|err| {
+                            format!("failed to claim matching extraction jobs: {err}")
+                        })?;
+                    jobs.extend(additional);
+                    return process_extract_job_batch(
+                        worker_id,
+                        jobs,
+                        job_store,
+                        read_store,
+                        state_store,
+                        processor_factory,
+                        batch_processor.as_ref(),
+                    );
+                }
+            }
+            crate::storage::JobType::ArtifactReconcile => {
+                if let Some(batch_processor) = processor_factory
+                    .build_reconciliation_batch_processor(first_job.enrichment_tier)
+                    .map_err(|err| {
+                        fail_job(
+                            job_store,
+                            worker_id,
+                            &first_job.job_id,
+                            "Failed to build reconciliation batch processor",
+                            err,
+                        )
+                    })?
+                {
+                    let mut jobs = vec![first_job];
+                    let additional = job_store
+                        .claim_matching_jobs(
+                            worker_id,
+                            &jobs[0],
+                            batch_processor.max_batch_jobs().saturating_sub(1),
+                        )
+                        .map_err(|err| {
+                            format!("failed to claim matching reconciliation jobs: {err}")
+                        })?;
+                    jobs.extend(additional);
+                    return process_reconcile_job_batch(
+                        worker_id,
+                        jobs,
+                        job_store,
+                        read_store,
+                        state_store,
+                        derived_store,
+                        processor_factory,
+                        batch_processor.as_ref(),
+                    );
+                }
+            }
+            _ => {}
         }
-        _ => {}
     }
 
     process_claimed_job(
@@ -2333,6 +2341,7 @@ pub fn start_enrichment_workers_with_factory(
 /// All batch-stage pollers share a single rate limiter per provider.
 pub fn start_enrichment_pipeline(
     config: &EnrichmentPipelineConfig,
+    execution_mode: InferenceExecutionMode,
     job_store: Arc<dyn EnrichmentJobLifecycleStore>,
     read_store: Arc<dyn ArtifactReadStore>,
     retrieval_store: Arc<dyn ArchiveRetrievalStore>,
@@ -2341,150 +2350,103 @@ pub fn start_enrichment_pipeline(
     shutdown: ShutdownToken,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
 ) -> Result<Vec<thread::JoinHandle<()>>> {
+    if execution_mode == InferenceExecutionMode::Batch {
+        validate_batch_execution_support(processor_factory.as_ref())?;
+    }
     let pid = std::process::id();
     let rate_limiter = Arc::new(RateLimiter::new(config.rate_limit_requests_per_minute));
     let poll_interval = config.poll_interval;
     let mut handles = Vec::new();
 
-    // Stage pollers — submitters are built inside the spawned thread so they
-    // never cross thread boundaries (no Send bound needed on submitter traits).
-
-    // Preprocess poller
-    {
-        let worker_id = format!("enrichment:{}:preprocess", pid);
-        let job_store = Arc::clone(&job_store);
-        let read_store = Arc::clone(&read_store);
-        let state_store = Arc::clone(&state_store);
-        let derived_store = Arc::clone(&derived_store);
-        let processor_factory = Arc::clone(&processor_factory);
-        let rate_limiter = Arc::clone(&rate_limiter);
-        let shutdown = shutdown.clone();
-        let batch_size = config.preprocess.batch_size;
-        let max_concurrent = config.preprocess.max_concurrent_batches;
-
-        let h = thread::Builder::new()
-            .name("preprocess-poller".to_string())
-            .spawn(move || {
-                let submitter = processor_factory
-                    .build_preprocess_submitter(crate::storage::EnrichmentTier::Standard)
-                    .ok()
-                    .flatten();
-                let Some(submitter) = submitter else {
-                    info!("No preprocess batch submitter available; preprocess poller exiting");
-                    return;
-                };
-                let stage = PreprocessStage::new(
-                    submitter,
-                    crate::storage::EnrichmentTier::Standard,
-                    batch_size,
-                    max_concurrent,
-                );
-                stage_poller_loop(
-                    &stage,
-                    worker_id,
-                    job_store.as_ref(),
-                    read_store.as_ref(),
-                    state_store.as_ref(),
-                    derived_store.as_ref(),
-                    &rate_limiter,
-                    poll_interval,
-                    shutdown,
-                );
-            })
-            .map_err(|e| anyhow::anyhow!("Failed to spawn preprocess poller: {}", e))?;
-        handles.push(h);
-    }
-
-    // Extract poller
-    {
-        let worker_id = format!("enrichment:{}:extract", pid);
-        let job_store = Arc::clone(&job_store);
-        let read_store = Arc::clone(&read_store);
-        let state_store = Arc::clone(&state_store);
-        let derived_store = Arc::clone(&derived_store);
-        let processor_factory = Arc::clone(&processor_factory);
-        let rate_limiter = Arc::clone(&rate_limiter);
-        let shutdown = shutdown.clone();
-        let batch_size = config.extract.batch_size;
-        let max_concurrent = config.extract.max_concurrent_batches;
-
-        let h = thread::Builder::new()
-            .name("extract-poller".to_string())
-            .spawn(move || {
-                let submitter = processor_factory
-                    .build_extraction_submitter(crate::storage::EnrichmentTier::Standard)
-                    .ok()
-                    .flatten();
-                let Some(submitter) = submitter else {
-                    info!("No extraction batch submitter available; extract poller exiting");
-                    return;
-                };
-                let stage = ExtractStage::new(
-                    submitter,
-                    crate::storage::EnrichmentTier::Standard,
-                    batch_size,
-                    max_concurrent,
-                );
-                stage_poller_loop(
-                    &stage,
-                    worker_id,
-                    job_store.as_ref(),
-                    read_store.as_ref(),
-                    state_store.as_ref(),
-                    derived_store.as_ref(),
-                    &rate_limiter,
-                    poll_interval,
-                    shutdown,
-                );
-            })
-            .map_err(|e| anyhow::anyhow!("Failed to spawn extract poller: {}", e))?;
-        handles.push(h);
-    }
-
-    // Reconcile poller
-    {
-        let worker_id = format!("enrichment:{}:reconcile", pid);
-        let job_store = Arc::clone(&job_store);
-        let read_store = Arc::clone(&read_store);
-        let state_store = Arc::clone(&state_store);
-        let derived_store = Arc::clone(&derived_store);
-        let processor_factory = Arc::clone(&processor_factory);
-        let rate_limiter = Arc::clone(&rate_limiter);
-        let shutdown = shutdown.clone();
-        let batch_size = config.reconcile.batch_size;
-        let max_concurrent = config.reconcile.max_concurrent_batches;
-
-        let h = thread::Builder::new()
-            .name("reconcile-poller".to_string())
-            .spawn(move || {
-                let submitter = processor_factory
-                    .build_reconciliation_submitter(crate::storage::EnrichmentTier::Standard)
-                    .ok()
-                    .flatten();
-                let Some(submitter) = submitter else {
-                    info!("No reconciliation batch submitter available; reconcile poller exiting");
-                    return;
-                };
-                let stage = ReconcileStage::new(
-                    submitter,
-                    crate::storage::EnrichmentTier::Standard,
-                    batch_size,
-                    max_concurrent,
-                );
-                stage_poller_loop(
-                    &stage,
-                    worker_id,
-                    job_store.as_ref(),
-                    read_store.as_ref(),
-                    state_store.as_ref(),
-                    derived_store.as_ref(),
-                    &rate_limiter,
-                    poll_interval,
-                    shutdown,
-                );
-            })
-            .map_err(|e| anyhow::anyhow!("Failed to spawn reconcile poller: {}", e))?;
-        handles.push(h);
+    match execution_mode {
+        InferenceExecutionMode::Batch => {
+            handles.extend(spawn_preprocess_batch_workers(
+                pid,
+                config.preprocess_workers,
+                config.preprocess.batch_size,
+                config.preprocess.max_concurrent_batches,
+                Arc::clone(&job_store),
+                Arc::clone(&read_store),
+                Arc::clone(&state_store),
+                Arc::clone(&derived_store),
+                Arc::clone(&processor_factory),
+                Arc::clone(&rate_limiter),
+                poll_interval,
+                shutdown.clone(),
+            )?);
+            handles.extend(spawn_extract_batch_workers(
+                pid,
+                config.extract_workers,
+                config.extract.batch_size,
+                config.extract.max_concurrent_batches,
+                Arc::clone(&job_store),
+                Arc::clone(&read_store),
+                Arc::clone(&state_store),
+                Arc::clone(&derived_store),
+                Arc::clone(&processor_factory),
+                Arc::clone(&rate_limiter),
+                poll_interval,
+                shutdown.clone(),
+            )?);
+            handles.extend(spawn_reconcile_batch_workers(
+                pid,
+                config.reconcile_workers,
+                config.reconcile.batch_size,
+                config.reconcile.max_concurrent_batches,
+                Arc::clone(&job_store),
+                Arc::clone(&read_store),
+                Arc::clone(&state_store),
+                Arc::clone(&derived_store),
+                Arc::clone(&processor_factory),
+                Arc::clone(&rate_limiter),
+                poll_interval,
+                shutdown.clone(),
+            )?);
+        }
+        InferenceExecutionMode::Direct => {
+            handles.extend(spawn_direct_stage_workers(
+                pid,
+                "preprocess",
+                JobType::ArtifactPreprocess,
+                config.preprocess_workers,
+                Arc::clone(&job_store),
+                Arc::clone(&read_store),
+                Arc::clone(&retrieval_store),
+                Arc::clone(&state_store),
+                Arc::clone(&derived_store),
+                Arc::clone(&processor_factory),
+                poll_interval,
+                shutdown.clone(),
+            )?);
+            handles.extend(spawn_direct_stage_workers(
+                pid,
+                "extract",
+                JobType::ArtifactExtract,
+                config.extract_workers,
+                Arc::clone(&job_store),
+                Arc::clone(&read_store),
+                Arc::clone(&retrieval_store),
+                Arc::clone(&state_store),
+                Arc::clone(&derived_store),
+                Arc::clone(&processor_factory),
+                poll_interval,
+                shutdown.clone(),
+            )?);
+            handles.extend(spawn_direct_stage_workers(
+                pid,
+                "reconcile",
+                JobType::ArtifactReconcile,
+                config.reconcile_workers,
+                Arc::clone(&job_store),
+                Arc::clone(&read_store),
+                Arc::clone(&retrieval_store),
+                Arc::clone(&state_store),
+                Arc::clone(&derived_store),
+                Arc::clone(&processor_factory),
+                poll_interval,
+                shutdown.clone(),
+            )?);
+        }
     }
 
     // RetrieveContext workers (traditional blocking workers)
@@ -2512,10 +2474,333 @@ pub fn start_enrichment_pipeline(
     }
 
     info!(
-        "Enrichment pipeline started: 3 stage pollers + {} retrieve-context workers",
+        "Enrichment pipeline started: mode={:?}, preprocess_workers={}, extract_workers={}, reconcile_workers={}, retrieve_context_workers={}",
+        execution_mode,
+        config.preprocess_workers,
+        config.extract_workers,
+        config.reconcile_workers,
         config.retrieve_context_workers
     );
     Ok(handles)
+}
+
+fn validate_batch_execution_support(
+    processor_factory: &dyn ArtifactProcessorFactory,
+) -> Result<()> {
+    use crate::storage::EnrichmentTier;
+
+    if processor_factory
+        .build_preprocess_submitter(EnrichmentTier::Standard)?
+        .is_none()
+    {
+        return Err(anyhow::anyhow!(
+            "batch execution mode requires preprocess batch submitter support"
+        ));
+    }
+    if processor_factory
+        .build_extraction_submitter(EnrichmentTier::Standard)?
+        .is_none()
+    {
+        return Err(anyhow::anyhow!(
+            "batch execution mode requires extraction batch submitter support"
+        ));
+    }
+    if processor_factory
+        .build_reconciliation_submitter(EnrichmentTier::Standard)?
+        .is_none()
+    {
+        return Err(anyhow::anyhow!(
+            "batch execution mode requires reconciliation batch submitter support"
+        ));
+    }
+    Ok(())
+}
+
+fn spawn_preprocess_batch_workers(
+    pid: u32,
+    worker_count: usize,
+    batch_size: usize,
+    max_concurrent: usize,
+    job_store: Arc<dyn EnrichmentJobLifecycleStore>,
+    read_store: Arc<dyn ArtifactReadStore>,
+    state_store: Arc<dyn EnrichmentStateStore>,
+    derived_store: Arc<dyn DerivedMetadataWriteStore>,
+    processor_factory: Arc<dyn ArtifactProcessorFactory>,
+    rate_limiter: Arc<RateLimiter>,
+    poll_interval: Duration,
+    shutdown: ShutdownToken,
+) -> Result<Vec<thread::JoinHandle<()>>> {
+    (0..worker_count)
+        .map(|i| {
+            let worker_id = format!("enrichment:{}:preprocess:{}", pid, i);
+            let job_store = Arc::clone(&job_store);
+            let read_store = Arc::clone(&read_store);
+            let state_store = Arc::clone(&state_store);
+            let derived_store = Arc::clone(&derived_store);
+            let processor_factory = Arc::clone(&processor_factory);
+            let rate_limiter = Arc::clone(&rate_limiter);
+            let shutdown = shutdown.clone();
+            thread::Builder::new()
+                .name(format!("preprocess-poller-{}", i))
+                .spawn(move || {
+                    let submitter = processor_factory
+                        .build_preprocess_submitter(crate::storage::EnrichmentTier::Standard)
+                        .ok()
+                        .flatten();
+                    let Some(submitter) = submitter else {
+                        info!("No preprocess batch submitter available; preprocess poller exiting");
+                        return;
+                    };
+                    let stage = PreprocessStage::new(
+                        submitter,
+                        crate::storage::EnrichmentTier::Standard,
+                        batch_size,
+                        max_concurrent,
+                    );
+                    stage_poller_loop(
+                        &stage,
+                        worker_id,
+                        job_store.as_ref(),
+                        read_store.as_ref(),
+                        state_store.as_ref(),
+                        derived_store.as_ref(),
+                        &rate_limiter,
+                        poll_interval,
+                        shutdown,
+                    );
+                })
+                .map_err(|e| anyhow::anyhow!("Failed to spawn preprocess poller: {}", e))
+        })
+        .collect()
+}
+
+fn spawn_extract_batch_workers(
+    pid: u32,
+    worker_count: usize,
+    batch_size: usize,
+    max_concurrent: usize,
+    job_store: Arc<dyn EnrichmentJobLifecycleStore>,
+    read_store: Arc<dyn ArtifactReadStore>,
+    state_store: Arc<dyn EnrichmentStateStore>,
+    derived_store: Arc<dyn DerivedMetadataWriteStore>,
+    processor_factory: Arc<dyn ArtifactProcessorFactory>,
+    rate_limiter: Arc<RateLimiter>,
+    poll_interval: Duration,
+    shutdown: ShutdownToken,
+) -> Result<Vec<thread::JoinHandle<()>>> {
+    (0..worker_count)
+        .map(|i| {
+            let worker_id = format!("enrichment:{}:extract:{}", pid, i);
+            let job_store = Arc::clone(&job_store);
+            let read_store = Arc::clone(&read_store);
+            let state_store = Arc::clone(&state_store);
+            let derived_store = Arc::clone(&derived_store);
+            let processor_factory = Arc::clone(&processor_factory);
+            let rate_limiter = Arc::clone(&rate_limiter);
+            let shutdown = shutdown.clone();
+            thread::Builder::new()
+                .name(format!("extract-poller-{}", i))
+                .spawn(move || {
+                    let submitter = processor_factory
+                        .build_extraction_submitter(crate::storage::EnrichmentTier::Standard)
+                        .ok()
+                        .flatten();
+                    let Some(submitter) = submitter else {
+                        info!("No extraction batch submitter available; extract poller exiting");
+                        return;
+                    };
+                    let stage = ExtractStage::new(
+                        submitter,
+                        crate::storage::EnrichmentTier::Standard,
+                        batch_size,
+                        max_concurrent,
+                    );
+                    stage_poller_loop(
+                        &stage,
+                        worker_id,
+                        job_store.as_ref(),
+                        read_store.as_ref(),
+                        state_store.as_ref(),
+                        derived_store.as_ref(),
+                        &rate_limiter,
+                        poll_interval,
+                        shutdown,
+                    );
+                })
+                .map_err(|e| anyhow::anyhow!("Failed to spawn extract poller: {}", e))
+        })
+        .collect()
+}
+
+fn spawn_reconcile_batch_workers(
+    pid: u32,
+    worker_count: usize,
+    batch_size: usize,
+    max_concurrent: usize,
+    job_store: Arc<dyn EnrichmentJobLifecycleStore>,
+    read_store: Arc<dyn ArtifactReadStore>,
+    state_store: Arc<dyn EnrichmentStateStore>,
+    derived_store: Arc<dyn DerivedMetadataWriteStore>,
+    processor_factory: Arc<dyn ArtifactProcessorFactory>,
+    rate_limiter: Arc<RateLimiter>,
+    poll_interval: Duration,
+    shutdown: ShutdownToken,
+) -> Result<Vec<thread::JoinHandle<()>>> {
+    (0..worker_count)
+        .map(|i| {
+            let worker_id = format!("enrichment:{}:reconcile:{}", pid, i);
+            let job_store = Arc::clone(&job_store);
+            let read_store = Arc::clone(&read_store);
+            let state_store = Arc::clone(&state_store);
+            let derived_store = Arc::clone(&derived_store);
+            let processor_factory = Arc::clone(&processor_factory);
+            let rate_limiter = Arc::clone(&rate_limiter);
+            let shutdown = shutdown.clone();
+            thread::Builder::new()
+                .name(format!("reconcile-poller-{}", i))
+                .spawn(move || {
+                    let submitter = processor_factory
+                        .build_reconciliation_submitter(crate::storage::EnrichmentTier::Standard)
+                        .ok()
+                        .flatten();
+                    let Some(submitter) = submitter else {
+                        info!(
+                            "No reconciliation batch submitter available; reconcile poller exiting"
+                        );
+                        return;
+                    };
+                    let stage = ReconcileStage::new(
+                        submitter,
+                        crate::storage::EnrichmentTier::Standard,
+                        batch_size,
+                        max_concurrent,
+                    );
+                    stage_poller_loop(
+                        &stage,
+                        worker_id,
+                        job_store.as_ref(),
+                        read_store.as_ref(),
+                        state_store.as_ref(),
+                        derived_store.as_ref(),
+                        &rate_limiter,
+                        poll_interval,
+                        shutdown,
+                    );
+                })
+                .map_err(|e| anyhow::anyhow!("Failed to spawn reconcile poller: {}", e))
+        })
+        .collect()
+}
+
+fn spawn_direct_stage_workers(
+    pid: u32,
+    stage_name: &'static str,
+    job_type: JobType,
+    worker_count: usize,
+    job_store: Arc<dyn EnrichmentJobLifecycleStore>,
+    read_store: Arc<dyn ArtifactReadStore>,
+    retrieval_store: Arc<dyn ArchiveRetrievalStore>,
+    state_store: Arc<dyn EnrichmentStateStore>,
+    derived_store: Arc<dyn DerivedMetadataWriteStore>,
+    processor_factory: Arc<dyn ArtifactProcessorFactory>,
+    poll_interval: Duration,
+    shutdown: ShutdownToken,
+) -> Result<Vec<thread::JoinHandle<()>>> {
+    (0..worker_count)
+        .map(|i| {
+            let worker_id = format!("enrichment:{}:{}:{}", pid, stage_name, i);
+            let job_store = Arc::clone(&job_store);
+            let read_store = Arc::clone(&read_store);
+            let retrieval_store = Arc::clone(&retrieval_store);
+            let state_store = Arc::clone(&state_store);
+            let derived_store = Arc::clone(&derived_store);
+            let processor_factory = Arc::clone(&processor_factory);
+            let shutdown = shutdown.clone();
+            thread::Builder::new()
+                .name(format!("direct-{}-{}", stage_name, i))
+                .spawn(move || {
+                    direct_stage_worker_loop(
+                        worker_id,
+                        job_type,
+                        job_store.as_ref(),
+                        read_store.as_ref(),
+                        retrieval_store.as_ref(),
+                        state_store.as_ref(),
+                        derived_store.as_ref(),
+                        processor_factory.as_ref(),
+                        poll_interval,
+                        shutdown,
+                    );
+                })
+                .map_err(|e| anyhow::anyhow!("Failed to spawn direct {} worker: {}", stage_name, e))
+        })
+        .collect()
+}
+
+/// Dedicated worker loop for RetrieveContext jobs.
+///
+/// Claims one job at a time, processes it synchronously, and sleeps when
+/// no jobs are available. This stage does local/DB retrieval, not provider
+/// API calls, so a traditional blocking worker is appropriate.
+fn direct_stage_worker_loop(
+    worker_id: String,
+    job_type: JobType,
+    job_store: &dyn EnrichmentJobLifecycleStore,
+    read_store: &dyn ArtifactReadStore,
+    retrieval_store: &dyn ArchiveRetrievalStore,
+    state_store: &dyn EnrichmentStateStore,
+    derived_store: &dyn DerivedMetadataWriteStore,
+    processor_factory: &dyn ArtifactProcessorFactory,
+    poll_interval: Duration,
+    shutdown: ShutdownToken,
+) {
+    info!(
+        "Direct stage worker {} starting for {:?}",
+        worker_id, job_type
+    );
+
+    loop {
+        if shutdown.is_shutdown() {
+            info!("Direct stage worker {} shutting down", worker_id);
+            break;
+        }
+
+        match job_store.claim_jobs_by_type(&worker_id, job_type, Some(EnrichmentTier::Standard), 1)
+        {
+            Ok(jobs) if !jobs.is_empty() => {
+                let job = jobs.into_iter().next().expect("one claimed job");
+                debug!(
+                    "Direct stage worker {} claimed {} job {}",
+                    worker_id,
+                    job.job_type.as_str(),
+                    job.job_id
+                );
+                if let Err(err) = process_claimed_job(
+                    &worker_id,
+                    job,
+                    job_store,
+                    read_store,
+                    retrieval_store,
+                    state_store,
+                    derived_store,
+                    processor_factory,
+                ) {
+                    error!(
+                        "Direct stage worker {} failed to process stage job: {}",
+                        worker_id, err
+                    );
+                }
+            }
+            Ok(_) => thread::sleep(poll_interval),
+            Err(err) => {
+                error!(
+                    "Direct stage worker {} failed to claim job: {}",
+                    worker_id, err
+                );
+                thread::sleep(poll_interval);
+            }
+        }
+    }
 }
 
 /// Dedicated worker loop for RetrieveContext jobs.

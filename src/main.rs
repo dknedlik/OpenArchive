@@ -2,8 +2,8 @@ use anyhow::Context;
 use clap::{command, Parser, Subcommand};
 use open_archive::app::ArchiveApplication;
 use open_archive::bootstrap::{build_service_bundle, require_oracle_db_config};
-use open_archive::config::AppConfig;
 use open_archive::config::EnrichmentPipelineConfig;
+use open_archive::config::{AppConfig, InferenceExecutionMode};
 use open_archive::enrichment_worker::start_enrichment_pipeline;
 use open_archive::shutdown::ShutdownToken;
 use open_archive::{db, http, migrations};
@@ -77,6 +77,7 @@ fn serve() -> Result<(), anyhow::Error> {
     let bind_addr = http_config.bind_addr.clone();
     let request_worker_count = http_config.request_worker_count;
     let enrichment_worker_count = http_config.enrichment_worker_count;
+    let inference_mode = app_config.inference_mode;
 
     let shutdown = ShutdownToken::new();
 
@@ -97,21 +98,49 @@ fn serve() -> Result<(), anyhow::Error> {
     println!("listening={bind_addr}");
     println!("request_workers={request_worker_count}");
     println!("enrichment_workers={enrichment_worker_count}");
+    println!(
+        "inference_mode={}",
+        match inference_mode {
+            InferenceExecutionMode::Direct => "direct",
+            InferenceExecutionMode::Batch => "batch",
+        }
+    );
 
-    let pipeline_config = EnrichmentPipelineConfig::from_env()
-        .context("failed to load enrichment pipeline configuration")?;
     let enrichment_workers = if enrichment_worker_count > 0 {
-        log::info!("Starting enrichment pipeline");
-        start_enrichment_pipeline(
-            &pipeline_config,
-            Arc::clone(&services.enrichment_store),
-            Arc::clone(&services.read_store),
-            Arc::clone(&services.retrieval_store),
-            Arc::clone(&services.state_store),
-            Arc::clone(&services.derived_store),
-            shutdown.clone(),
-            Arc::clone(&services.processor_factory),
-        )?
+        match inference_mode {
+            InferenceExecutionMode::Batch => {
+                let pipeline_config = EnrichmentPipelineConfig::from_env()
+                    .context("failed to load enrichment pipeline configuration")?;
+                log::info!("Starting enrichment pipeline in batch mode");
+                start_enrichment_pipeline(
+                    &pipeline_config,
+                    inference_mode,
+                    Arc::clone(&services.enrichment_store),
+                    Arc::clone(&services.read_store),
+                    Arc::clone(&services.retrieval_store),
+                    Arc::clone(&services.state_store),
+                    Arc::clone(&services.derived_store),
+                    shutdown.clone(),
+                    Arc::clone(&services.processor_factory),
+                )?
+            }
+            InferenceExecutionMode::Direct => {
+                let pipeline_config = EnrichmentPipelineConfig::from_env()
+                    .context("failed to load enrichment pipeline configuration")?;
+                log::info!("Starting enrichment pipeline in direct mode");
+                start_enrichment_pipeline(
+                    &pipeline_config,
+                    inference_mode,
+                    Arc::clone(&services.enrichment_store),
+                    Arc::clone(&services.read_store),
+                    Arc::clone(&services.retrieval_store),
+                    Arc::clone(&services.state_store),
+                    Arc::clone(&services.derived_store),
+                    shutdown.clone(),
+                    Arc::clone(&services.processor_factory),
+                )?
+            }
+        }
     } else {
         log::info!("Enrichment workers disabled (OA_ENRICHMENT_WORKERS=0)");
         Vec::new()
