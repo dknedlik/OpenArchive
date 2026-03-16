@@ -1,6 +1,9 @@
 use crate::error::StorageResult;
 
-use crate::storage::types::{ClaimedJob, EnrichmentTier, JobType, NewEnrichmentJob, RetryOutcome};
+use crate::storage::types::{
+    ClaimedJob, EnrichmentTier, JobType, NewEnrichmentBatch, NewEnrichmentJob,
+    PersistedEnrichmentBatch, RetryOutcome,
+};
 use crate::storage::StorageTx;
 
 /// Stores asynchronous enrichment jobs (insert-time, used during import).
@@ -115,4 +118,35 @@ pub trait EnrichmentJobLifecycleStore: Sync + Send {
         error_message: &str,
         retry_after_seconds: i64,
     ) -> StorageResult<RetryOutcome>;
+
+    /// Persist a submitted provider batch and its claimed jobs.
+    fn record_batch_submission(
+        &self,
+        batch: &NewEnrichmentBatch,
+        jobs: &[ClaimedJob],
+    ) -> StorageResult<()>;
+
+    /// Persist a phase transition from one provider batch to the next.
+    fn transition_batch_submission(
+        &self,
+        completed_provider_batch_id: &str,
+        next_batch: &NewEnrichmentBatch,
+        jobs: &[ClaimedJob],
+    ) -> StorageResult<()>;
+
+    /// Mark a persisted provider batch as terminal.
+    fn complete_batch(&self, provider_batch_id: &str) -> StorageResult<()>;
+
+    /// Mark a persisted provider batch as failed.
+    fn fail_batch_record(
+        &self,
+        provider_batch_id: &str,
+        error_message: &str,
+    ) -> StorageResult<()>;
+
+    /// Load in-flight provider batches for restart recovery.
+    fn load_running_batches(
+        &self,
+        stage_name: &str,
+    ) -> StorageResult<Vec<PersistedEnrichmentBatch>>;
 }

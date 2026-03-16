@@ -1,4 +1,5 @@
 use crate::shutdown::ShutdownToken;
+use log::warn;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,16 @@ struct TokenBucketState {
 }
 
 impl RateLimiter {
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, TokenBucketState> {
+        match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("rate limiter mutex was poisoned; recovering inner state");
+                poisoned.into_inner()
+            }
+        }
+    }
+
     pub fn new(requests_per_minute: u32) -> Self {
         let rate = requests_per_minute as f64 / 60.0;
         let capacity = requests_per_minute as f64;
@@ -40,7 +51,7 @@ impl RateLimiter {
     /// Returns `Err(duration)` with the estimated wait time if no token is available
     /// or a backoff is active.
     pub fn try_acquire(&self) -> Result<(), Duration> {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.lock_state();
         let now = Instant::now();
 
         // Check backoff
@@ -88,7 +99,7 @@ impl RateLimiter {
     ///
     /// All callers will be paused until the backoff expires.
     pub fn signal_backoff(&self, duration: Duration) {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.lock_state();
         let until = Instant::now() + duration;
         // Only extend, never shorten an active backoff
         match state.backoff_until {

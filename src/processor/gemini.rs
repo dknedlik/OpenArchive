@@ -615,6 +615,7 @@ struct GeminiReconciliationSubmitter {
 }
 
 /// Opaque phase-one data carried between preprocess phases.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct GeminiPhaseOneData {
     resolved: HashMap<String, Vec<PreprocessPhaseOneSpanResolved>>,
     usage: HashMap<String, Option<InferenceUsage>>,
@@ -901,6 +902,32 @@ impl PreprocessBatchSubmitter for GeminiPreprocessSubmitter {
             provider: "gemini".to_string(),
             submitted_at: Instant::now(),
         })
+    }
+
+    fn serialize_phase_one_data(
+        &self,
+        phase_one_data: &dyn std::any::Any,
+    ) -> Result<String, ProcessorError> {
+        let data = phase_one_data
+            .downcast_ref::<GeminiPhaseOneData>()
+            .ok_or_else(|| ProcessorError::Message {
+                message: "failed to downcast phase_one_data to GeminiPhaseOneData".to_string(),
+            })?;
+        serde_json::to_string(data).map_err(|source| ProcessorError::Message {
+            message: format!("failed to serialize Gemini preprocess phase-one data: {source}"),
+        })
+    }
+
+    fn deserialize_phase_one_data(
+        &self,
+        serialized: &str,
+    ) -> Result<Box<dyn std::any::Any>, ProcessorError> {
+        let data: GeminiPhaseOneData =
+            serde_json::from_str(serialized).map_err(|source| ProcessorError::ParseModelJson {
+                source,
+                body_preview: super::preview(serialized),
+            })?;
+        Ok(Box::new(data))
     }
 
     fn parse_phase_two(
@@ -1267,10 +1294,34 @@ fn sanitize_gemini_schema_value(value: &serde_json::Value) -> serde_json::Value 
                     continue;
                 }
                 if key == "type" {
-                    let normalized = child
-                        .as_str()
-                        .map(|value| serde_json::Value::String(value.to_ascii_uppercase()))
-                        .unwrap_or_else(|| sanitize_gemini_schema_value(child));
+                    let normalized = match child {
+                        serde_json::Value::String(value) => {
+                            serde_json::Value::String(value.to_ascii_uppercase())
+                        }
+                        serde_json::Value::Array(values) => {
+                            let mut non_null = values
+                                .iter()
+                                .filter_map(|value| value.as_str())
+                                .filter(|value| *value != "null");
+                            let first = non_null.next();
+                            let second = non_null.next();
+                            if first.is_some()
+                                && second.is_none()
+                                && values.iter().any(|value| value.as_str() == Some("null"))
+                            {
+                                sanitized.insert(
+                                    "nullable".to_string(),
+                                    serde_json::Value::Bool(true),
+                                );
+                                serde_json::Value::String(
+                                    first.expect("checked is_some").to_ascii_uppercase(),
+                                )
+                            } else {
+                                sanitize_gemini_schema_value(child)
+                            }
+                        }
+                        _ => sanitize_gemini_schema_value(child),
+                    };
                     sanitized.insert(key.clone(), normalized);
                     continue;
                 }

@@ -140,7 +140,7 @@ pub struct ReconciliationDecisionOutput {
     pub evidence_segment_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferenceUsage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
@@ -527,6 +527,14 @@ pub trait PreprocessBatchSubmitter {
         inputs: &[PreprocessProcessorInput],
         phase_one_data: &dyn std::any::Any,
     ) -> Result<BatchHandle, ProcessorError>;
+    fn serialize_phase_one_data(
+        &self,
+        phase_one_data: &dyn std::any::Any,
+    ) -> Result<String, ProcessorError>;
+    fn deserialize_phase_one_data(
+        &self,
+        serialized: &str,
+    ) -> Result<Box<dyn std::any::Any>, ProcessorError>;
     fn parse_phase_two(
         &self,
         completed: Box<dyn std::any::Any>,
@@ -1266,6 +1274,7 @@ struct OpenAiReconciliationSubmitter {
     model: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 struct OpenAiPhaseOneData {
     resolved: HashMap<String, Vec<PreprocessPhaseOneSpanResolved>>,
     usage: HashMap<String, Option<InferenceUsage>>,
@@ -1473,6 +1482,32 @@ impl PreprocessBatchSubmitter for OpenAiPreprocessSubmitter {
             provider: "openai".to_string(),
             submitted_at: std::time::Instant::now(),
         })
+    }
+
+    fn serialize_phase_one_data(
+        &self,
+        phase_one_data: &dyn std::any::Any,
+    ) -> Result<String, ProcessorError> {
+        let data = phase_one_data
+            .downcast_ref::<OpenAiPhaseOneData>()
+            .ok_or_else(|| ProcessorError::Message {
+                message: "failed to downcast OpenAI preprocess phase-one data".to_string(),
+            })?;
+        serde_json::to_string(data).map_err(|source| ProcessorError::Message {
+            message: format!("failed to serialize OpenAI preprocess phase-one data: {source}"),
+        })
+    }
+
+    fn deserialize_phase_one_data(
+        &self,
+        serialized: &str,
+    ) -> Result<Box<dyn std::any::Any>, ProcessorError> {
+        let data: OpenAiPhaseOneData =
+            serde_json::from_str(serialized).map_err(|source| ProcessorError::ParseModelJson {
+                source,
+                body_preview: preview(serialized),
+            })?;
+        Ok(Box::new(data))
     }
 
     fn parse_phase_two(
@@ -2002,7 +2037,7 @@ struct ModelPreprocessPhaseOneSpan {
     end_evidence_ref: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PreprocessPhaseOneSpanResolved {
     span_id: String,
     label: String,
@@ -3527,7 +3562,7 @@ pub(crate) fn reconciliation_output_schema() -> serde_json::Value {
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["decision_kind", "target_kind", "target_key", "matched_object_id", "rationale", "evidence_segment_ids"],
+                    "required": ["decision_kind", "target_kind", "target_key", "rationale", "evidence_segment_ids"],
                     "properties": {
                         "decision_kind": {
                             "type": "string",
@@ -3542,7 +3577,7 @@ pub(crate) fn reconciliation_output_schema() -> serde_json::Value {
                         },
                         "target_kind": { "type": "string", "enum": ["memory", "relationship"] },
                         "target_key": { "type": "string", "minLength": 1 },
-                        "matched_object_id": { "type": ["string", "null"] },
+                        "matched_object_id": { "type": "string", "minLength": 1 },
                         "rationale": { "type": "string", "minLength": 1 },
                         "evidence_segment_ids": {
                             "type": "array",

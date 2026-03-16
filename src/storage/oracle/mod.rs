@@ -293,7 +293,9 @@ impl ImportWriteStore for OracleImportWriteStore {
 // ---------------------------------------------------------------------------
 
 use crate::storage::job_store::EnrichmentJobLifecycleStore;
-use crate::storage::types::{ClaimedJob, RetryOutcome};
+use crate::storage::types::{
+    ClaimedJob, NewEnrichmentBatch, PersistedEnrichmentBatch, RetryOutcome,
+};
 
 pub struct OracleEnrichmentJobStore {
     config: OracleConfig,
@@ -363,6 +365,42 @@ impl EnrichmentJobLifecycleStore for OracleEnrichmentJobStore {
     ) -> StorageResult<RetryOutcome> {
         let conn = db::connect(&self.config)?;
         job::mark_job_retryable(&conn, worker_id, job_id, error_message, retry_after_seconds)
+    }
+
+    fn record_batch_submission(
+        &self,
+        _batch: &NewEnrichmentBatch,
+        _jobs: &[ClaimedJob],
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    fn transition_batch_submission(
+        &self,
+        _completed_provider_batch_id: &str,
+        _next_batch: &NewEnrichmentBatch,
+        _jobs: &[ClaimedJob],
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    fn complete_batch(&self, _provider_batch_id: &str) -> StorageResult<()> {
+        Ok(())
+    }
+
+    fn fail_batch_record(
+        &self,
+        _provider_batch_id: &str,
+        _error_message: &str,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    fn load_running_batches(
+        &self,
+        _stage_name: &str,
+    ) -> StorageResult<Vec<PersistedEnrichmentBatch>> {
+        Ok(Vec::new())
     }
 }
 

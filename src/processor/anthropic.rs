@@ -330,6 +330,7 @@ struct AnthropicReconciliationSubmitter {
     model: String,
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct AnthropicPhaseOneData {
     resolved: std::collections::HashMap<String, Vec<PreprocessPhaseOneSpanResolved>>,
     usage: std::collections::HashMap<String, Option<InferenceUsage>>,
@@ -484,6 +485,30 @@ impl PreprocessBatchSubmitter for AnthropicPreprocessSubmitter {
             provider: "anthropic".to_string(),
             submitted_at: std::time::Instant::now(),
         })
+    }
+
+    fn serialize_phase_one_data(
+        &self,
+        phase_one_data: &dyn std::any::Any,
+    ) -> Result<String, ProcessorError> {
+        let data = phase_one_data.downcast_ref::<AnthropicPhaseOneData>().ok_or_else(|| ProcessorError::Message {
+            message: "failed to downcast Anthropic preprocess phase-one data".to_string(),
+        })?;
+        serde_json::to_string(data).map_err(|source| ProcessorError::Message {
+            message: format!("failed to serialize Anthropic preprocess phase-one data: {source}"),
+        })
+    }
+
+    fn deserialize_phase_one_data(
+        &self,
+        serialized: &str,
+    ) -> Result<Box<dyn std::any::Any>, ProcessorError> {
+        let data: AnthropicPhaseOneData =
+            serde_json::from_str(serialized).map_err(|source| ProcessorError::ParseModelJson {
+                source,
+                body_preview: super::preview(serialized),
+            })?;
+        Ok(Box::new(data))
     }
 
     fn parse_phase_two(

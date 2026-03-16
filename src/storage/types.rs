@@ -573,6 +573,29 @@ pub struct NewEnrichmentJob {
     pub payload_json: String,
 }
 
+/// Data required to persist one in-flight provider batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewEnrichmentBatch {
+    pub provider_batch_id: String,
+    pub provider_name: String,
+    pub stage_name: String,
+    pub phase_name: String,
+    pub owner_worker_id: String,
+    pub context_json: Option<String>,
+}
+
+/// Durable view of one in-flight provider batch and its claimed jobs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedEnrichmentBatch {
+    pub provider_batch_id: String,
+    pub provider_name: String,
+    pub stage_name: String,
+    pub phase_name: String,
+    pub owner_worker_id: String,
+    pub context_json: Option<String>,
+    pub jobs: Vec<ClaimedJob>,
+}
+
 /// Data required to create one oa_derivation_run row.
 #[derive(Debug)]
 pub struct NewDerivationRun {
@@ -893,7 +916,7 @@ impl ArtifactReconcilePayload {
 ///
 /// Returned by `claim_next_job`. Contains everything the worker needs to
 /// execute the job without querying additional tables.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimedJob {
     pub job_id: String,
     pub artifact_id: String,

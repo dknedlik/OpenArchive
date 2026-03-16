@@ -14,8 +14,9 @@ use crate::storage::derivation_store::{
 use crate::storage::enrichment_state_store::EnrichmentStateStore;
 use crate::storage::job_store::EnrichmentJobLifecycleStore;
 use crate::storage::types::{
-    ArtifactExtractionResult, ClaimedJob, ReconciliationDecision, RetrievalIntent,
-    RetrievalResultSet, RetrievedContextItem, RetryOutcome,
+    ArtifactExtractionResult, ClaimedJob, NewEnrichmentBatch, PersistedEnrichmentBatch,
+    ReconciliationDecision, RetrievalIntent, RetrievalResultSet, RetrievedContextItem,
+    RetryOutcome,
 };
 use crate::storage::{
     ArtifactIngestResult, ArtifactReadStore, ImportWriteResult, ImportWriteStore, ImportedArtifact,
@@ -323,7 +324,7 @@ impl EnrichmentStateStore for PostgresDerivedMetadataStore {
             .execute(
                 "INSERT INTO oa_artifact_extraction_result
                  (extraction_result_id, artifact_id, job_id, pipeline_name, pipeline_version, result_json)
-                 VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                 VALUES ($1, $2, $3, $4, $5, $6::text::jsonb)
                  ON CONFLICT (extraction_result_id) DO UPDATE
                  SET result_json = EXCLUDED.result_json,
                      pipeline_name = EXCLUDED.pipeline_name,
@@ -377,7 +378,7 @@ impl EnrichmentStateStore for PostgresDerivedMetadataStore {
             .execute(
                 "INSERT INTO oa_retrieval_result_set
                  (retrieval_result_set_id, artifact_id, job_id, extraction_result_id, pipeline_name, pipeline_version, result_json)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb)
                  ON CONFLICT (retrieval_result_set_id) DO UPDATE
                  SET result_json = EXCLUDED.result_json,
                      pipeline_name = EXCLUDED.pipeline_name,
@@ -438,7 +439,7 @@ impl EnrichmentStateStore for PostgresDerivedMetadataStore {
                      (reconciliation_decision_id, artifact_id, job_id, extraction_result_id, retrieval_result_set_id,
                       pipeline_name, pipeline_version, decision_kind, target_kind, target_key, matched_object_id,
                       rationale, evidence_segment_ids_json, decision_json)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text::jsonb, $9, $10, $11, $12, $13::text::jsonb, $14::text::jsonb)
                      ON CONFLICT (reconciliation_decision_id) DO UPDATE
                      SET decision_json = EXCLUDED.decision_json,
                          rationale = EXCLUDED.rationale",
@@ -578,6 +579,47 @@ impl EnrichmentJobLifecycleStore for PostgresEnrichmentJobStore {
             error_message,
             retry_after_seconds,
         )
+    }
+
+    fn record_batch_submission(
+        &self,
+        batch: &NewEnrichmentBatch,
+        jobs: &[ClaimedJob],
+    ) -> StorageResult<()> {
+        let mut client = postgres_db::connect(&self.config)?;
+        job::record_batch_submission(&mut client, batch, jobs)
+    }
+
+    fn transition_batch_submission(
+        &self,
+        completed_provider_batch_id: &str,
+        next_batch: &NewEnrichmentBatch,
+        jobs: &[ClaimedJob],
+    ) -> StorageResult<()> {
+        let mut client = postgres_db::connect(&self.config)?;
+        job::transition_batch_submission(&mut client, completed_provider_batch_id, next_batch, jobs)
+    }
+
+    fn complete_batch(&self, provider_batch_id: &str) -> StorageResult<()> {
+        let mut client = postgres_db::connect(&self.config)?;
+        job::complete_batch(&mut client, provider_batch_id)
+    }
+
+    fn fail_batch_record(
+        &self,
+        provider_batch_id: &str,
+        error_message: &str,
+    ) -> StorageResult<()> {
+        let mut client = postgres_db::connect(&self.config)?;
+        job::fail_batch_record(&mut client, provider_batch_id, error_message)
+    }
+
+    fn load_running_batches(
+        &self,
+        stage_name: &str,
+    ) -> StorageResult<Vec<PersistedEnrichmentBatch>> {
+        let mut client = postgres_db::connect(&self.config)?;
+        job::load_running_batches(&mut client, stage_name)
     }
 }
 
