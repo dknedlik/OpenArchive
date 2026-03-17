@@ -314,6 +314,8 @@ mod tests {
         Arc::new(ArchiveApplication::new(
             import_store,
             read_store,
+            None,
+            None,
             object_store,
         ))
     }

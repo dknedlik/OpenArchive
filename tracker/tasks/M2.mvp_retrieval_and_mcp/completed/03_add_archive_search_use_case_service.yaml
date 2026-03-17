@@ -1,7 +1,7 @@
 id: "03"
 title: Add archive search as an application-layer use case service
 assignee: david
-status: todo
+status: done
 type: feature
 priority: high
 planned_order: 3
@@ -32,3 +32,4 @@ risks: |
   - If search returns only artifact IDs, every downstream consumer will need an extra read path just to understand what matched.
 notes: |
   - Use the result shape to carry semantic match density, not just raw retrieval proximity.
+  - Completed in `src/app/search.rs` with Postgres-backed search wiring through the application layer.

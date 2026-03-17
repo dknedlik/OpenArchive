@@ -14,11 +14,12 @@ use crate::processor::{
     GrokProcessorFactory, OpenAiProcessorFactory, StubProcessorFactory,
 };
 use crate::storage::{
-    ArchiveRetrievalStore, ArtifactReadStore, EnrichmentJobLifecycleStore, EnrichmentStateStore,
-    ImportWriteStore, MvpRetrievalReadStore, OracleArchiveRetrievalStore, OracleArtifactReadStore,
-    OracleDerivedMetadataStore, OracleEnrichmentJobStore, OracleImportWriteStore,
-    PostgresArchiveRetrievalStore, PostgresArtifactReadStore, PostgresDerivedMetadataStore,
-    PostgresEnrichmentJobStore, PostgresImportWriteStore, PostgresRetrievalReadStore,
+    ArchiveRetrievalStore, ArchiveSearchReadStore, ArtifactReadStore, EnrichmentJobLifecycleStore,
+    EnrichmentStateStore, ImportWriteStore, MvpRetrievalReadStore, OracleArchiveRetrievalStore,
+    OracleArtifactReadStore, OracleDerivedMetadataStore, OracleEnrichmentJobStore,
+    OracleImportWriteStore, PostgresArchiveRetrievalStore, PostgresArtifactReadStore,
+    PostgresDerivedMetadataStore, PostgresEnrichmentJobStore, PostgresImportWriteStore,
+    PostgresRetrievalReadStore,
 };
 
 pub struct ServiceBundle {
@@ -54,8 +55,12 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 Arc::new(PostgresArtifactReadStore::new(pg_config.clone()));
             let retrieval_store: Arc<dyn ArchiveRetrievalStore> =
                 Arc::new(PostgresArchiveRetrievalStore::new(pg_config.clone()));
-            let mvp_retrieval_read_store: Arc<dyn MvpRetrievalReadStore> =
+            let mvp_retrieval_store_impl =
                 Arc::new(PostgresRetrievalReadStore::new(pg_config.clone()));
+            let mvp_retrieval_read_store: Arc<dyn MvpRetrievalReadStore> =
+                mvp_retrieval_store_impl.clone();
+            let search_read_store: Arc<dyn ArchiveSearchReadStore + Send + Sync> =
+                mvp_retrieval_store_impl.clone();
             let processor_factory: Arc<dyn ArtifactProcessorFactory> = match &config.inference {
                 InferenceConfig::Stub => Arc::new(StubProcessorFactory),
                 InferenceConfig::OpenAi(openai) => Arc::new(
@@ -75,9 +80,13 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                         .map_err(|message| ConfigError::InvalidInferenceConfig { message })?,
                 ),
             };
+            let context_pack_store: Arc<dyn crate::storage::ArtifactContextPackReadStore + Send + Sync> =
+                mvp_retrieval_store_impl.clone();
             let app = Arc::new(ArchiveApplication::new(
                 Arc::clone(&import_store),
                 Arc::clone(&read_store),
+                Some(search_read_store),
+                Some(context_pack_store),
                 Arc::clone(&object_store),
             ));
             Ok(ServiceBundle {
@@ -120,6 +129,8 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
             let app = Arc::new(ArchiveApplication::new(
                 Arc::clone(&import_store),
                 Arc::clone(&read_store),
+                None,
+                None,
                 Arc::clone(&object_store),
             ));
             Ok(ServiceBundle {
