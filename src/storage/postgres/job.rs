@@ -746,10 +746,10 @@ struct ArtifactEnrichmentSnapshot {
     completed_derivation_runs: i64,
 }
 
-fn recompute_artifact_enrichment_status(
+pub fn recompute_artifact_enrichment_status(
     client: &mut postgres::Client,
     artifact_id: &str,
-) -> StorageResult<()> {
+) -> StorageResult<EnrichmentStatus> {
     let snapshot = load_artifact_enrichment_snapshot(client, artifact_id)?;
     let next_status = derive_artifact_enrichment_status(snapshot);
     client
@@ -758,7 +758,29 @@ fn recompute_artifact_enrichment_status(
             &[&next_status.as_str(), &artifact_id],
         )
         .map_err(map_pg_storage_err)?;
-    Ok(())
+    Ok(next_status)
+}
+
+pub fn recompute_all_artifact_enrichment_statuses(
+    client: &mut postgres::Client,
+) -> StorageResult<Vec<(String, EnrichmentStatus)>> {
+    let rows = client
+        .query(
+            "SELECT artifact_id
+             FROM oa_artifact
+             ORDER BY artifact_id ASC",
+            &[],
+        )
+        .map_err(map_pg_storage_err)?;
+
+    let mut recomputed = Vec::with_capacity(rows.len());
+    for row in rows {
+        let artifact_id: String = row.get(0);
+        let status = recompute_artifact_enrichment_status(client, &artifact_id)?;
+        recomputed.push((artifact_id, status));
+    }
+
+    Ok(recomputed)
 }
 
 fn load_artifact_enrichment_snapshot(

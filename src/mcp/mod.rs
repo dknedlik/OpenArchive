@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::app::{artifact_detail, context_pack, search, ArchiveApplication};
+use crate::app::{
+    artifact_detail, context_pack, search, ArchiveApplication,
+};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const SEARCH_LIMIT_CAP: usize = 50;
@@ -116,11 +118,14 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "get_artifact",
-            "description": "Load artifact metadata, ordered segments, and active derived objects for one artifact id.",
+            "description": "Load artifact metadata and active derived objects for one artifact id. Segments are omitted by default and can be requested in a bounded window.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "artifact_id": { "type": "string", "description": "Artifact identifier." }
+                    "artifact_id": { "type": "string", "description": "Artifact identifier." },
+                    "include_segments": { "type": "boolean", "description": "When true, include a bounded window of ordered segments. Defaults to false." },
+                    "segment_offset": { "type": "integer", "minimum": 0, "description": "Zero-based starting segment offset when include_segments is true." },
+                    "segment_limit": { "type": "integer", "minimum": 1, "maximum": artifact_detail::DEFAULT_SEGMENT_LIMIT, "description": "Maximum number of segments to return when include_segments is true. Values above 50 are silently clamped." }
                 },
                 "required": ["artifact_id"],
                 "additionalProperties": false
@@ -181,9 +186,27 @@ fn call_tool(app: &ArchiveApplication, params: Value) -> std::result::Result<Val
                 .get("artifact_id")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "get_artifact requires artifact_id".to_string())?;
+            let include_segments = arguments
+                .get("include_segments")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let segment_offset = arguments
+                .get("segment_offset")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize)
+                .unwrap_or(0);
+            let segment_limit = arguments
+                .get("segment_limit")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize)
+                .unwrap_or(artifact_detail::DEFAULT_SEGMENT_LIMIT)
+                .clamp(1, artifact_detail::DEFAULT_SEGMENT_LIMIT);
             let response = service
                 .get(artifact_detail::ArtifactDetailRequest {
                     artifact_id: artifact_id.to_string(),
+                    include_segments,
+                    segment_offset,
+                    segment_limit,
                 })
                 .map_err(|err| err.to_string())?;
             Ok(tool_success(match response {
