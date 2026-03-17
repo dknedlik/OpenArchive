@@ -30,10 +30,17 @@ pub fn parse_conversations(input: &[u8]) -> ParserResult<Vec<ParsedConversation>
         return Err(ParserError::EmptyExport);
     }
 
-    raw.conversations
+    let conversations = raw
+        .conversations
         .iter()
-        .map(normalize_conversation)
-        .collect()
+        .filter_map(|conversation| normalize_conversation(conversation))
+        .collect::<Vec<_>>();
+
+    if conversations.is_empty() {
+        return Err(ParserError::EmptyExport);
+    }
+
+    Ok(conversations)
 }
 
 #[derive(Deserialize)]
@@ -75,7 +82,7 @@ struct RawResponse {
     web_search_results: Vec<serde_json::Value>,
 }
 
-fn normalize_conversation(raw: &RawConversationEnvelope) -> ParserResult<ParsedConversation> {
+fn normalize_conversation(raw: &RawConversationEnvelope) -> Option<ParsedConversation> {
     let mut participants_by_key = HashMap::new();
     let mut participant_order = Vec::new();
     let mut messages = Vec::new();
@@ -130,9 +137,7 @@ fn normalize_conversation(raw: &RawConversationEnvelope) -> ParserResult<ParsedC
     }
 
     if messages.is_empty() {
-        return Err(ParserError::EmptyConversation {
-            conversation_id: raw.conversation.id.clone(),
-        });
+        return None;
     }
 
     let participants = participant_order
@@ -140,7 +145,7 @@ fn normalize_conversation(raw: &RawConversationEnvelope) -> ParserResult<ParsedC
         .filter_map(|key| participants_by_key.remove(&key))
         .collect::<Vec<_>>();
 
-    Ok(ParsedConversation {
+    Some(ParsedConversation {
         source_id: raw.conversation.id.clone(),
         title: non_empty(raw.conversation.title.as_deref())
             .or_else(|| non_empty(raw.conversation.summary.as_deref())),
@@ -316,5 +321,47 @@ mod tests {
             .unsupported_content
             .iter()
             .any(|item| item.content_type == "web_search_results"));
+    }
+
+    #[test]
+    fn skips_empty_conversations_in_export() {
+        let payload = br#"{
+          "conversations": [
+            {
+              "conversation": {
+                "id": "empty-conv",
+                "create_time": "2026-03-15T19:19:26.203416Z",
+                "modify_time": "2026-03-15T19:19:47.011477Z",
+                "title": "Empty",
+                "summary": ""
+              },
+              "responses": []
+            },
+            {
+              "conversation": {
+                "id": "real-conv",
+                "create_time": "2026-03-15T19:19:26.203416Z",
+                "modify_time": "2026-03-15T19:19:47.011477Z",
+                "title": "Real",
+                "summary": ""
+              },
+              "responses": [
+                {
+                  "response": {
+                    "_id": "msg-1",
+                    "message": "hello",
+                    "sender": "human",
+                    "create_time": {"$date":{"$numberLong":"1773602366234"}},
+                    "model": "grok-4"
+                  }
+                }
+              ]
+            }
+          ]
+        }"#;
+
+        let conversations = parse_conversations(payload).unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].source_id, "real-conv");
     }
 }

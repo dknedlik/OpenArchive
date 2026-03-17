@@ -45,6 +45,8 @@ struct RawActivityItem {
     time: Option<String>,
     #[serde(default, rename = "safeHtmlItem")]
     safe_html_item: Vec<SafeHtmlItem>,
+    #[serde(default)]
+    subtitles: Vec<SubtitleItem>,
     #[serde(default, rename = "attachedFiles")]
     attached_files: Vec<serde_json::Value>,
     #[serde(rename = "imageFile")]
@@ -56,8 +58,15 @@ struct SafeHtmlItem {
     html: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct SubtitleItem {
+    name: Option<String>,
+    url: Option<String>,
+}
+
 fn normalize_item(index: usize, raw: &RawActivityItem) -> Option<ParsedConversation> {
-    let assistant_text = extract_html_text(raw);
+    let extracted = extract_activity_text(raw);
+    let assistant_text = extracted.text;
     if assistant_text.trim().is_empty() {
         return None;
     }
@@ -111,32 +120,13 @@ fn normalize_item(index: usize, raw: &RawActivityItem) -> Option<ParsedConversat
         );
     }
 
-    let mut unsupported = Vec::new();
-    if !raw.attached_files.is_empty() {
-        unsupported.push(SkippedContent {
-            content_type: "attached_files".to_string(),
-            part_index: unsupported.len(),
-            summary: format!(
-                "{} attached file reference(s) omitted",
-                raw.attached_files.len()
-            ),
-        });
-    }
-    if raw.image_file.is_some() {
-        unsupported.push(SkippedContent {
-            content_type: "image_file".to_string(),
-            part_index: unsupported.len(),
-            summary: "image file reference omitted".to_string(),
-        });
-    }
-
     messages.push(ParsedMessage {
         source_node_id: format!("{source_id}-response"),
         participant_key: assistant_key,
         create_time,
         text_content: assistant_text,
         visibility: VisibilityStatus::Visible,
-        unsupported_content: unsupported,
+        unsupported_content: extracted.skipped,
     });
 
     let participants = participant_order
@@ -157,14 +147,68 @@ fn normalize_item(index: usize, raw: &RawActivityItem) -> Option<ParsedConversat
     })
 }
 
-fn extract_html_text(raw: &RawActivityItem) -> String {
-    raw.safe_html_item
+struct ExtractedActivityText {
+    text: String,
+    skipped: Vec<SkippedContent>,
+}
+
+fn extract_activity_text(raw: &RawActivityItem) -> ExtractedActivityText {
+    let html_text = raw
+        .safe_html_item
         .iter()
         .filter_map(|item| item.html.as_deref())
         .map(html_to_text)
         .filter(|text| !text.trim().is_empty())
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+
+    let subtitle_text = raw
+        .subtitles
+        .iter()
+        .filter_map(|subtitle| subtitle.name.as_deref())
+        .map(str::trim)
+        .filter(|name| subtitle_carries_text(name))
+        .map(|name| name.to_string())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    let text = if !html_text.is_empty() {
+        html_text
+    } else {
+        subtitle_text
+    };
+
+    let mut skipped = Vec::new();
+    if !raw.attached_files.is_empty() {
+        skipped.push(SkippedContent {
+            content_type: "attached_files".to_string(),
+            part_index: skipped.len(),
+            summary: format!(
+                "{} attached file reference(s) omitted",
+                raw.attached_files.len()
+            ),
+        });
+    }
+    if raw.image_file.is_some() {
+        skipped.push(SkippedContent {
+            content_type: "image_file".to_string(),
+            part_index: skipped.len(),
+            summary: "image file reference omitted".to_string(),
+        });
+    }
+    for subtitle in &raw.subtitles {
+        if let Some(name) = subtitle.name.as_deref() {
+            if !subtitle_carries_text(name) {
+                skipped.push(SkippedContent {
+                    content_type: "subtitle_metadata".to_string(),
+                    part_index: skipped.len(),
+                    summary: subtitle_summary(name, subtitle.url.as_deref()),
+                });
+            }
+        }
+    }
+
+    ExtractedActivityText { text, skipped }
 }
 
 fn html_to_text(input: &str) -> String {
@@ -261,6 +305,28 @@ fn extract_prompt_from_title(title: &str) -> Option<&str> {
     title.strip_prefix("Prompted ").map(str::trim)
 }
 
+fn subtitle_carries_text(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with("Attached ") {
+        return false;
+    }
+    if trimmed.starts_with("- ") || trimmed.starts_with("-  ") {
+        return false;
+    }
+    true
+}
+
+fn subtitle_summary(name: &str, url: Option<&str>) -> String {
+    let trimmed = name.trim();
+    match url {
+        Some(url) if !url.is_empty() => format!("{trimmed} ({url})"),
+        _ => trimmed.to_string(),
+    }
+}
+
 fn parse_datetime(value: Option<&str>) -> Option<DateTime<Utc>> {
     value
         .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
@@ -323,5 +389,27 @@ mod tests {
         ));
         let err = parse_conversations(payload).unwrap_err();
         assert!(matches!(err, ParserError::EmptyExport));
+    }
+
+    #[test]
+    fn parses_subtitle_only_canvas_entries() {
+        let payload = br##"[
+          {
+            "title": "Created Gemini Canvas titled Example Canvas",
+            "time": "2025-12-24T01:28:49.285Z",
+            "subtitles": [
+              {
+                "name": "# Heading\n\nCanvas body text"
+              }
+            ]
+          }
+        ]"##;
+
+        let conversations = parse_conversations(payload).unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].messages.len(), 1);
+        assert!(conversations[0].messages[0]
+            .text_content
+            .contains("Canvas body text"));
     }
 }
