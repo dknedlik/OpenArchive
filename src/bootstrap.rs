@@ -61,6 +61,9 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 mvp_retrieval_store_impl.clone();
             let search_read_store: Arc<dyn ArchiveSearchReadStore + Send + Sync> =
                 mvp_retrieval_store_impl.clone();
+            let artifact_detail_store: Arc<
+                dyn crate::storage::ArtifactDetailReadStore + Send + Sync,
+            > = mvp_retrieval_store_impl.clone();
             let processor_factory: Arc<dyn ArtifactProcessorFactory> = match &config.inference {
                 InferenceConfig::Stub => Arc::new(StubProcessorFactory),
                 InferenceConfig::OpenAi(openai) => Arc::new(
@@ -80,12 +83,14 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                         .map_err(|message| ConfigError::InvalidInferenceConfig { message })?,
                 ),
             };
-            let context_pack_store: Arc<dyn crate::storage::ArtifactContextPackReadStore + Send + Sync> =
-                mvp_retrieval_store_impl.clone();
+            let context_pack_store: Arc<
+                dyn crate::storage::ArtifactContextPackReadStore + Send + Sync,
+            > = mvp_retrieval_store_impl.clone();
             let app = Arc::new(ArchiveApplication::new(
                 Arc::clone(&import_store),
                 Arc::clone(&read_store),
                 Some(search_read_store),
+                Some(artifact_detail_store),
                 Some(context_pack_store),
                 Arc::clone(&object_store),
             ));
@@ -129,6 +134,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
             let app = Arc::new(ArchiveApplication::new(
                 Arc::clone(&import_store),
                 Arc::clone(&read_store),
+                None,
                 None,
                 None,
                 Arc::clone(&object_store),

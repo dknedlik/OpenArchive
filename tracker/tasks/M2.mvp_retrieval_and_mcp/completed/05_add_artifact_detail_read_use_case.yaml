@@ -1,7 +1,7 @@
 id: "05"
 title: Add artifact detail retrieval use case
 assignee: david
-status: todo
+status: done
 type: feature
 priority: medium
 planned_order: 5
@@ -29,3 +29,4 @@ risks: |
   - Without a detail read path, both search and context-pack use cases will end up growing ad hoc “just one more query” behavior.
 notes: |
   - This is a supporting retrieval primitive, not the primary product surface.
+  - Completed in `src/app/artifact_detail.rs` with Postgres-backed wiring through the application layer.

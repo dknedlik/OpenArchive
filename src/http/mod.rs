@@ -316,6 +316,7 @@ mod tests {
             read_store,
             None,
             None,
+            None,
             object_store,
         ))
     }
