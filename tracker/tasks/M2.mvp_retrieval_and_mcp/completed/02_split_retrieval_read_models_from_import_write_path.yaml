@@ -1,7 +1,7 @@
 id: "02"
 title: Split retrieval read models from the import write path
 assignee: david
-status: todo
+status: done
 type: feature
 priority: high
 planned_order: 2
@@ -31,3 +31,4 @@ risks: |
   - If retrieval keeps growing inside the import store, MVP query work will get slower and harder to reason about with each feature.
 notes: |
   - This is the enabling refactor for the rest of the MVP retrieval milestone.
+  - Completed by splitting import, artifact-read, retrieval, and Postgres retrieval-read concerns into distinct store types and traits.

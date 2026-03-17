@@ -54,7 +54,17 @@ impl OracleImportWriteStore {
     }
 }
 
-impl ArtifactReadStore for OracleImportWriteStore {
+pub struct OracleArtifactReadStore {
+    config: OracleConfig,
+}
+
+impl OracleArtifactReadStore {
+    pub fn new(config: OracleConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl ArtifactReadStore for OracleArtifactReadStore {
     fn list_artifacts(&self) -> StorageResult<Vec<crate::storage::types::ArtifactListItem>> {
         let conn = db::connect(&self.config)?;
         artifact::list_artifacts(&conn)
@@ -69,7 +79,17 @@ impl ArtifactReadStore for OracleImportWriteStore {
     }
 }
 
-impl ArchiveRetrievalStore for OracleImportWriteStore {
+pub struct OracleArchiveRetrievalStore {
+    config: OracleConfig,
+}
+
+impl OracleArchiveRetrievalStore {
+    pub fn new(config: OracleConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl ArchiveRetrievalStore for OracleArchiveRetrievalStore {
     fn retrieve_for_intents(
         &self,
         artifact_id: &str,

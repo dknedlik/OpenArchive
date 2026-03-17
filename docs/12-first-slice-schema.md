@@ -9,13 +9,17 @@ It is the master schema description for the application model. Oracle and
 Postgres should each implement this contract through provider-specific
 migrations.
 
+This document is historical slice-one schema guidance, not the active MVP
+planning frame.
+
 ## Scope
 
 This contract is intentionally scoped to slice one:
 
 - one source type: `chatgpt_export`
 - one artifact class: `conversation`
-- one context-pack type: `conversation_resume`
+- one context-pack type: `conversation_resume` (legacy slice-one naming for
+  what MVP planning now frames as an artifact context pack)
 - minimal derived metadata: `summary`, `classification`, `memory`
 - asynchronous enrichment with persistent jobs
 

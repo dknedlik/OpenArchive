@@ -2,6 +2,7 @@ pub mod artifact;
 pub mod derivation;
 pub mod import;
 pub mod job;
+pub mod retrieval;
 pub mod segment;
 
 use crate::config::PostgresConfig;
@@ -13,6 +14,10 @@ use crate::storage::derivation_store::{
 };
 use crate::storage::enrichment_state_store::EnrichmentStateStore;
 use crate::storage::job_store::EnrichmentJobLifecycleStore;
+use crate::storage::retrieval_read_store::{
+    ArchiveSearchCandidate, ArchiveSearchReadStore, ArtifactContextPackMaterial,
+    ArtifactContextPackReadStore, ArtifactDetailReadStore, ArtifactDetailView,
+};
 use crate::storage::types::{
     ArtifactExtractionResult, ClaimedJob, NewEnrichmentBatch, PersistedEnrichmentBatch,
     ReconciliationDecision, RetrievalIntent, RetrievalResultSet, RetrievedContextItem,
@@ -48,7 +53,17 @@ impl PostgresImportWriteStore {
     }
 }
 
-impl ArtifactReadStore for PostgresImportWriteStore {
+pub struct PostgresArtifactReadStore {
+    config: PostgresConfig,
+}
+
+impl PostgresArtifactReadStore {
+    pub fn new(config: PostgresConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl ArtifactReadStore for PostgresArtifactReadStore {
     fn list_artifacts(&self) -> StorageResult<Vec<crate::storage::types::ArtifactListItem>> {
         let mut client = postgres_db::connect(&self.config)?;
         artifact::list_artifacts(&mut client)
@@ -60,6 +75,26 @@ impl ArtifactReadStore for PostgresImportWriteStore {
     ) -> StorageResult<Option<crate::storage::types::LoadedArtifactForEnrichment>> {
         let mut client = postgres_db::connect(&self.config)?;
         artifact::load_artifact_for_enrichment(&mut client, artifact_id)
+    }
+}
+
+pub struct PostgresArchiveRetrievalStore {
+    config: PostgresConfig,
+}
+
+impl PostgresArchiveRetrievalStore {
+    pub fn new(config: PostgresConfig) -> Self {
+        Self { config }
+    }
+}
+
+pub struct PostgresRetrievalReadStore {
+    config: PostgresConfig,
+}
+
+impl PostgresRetrievalReadStore {
+    pub fn new(config: PostgresConfig) -> Self {
+        Self { config }
     }
 }
 
@@ -216,7 +251,7 @@ impl PostgresDerivedMetadataStore {
     }
 }
 
-impl ArchiveRetrievalStore for PostgresImportWriteStore {
+impl ArchiveRetrievalStore for PostgresArchiveRetrievalStore {
     fn retrieve_for_intents(
         &self,
         artifact_id: &str,
@@ -314,6 +349,43 @@ impl ArchiveRetrievalStore for PostgresImportWriteStore {
             }
         }
         Ok(items)
+    }
+}
+
+impl ArchiveSearchReadStore for PostgresRetrievalReadStore {
+    fn search_candidates(
+        &self,
+        query_text: &str,
+        limit: usize,
+    ) -> StorageResult<Vec<ArchiveSearchCandidate>> {
+        let mut client = postgres_db::connect(&self.config)?;
+        retrieval::search_candidates(
+            &mut client,
+            &self.config.connection_string,
+            query_text,
+            limit,
+        )
+    }
+}
+
+impl ArtifactDetailReadStore for PostgresRetrievalReadStore {
+    fn load_artifact_detail(&self, artifact_id: &str) -> StorageResult<Option<ArtifactDetailView>> {
+        let mut client = postgres_db::connect(&self.config)?;
+        retrieval::load_artifact_detail(&mut client, &self.config.connection_string, artifact_id)
+    }
+}
+
+impl ArtifactContextPackReadStore for PostgresRetrievalReadStore {
+    fn load_artifact_context_pack_material(
+        &self,
+        artifact_id: &str,
+    ) -> StorageResult<Option<ArtifactContextPackMaterial>> {
+        let mut client = postgres_db::connect(&self.config)?;
+        retrieval::load_artifact_context_pack_material(
+            &mut client,
+            &self.config.connection_string,
+            artifact_id,
+        )
     }
 }
 

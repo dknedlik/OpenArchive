@@ -12,7 +12,7 @@ use open_archive::processor::{
 use open_archive::storage::enrichment_state_store::EnrichmentStateStore;
 use open_archive::storage::types::{ArtifactReconcilePayload, SourceType};
 use open_archive::storage::{
-    ArtifactReadStore, PostgresDerivedMetadataStore, PostgresImportWriteStore,
+    ArtifactReadStore, PostgresArtifactReadStore, PostgresDerivedMetadataStore,
 };
 
 #[derive(Debug, Parser)]
@@ -48,7 +48,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let postgres = PostgresConfig::from_env().context("failed to load Postgres config from env")?;
     let gemini = GeminiConfig::from_env().context("failed to load Gemini config from env")?;
-    let read_store = PostgresImportWriteStore::new(postgres.clone());
+    let read_store = PostgresArtifactReadStore::new(postgres.clone());
     let derived_store = PostgresDerivedMetadataStore::new(postgres.clone());
     let probe = GeminiProbeClient::new(&gemini)?;
     let model = args

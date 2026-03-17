@@ -28,6 +28,7 @@ pub mod import_store;
 pub mod job_store;
 pub mod oracle;
 pub mod postgres;
+pub mod retrieval_read_store;
 pub mod segment_store;
 pub mod types;
 
@@ -41,9 +42,19 @@ pub use derivation_store::{
 pub use enrichment_state_store::EnrichmentStateStore;
 pub use import_store::{ImportPayloadStore, ImportStore};
 pub use job_store::{EnrichmentJobLifecycleStore, EnrichmentJobStore};
-pub use oracle::{OracleDerivedMetadataStore, OracleEnrichmentJobStore, OracleImportWriteStore};
+pub use oracle::{
+    OracleArchiveRetrievalStore, OracleArtifactReadStore, OracleDerivedMetadataStore,
+    OracleEnrichmentJobStore, OracleImportWriteStore,
+};
 pub use postgres::{
-    PostgresDerivedMetadataStore, PostgresEnrichmentJobStore, PostgresImportWriteStore,
+    PostgresArchiveRetrievalStore, PostgresArtifactReadStore, PostgresDerivedMetadataStore,
+    PostgresEnrichmentJobStore, PostgresImportWriteStore, PostgresRetrievalReadStore,
+};
+pub use retrieval_read_store::{
+    ArchiveSearchCandidate, ArchiveSearchReadStore, ArtifactContextDerivedObject,
+    ArtifactContextEvidenceLink, ArtifactContextPackMaterial, ArtifactContextPackReadStore,
+    ArtifactDetailDerivedObject, ArtifactDetailReadStore, ArtifactDetailRecord,
+    ArtifactDetailSegment, ArtifactDetailView, MvpRetrievalReadStore, SearchCandidateKind,
 };
 pub use segment_store::SegmentStore;
 pub use types::{

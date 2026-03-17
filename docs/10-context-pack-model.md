@@ -6,6 +6,11 @@ This is the first-pass draft of the context-pack model for the OpenArchive
 brain layer. It describes how the system should assemble usable working context
 from artifacts, provenance, and derived metadata for a specific task.
 
+The slice-one term `conversation_resume` appears in older planning documents.
+For the MVP product phase, the preferred framing is `artifact_context_pack`
+for the first concrete retrieval contract, with narrower pack types layered on
+later if needed.
+
 ## Purpose
 
 The artifact model defines what exists.
@@ -110,7 +115,7 @@ Suggested fields:
 
 Examples of `pack_type`:
 
-- `conversation_resume`
+- `artifact_context_pack`
 - `decision_context`
 - `project_context`
 - `entity_context`
@@ -261,7 +266,7 @@ Different tasks should produce different kinds of context packs.
 
 The current recommended starting set is:
 
-- `conversation_resume`
+- `artifact_context_pack`
 - `decision_context`
 - `project_context`
 - `entity_context`
@@ -269,17 +274,23 @@ The current recommended starting set is:
 - `preference_context`
 - `research_context`
 
-### `conversation_resume`
+### `artifact_context_pack`
 
-Used to continue prior work in a current interaction.
+Used to continue prior work around one artifact in a current interaction.
 
 Likely contents:
 
-- recent relevant artifacts
+- the current artifact
+- recent relevant related artifacts
 - key summaries
 - open questions
 - unresolved decisions
 - supporting excerpts
+
+Legacy note:
+
+- `conversation_resume` was the slice-one planning name for this first pack
+  shape and should be treated as historical terminology.
 
 ### `decision_context`
 

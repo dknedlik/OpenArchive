@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use open_archive::config::PostgresConfig;
 use open_archive::object_store::StoredObject;
 use open_archive::storage::{
     ArtifactClass, ArtifactIngestResult, ArtifactPreprocessPayload, ArtifactStatus,
@@ -221,6 +222,107 @@ pub fn make_test_import_fixture_with_max_attempts(
         payload_sha256: payload_sha,
         segment_ids,
     }
+}
+
+pub fn seed_postgres_stub_derivations(
+    config: &PostgresConfig,
+    artifact_id: &str,
+    job_id: &str,
+    segment_ids: &[String],
+) {
+    let store = open_archive::storage::PostgresDerivedMetadataStore::new(config.clone());
+    let derivation_run_id = format!("run-{artifact_id}");
+    let summary_object_id = format!("derived-summary-{artifact_id}");
+    let memory_object_id = format!("derived-memory-{artifact_id}");
+    let started_at = open_archive::SourceTimestamp::parse_rfc3339("2026-01-01T00:00:00Z")
+        .expect("valid started_at");
+    let completed_at = open_archive::SourceTimestamp::parse_rfc3339("2026-01-01T00:01:00Z")
+        .expect("valid completed_at");
+
+    store
+        .write_derivation_attempt(WriteDerivationAttempt {
+            run: NewDerivationRun {
+                derivation_run_id: derivation_run_id.clone(),
+                artifact_id: artifact_id.to_string(),
+                job_id: Some(job_id.to_string()),
+                run_type: DerivationRunType::ArtifactExtraction,
+                pipeline_name: "test_pipeline".to_string(),
+                pipeline_version: "v1".to_string(),
+                provider_name: Some("test".to_string()),
+                model_name: Some("stub".to_string()),
+                prompt_version: Some("v1".to_string()),
+                run_status: DerivationRunStatus::Completed,
+                input_scope_type: InputScopeType::Artifact,
+                input_scope_json: format!(r#"{{"artifact_id":"{artifact_id}"}}"#),
+                started_at,
+                completed_at: Some(completed_at),
+                error_message: None,
+            },
+            objects: vec![
+                WriteDerivedObject {
+                    object: NewDerivedObject {
+                        derived_object_id: summary_object_id.clone(),
+                        artifact_id: artifact_id.to_string(),
+                        derivation_run_id: derivation_run_id.clone(),
+                        origin_kind: OriginKind::Explicit,
+                        object_status: ObjectStatus::Active,
+                        confidence_score: Some(0.9),
+                        confidence_label: Some("high".to_string()),
+                        scope_type: ScopeType::Artifact,
+                        scope_id: artifact_id.to_string(),
+                        supersedes_derived_object_id: None,
+                        payload: DerivedObjectPayload::Summary {
+                            title: Some("Summary".to_string()),
+                            body_text: "Summary for retrieval testing".to_string(),
+                            object_json: Some(SummaryObjectJson {
+                                summary_kind: Some("artifact_context_pack".to_string()),
+                                summary_version: Some("v1".to_string()),
+                            }),
+                        },
+                    },
+                    evidence_links: vec![NewEvidenceLink {
+                        evidence_link_id: format!("evidence-summary-{artifact_id}"),
+                        derived_object_id: summary_object_id,
+                        segment_id: segment_ids[0].clone(),
+                        evidence_role: EvidenceRole::PrimarySupport,
+                        evidence_rank: 0,
+                        support_strength: SupportStrength::Strong,
+                    }],
+                },
+                WriteDerivedObject {
+                    object: NewDerivedObject {
+                        derived_object_id: memory_object_id.clone(),
+                        artifact_id: artifact_id.to_string(),
+                        derivation_run_id: derivation_run_id,
+                        origin_kind: OriginKind::Explicit,
+                        object_status: ObjectStatus::Active,
+                        confidence_score: Some(0.8),
+                        confidence_label: Some("medium".to_string()),
+                        scope_type: ScopeType::Artifact,
+                        scope_id: artifact_id.to_string(),
+                        supersedes_derived_object_id: None,
+                        payload: DerivedObjectPayload::Memory {
+                            title: Some("Memory".to_string()),
+                            body_text: "Memory for retrieval testing".to_string(),
+                            object_json: MemoryObjectJson {
+                                memory_type: "fact".to_string(),
+                                memory_scope: ScopeType::Artifact,
+                                memory_scope_value: artifact_id.to_string(),
+                            },
+                        },
+                    },
+                    evidence_links: vec![NewEvidenceLink {
+                        evidence_link_id: format!("evidence-memory-{artifact_id}"),
+                        derived_object_id: memory_object_id,
+                        segment_id: segment_ids[1].clone(),
+                        evidence_role: EvidenceRole::PrimarySupport,
+                        evidence_rank: 0,
+                        support_strength: SupportStrength::Strong,
+                    }],
+                },
+            ],
+        })
+        .expect("seed derivation attempt");
 }
 
 pub struct ImportRecord {

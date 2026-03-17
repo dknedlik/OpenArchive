@@ -2,9 +2,9 @@
 
 ## Status
 
-The architecture proof phase is complete. This document now describes the
-product direction for turning OpenArchive into something people can actually
-use, not just a concept validation exercise.
+The architecture proof phase is complete. OpenArchive is now in the MVP build
+phase, focused on making retrieval and MCP genuinely usable instead of only
+proving the storage and enrichment foundations.
 
 ## Working Thesis
 
@@ -62,8 +62,12 @@ OpenArchive probably should not initially:
 
 ## Near-Term Product Outcomes
 
+- make archive search, artifact detail, and artifact-context retrieval usable
+  as real product surfaces
 - search the archive without dumping every artifact to the client
 - return compact, useful context packs for downstream agents
 - make local MCP the practical way to use the archive day to day
+- keep the same application-layer retrieval use cases usable through local MCP,
+  remote MCP, and a thin HTTP surface
 - broaden import coverage beyond the initial ChatGPT-export path
 - support optional local inference for users who want GPU-backed enrichment

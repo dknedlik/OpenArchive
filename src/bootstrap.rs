@@ -15,14 +15,17 @@ use crate::processor::{
 };
 use crate::storage::{
     ArchiveRetrievalStore, ArtifactReadStore, EnrichmentJobLifecycleStore, EnrichmentStateStore,
-    ImportWriteStore, OracleDerivedMetadataStore, OracleEnrichmentJobStore, OracleImportWriteStore,
-    PostgresDerivedMetadataStore, PostgresEnrichmentJobStore, PostgresImportWriteStore,
+    ImportWriteStore, MvpRetrievalReadStore, OracleArchiveRetrievalStore, OracleArtifactReadStore,
+    OracleDerivedMetadataStore, OracleEnrichmentJobStore, OracleImportWriteStore,
+    PostgresArchiveRetrievalStore, PostgresArtifactReadStore, PostgresDerivedMetadataStore,
+    PostgresEnrichmentJobStore, PostgresImportWriteStore, PostgresRetrievalReadStore,
 };
 
 pub struct ServiceBundle {
     pub app: Arc<ArchiveApplication>,
     pub read_store: Arc<dyn ArtifactReadStore>,
     pub retrieval_store: Arc<dyn ArchiveRetrievalStore>,
+    pub mvp_retrieval_read_store: Option<Arc<dyn MvpRetrievalReadStore>>,
     pub enrichment_store: Arc<dyn EnrichmentJobLifecycleStore>,
     pub state_store: Arc<dyn EnrichmentStateStore>,
     pub derived_store: Arc<dyn crate::storage::DerivedMetadataWriteStore>,
@@ -45,10 +48,14 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
 
     match &config.relational_store {
         RelationalStoreConfig::Postgres(pg_config) => {
-            let archive_store_impl = Arc::new(PostgresImportWriteStore::new(pg_config.clone()));
-            let import_store: Arc<dyn ImportWriteStore + Send + Sync> = archive_store_impl.clone();
-            let read_store: Arc<dyn ArtifactReadStore + Send + Sync> = archive_store_impl.clone();
-            let retrieval_store: Arc<dyn ArchiveRetrievalStore> = archive_store_impl.clone();
+            let import_store: Arc<dyn ImportWriteStore + Send + Sync> =
+                Arc::new(PostgresImportWriteStore::new(pg_config.clone()));
+            let read_store: Arc<dyn ArtifactReadStore + Send + Sync> =
+                Arc::new(PostgresArtifactReadStore::new(pg_config.clone()));
+            let retrieval_store: Arc<dyn ArchiveRetrievalStore> =
+                Arc::new(PostgresArchiveRetrievalStore::new(pg_config.clone()));
+            let mvp_retrieval_read_store: Arc<dyn MvpRetrievalReadStore> =
+                Arc::new(PostgresRetrievalReadStore::new(pg_config.clone()));
             let processor_factory: Arc<dyn ArtifactProcessorFactory> = match &config.inference {
                 InferenceConfig::Stub => Arc::new(StubProcessorFactory),
                 InferenceConfig::OpenAi(openai) => Arc::new(
@@ -77,6 +84,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 app,
                 read_store,
                 retrieval_store,
+                mvp_retrieval_read_store: Some(mvp_retrieval_read_store),
                 enrichment_store: Arc::new(PostgresEnrichmentJobStore::new(pg_config.clone())),
                 state_store: Arc::new(PostgresDerivedMetadataStore::new(pg_config.clone())),
                 derived_store: Arc::new(PostgresDerivedMetadataStore::new(pg_config.clone())),
@@ -84,10 +92,12 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
             })
         }
         RelationalStoreConfig::Oracle(db_config) => {
-            let archive_store_impl = Arc::new(OracleImportWriteStore::new(db_config.clone()));
-            let import_store: Arc<dyn ImportWriteStore + Send + Sync> = archive_store_impl.clone();
-            let read_store: Arc<dyn ArtifactReadStore + Send + Sync> = archive_store_impl.clone();
-            let retrieval_store: Arc<dyn ArchiveRetrievalStore> = archive_store_impl.clone();
+            let import_store: Arc<dyn ImportWriteStore + Send + Sync> =
+                Arc::new(OracleImportWriteStore::new(db_config.clone()));
+            let read_store: Arc<dyn ArtifactReadStore + Send + Sync> =
+                Arc::new(OracleArtifactReadStore::new(db_config.clone()));
+            let retrieval_store: Arc<dyn ArchiveRetrievalStore> =
+                Arc::new(OracleArchiveRetrievalStore::new(db_config.clone()));
             let processor_factory: Arc<dyn ArtifactProcessorFactory> = match &config.inference {
                 InferenceConfig::Stub => Arc::new(StubProcessorFactory),
                 InferenceConfig::OpenAi(openai) => Arc::new(
@@ -116,6 +126,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 app,
                 read_store,
                 retrieval_store,
+                mvp_retrieval_read_store: None,
                 enrichment_store: Arc::new(OracleEnrichmentJobStore::new(db_config.clone())),
                 state_store: Arc::new(OracleDerivedMetadataStore::new(db_config.clone())),
                 derived_store: Arc::new(OracleDerivedMetadataStore::new(db_config.clone())),

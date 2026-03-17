@@ -7,7 +7,8 @@ use open_archive::shutdown::ShutdownToken;
 use open_archive::storage::{
     ArchiveRetrievalStore, ArtifactReadStore, DerivedMetadataWriteStore,
     EnrichmentJobLifecycleStore, EnrichmentStateStore, ImportWriteStore,
-    OracleDerivedMetadataStore, OracleEnrichmentJobStore, OracleImportWriteStore,
+    OracleArchiveRetrievalStore, OracleArtifactReadStore, OracleDerivedMetadataStore,
+    OracleEnrichmentJobStore, OracleImportWriteStore,
 };
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -55,7 +56,7 @@ impl OracleHarness {
     }
 
     fn read_store(&self) -> Arc<dyn ArtifactReadStore> {
-        Arc::new(OracleImportWriteStore::new(self.0.clone()))
+        Arc::new(OracleArtifactReadStore::new(self.0.clone()))
     }
 
     fn job_store(&self) -> Arc<dyn EnrichmentJobLifecycleStore> {
@@ -67,7 +68,7 @@ impl OracleHarness {
     }
 
     fn retrieval_store(&self) -> Arc<dyn ArchiveRetrievalStore> {
-        Arc::new(OracleImportWriteStore::new(self.0.clone()))
+        Arc::new(OracleArchiveRetrievalStore::new(self.0.clone()))
     }
 
     fn state_store(&self) -> Arc<dyn EnrichmentStateStore> {

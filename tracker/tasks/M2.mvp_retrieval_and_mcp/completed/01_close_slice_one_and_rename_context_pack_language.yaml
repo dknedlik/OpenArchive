@@ -1,7 +1,7 @@
 id: "01"
 title: Close slice-one planning frame and standardize MVP retrieval naming
 assignee: david
-status: todo
+status: done
 type: chore
 priority: medium
 planned_order: 1
@@ -28,3 +28,4 @@ risks: |
   - Leaving the legacy name half-alive will leak avoidable rename churn into traits, structs, and MCP tool contracts.
 notes: |
   - This is intentionally small, but it should happen before the new retrieval code hardens around names.
+  - Completed in the README, roadmap, context-pack, slice-plan, and schema docs.

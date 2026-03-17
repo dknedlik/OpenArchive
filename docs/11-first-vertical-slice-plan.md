@@ -25,7 +25,8 @@ It should validate:
 ## Final Status
 
 As of the current local-first rewrite, the slice-one architecture proof is
-complete enough to retire this planning frame.
+complete enough to retire this planning frame. The active phase is now MVP
+development around retrieval, artifact-context assembly, and MCP.
 
 What is in place now:
 
@@ -54,6 +55,13 @@ What remains useful from this document:
 - an artifact-context retrieval surface and not-ready / partial behavior
 - large-conversation chunk-and-reduce path
 - final end-to-end validation for the full retrieval flow
+
+Where current planning now lives:
+
+- the active tracker milestone in `tracker/tasks/M2.mvp_retrieval_and_mcp/`
+- [docs/01-product-overview.md](/Users/david/src/open_archive/docs/01-product-overview.md)
+- [docs/05-roadmap.md](/Users/david/src/open_archive/docs/05-roadmap.md)
+- [docs/10-context-pack-model.md](/Users/david/src/open_archive/docs/10-context-pack-model.md)
 
 ## Implementation Changes
 
@@ -161,3 +169,6 @@ Remaining capability work after slice one:
 - a local MCP client can retrieve useful machine-facing results
 - archive search and artifact-context retrieval need to become practical
 - richer import coverage and context-pack quality still need product work
+
+In other words, slice one proved the core architecture. MVP is the phase that
+turns those pieces into a usable retrieval product.

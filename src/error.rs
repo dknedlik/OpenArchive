@@ -488,6 +488,15 @@ pub enum StorageError {
 
     #[error("invalid derived_object_type '{value}' while loading context for {artifact_id}")]
     InvalidDerivedObjectType { artifact_id: String, value: String },
+
+    #[error("invalid scope_type '{value}' while loading context for {artifact_id}")]
+    InvalidScopeType { artifact_id: String, value: String },
+
+    #[error("invalid evidence_role '{value}' while loading context for {artifact_id}")]
+    InvalidEvidenceRole { artifact_id: String, value: String },
+
+    #[error("invalid support_strength '{value}' while loading context for {artifact_id}")]
+    InvalidSupportStrength { artifact_id: String, value: String },
 }
 
 #[derive(Debug, Error)]

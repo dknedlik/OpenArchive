@@ -7,7 +7,8 @@ use open_archive::shutdown::ShutdownToken;
 use open_archive::storage::{
     ArchiveRetrievalStore, ArtifactReadStore, DerivedMetadataWriteStore,
     EnrichmentJobLifecycleStore, EnrichmentStateStore, ImportWriteStore,
-    PostgresDerivedMetadataStore, PostgresEnrichmentJobStore, PostgresImportWriteStore,
+    PostgresArchiveRetrievalStore, PostgresArtifactReadStore, PostgresDerivedMetadataStore,
+    PostgresEnrichmentJobStore, PostgresImportWriteStore,
 };
 use postgres::NoTls;
 use std::sync::Arc;
@@ -81,7 +82,7 @@ impl PostgresHarness {
     }
 
     fn read_store(&self) -> Arc<dyn ArtifactReadStore> {
-        Arc::new(PostgresImportWriteStore::new(self.0.clone()))
+        Arc::new(PostgresArtifactReadStore::new(self.0.clone()))
     }
 
     fn job_store(&self) -> Arc<dyn EnrichmentJobLifecycleStore> {
@@ -93,7 +94,7 @@ impl PostgresHarness {
     }
 
     fn retrieval_store(&self) -> Arc<dyn ArchiveRetrievalStore> {
-        Arc::new(PostgresImportWriteStore::new(self.0.clone()))
+        Arc::new(PostgresArchiveRetrievalStore::new(self.0.clone()))
     }
 
     fn state_store(&self) -> Arc<dyn EnrichmentStateStore> {

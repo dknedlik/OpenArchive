@@ -13,7 +13,7 @@ use open_archive::processor::{
 use open_archive::storage::enrichment_state_store::EnrichmentStateStore;
 use open_archive::storage::types::{ArtifactReconcilePayload, EnrichmentTier};
 use open_archive::storage::{
-    ArtifactReadStore, PostgresDerivedMetadataStore, PostgresImportWriteStore,
+    ArtifactReadStore, PostgresArtifactReadStore, PostgresDerivedMetadataStore,
 };
 use postgres::NoTls;
 
@@ -50,7 +50,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let provider = HostedProvider::from_str(&args.provider)?;
     let postgres = PostgresConfig::from_env().context("failed to load Postgres config from env")?;
-    let read_store = PostgresImportWriteStore::new(postgres.clone());
+    let read_store = PostgresArtifactReadStore::new(postgres.clone());
     let derived_store = PostgresDerivedMetadataStore::new(postgres.clone());
     let (factory, model) = build_factory(provider, args.model.as_deref())?;
 
@@ -136,7 +136,7 @@ fn build_factory(
 
 fn run_preprocess(
     factory: &dyn ArtifactProcessorFactory,
-    read_store: &PostgresImportWriteStore,
+    read_store: &PostgresArtifactReadStore,
     artifact_ids: &[String],
     poll_interval: Duration,
     timeout: Duration,
@@ -203,7 +203,7 @@ fn run_preprocess(
 
 fn run_extract(
     factory: &dyn ArtifactProcessorFactory,
-    read_store: &PostgresImportWriteStore,
+    read_store: &PostgresArtifactReadStore,
     artifact_ids: &[String],
     poll_interval: Duration,
     timeout: Duration,
@@ -256,7 +256,7 @@ fn run_extract(
 fn run_reconcile(
     factory: &dyn ArtifactProcessorFactory,
     postgres: &PostgresConfig,
-    read_store: &PostgresImportWriteStore,
+    read_store: &PostgresArtifactReadStore,
     derived_store: &PostgresDerivedMetadataStore,
     job_ids: &[String],
     poll_interval: Duration,

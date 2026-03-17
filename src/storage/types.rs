@@ -404,6 +404,14 @@ impl ScopeType {
             ScopeType::Segment => "segment",
         }
     }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "artifact" => Some(Self::Artifact),
+            "segment" => Some(Self::Segment),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -421,6 +429,15 @@ impl EvidenceRole {
             EvidenceRole::ReductionInput => "reduction_input",
         }
     }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "primary_support" => Some(Self::PrimarySupport),
+            "secondary_support" => Some(Self::SecondarySupport),
+            "reduction_input" => Some(Self::ReductionInput),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -436,6 +453,15 @@ impl SupportStrength {
             SupportStrength::Strong => "strong",
             SupportStrength::Medium => "medium",
             SupportStrength::Weak => "weak",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "strong" => Some(Self::Strong),
+            "medium" => Some(Self::Medium),
+            "weak" => Some(Self::Weak),
+            _ => None,
         }
     }
 }

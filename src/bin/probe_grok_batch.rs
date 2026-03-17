@@ -13,7 +13,7 @@ use open_archive::processor::{
 use open_archive::storage::enrichment_state_store::EnrichmentStateStore;
 use open_archive::storage::types::{ArtifactReconcilePayload, EnrichmentTier};
 use open_archive::storage::{
-    ArtifactReadStore, PostgresDerivedMetadataStore, PostgresImportWriteStore,
+    ArtifactReadStore, PostgresArtifactReadStore, PostgresDerivedMetadataStore,
 };
 use postgres::NoTls;
 
@@ -52,7 +52,7 @@ fn main() -> Result<()> {
     let model = grok.standard_model.clone();
     let factory = GrokProcessorFactory::new(grok)
         .map_err(|err| anyhow!("failed to build Grok factory: {err}"))?;
-    let read_store = PostgresImportWriteStore::new(postgres.clone());
+    let read_store = PostgresArtifactReadStore::new(postgres.clone());
     let derived_store = PostgresDerivedMetadataStore::new(postgres.clone());
 
     println!("Grok batch probe");
@@ -98,7 +98,7 @@ fn main() -> Result<()> {
 
 fn run_preprocess(
     factory: &GrokProcessorFactory,
-    read_store: &PostgresImportWriteStore,
+    read_store: &PostgresArtifactReadStore,
     artifact_ids: &[String],
     poll_interval: Duration,
     timeout: Duration,
@@ -165,7 +165,7 @@ fn run_preprocess(
 
 fn run_extract(
     factory: &GrokProcessorFactory,
-    read_store: &PostgresImportWriteStore,
+    read_store: &PostgresArtifactReadStore,
     artifact_ids: &[String],
     poll_interval: Duration,
     timeout: Duration,
@@ -218,7 +218,7 @@ fn run_extract(
 fn run_reconcile(
     factory: &GrokProcessorFactory,
     postgres: &PostgresConfig,
-    read_store: &PostgresImportWriteStore,
+    read_store: &PostgresArtifactReadStore,
     derived_store: &PostgresDerivedMetadataStore,
     job_ids: &[String],
     poll_interval: Duration,

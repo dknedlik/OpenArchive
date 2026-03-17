@@ -12,7 +12,7 @@ use open_archive::processor::{
     ArtifactProcessorFactory, GeminiProcessorFactory, InferenceUsage, PreprocessProcessorInput,
 };
 use open_archive::storage::types::{EnrichmentTier, LoadedSegment, SegmentSpanRef, TopicThreadRef};
-use open_archive::storage::{ArtifactReadStore, PostgresImportWriteStore};
+use open_archive::storage::{ArtifactReadStore, PostgresArtifactReadStore};
 
 #[derive(Debug, Parser)]
 #[command(name = "probe_preprocess")]
@@ -71,7 +71,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let postgres = PostgresConfig::from_env().context("failed to load Postgres config from env")?;
     let gemini = GeminiConfig::from_env().context("failed to load Gemini config from env")?;
-    let read_store = PostgresImportWriteStore::new(postgres);
+    let read_store = PostgresArtifactReadStore::new(postgres);
 
     println!("Preprocess probe");
     println!("Provider: gemini");

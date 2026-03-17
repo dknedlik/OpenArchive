@@ -10,7 +10,7 @@ use open_archive::processor::{
     GeminiProcessorFactory, GrokProcessorFactory, OpenAiProcessorFactory,
 };
 use open_archive::storage::types::EnrichmentTier;
-use open_archive::storage::{ArtifactReadStore, PostgresImportWriteStore};
+use open_archive::storage::{ArtifactReadStore, PostgresArtifactReadStore};
 
 #[derive(Debug, Parser)]
 #[command(name = "probe_output_budget")]
@@ -40,7 +40,7 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     let postgres = PostgresConfig::from_env().context("failed to load Postgres config from env")?;
-    let read_store = PostgresImportWriteStore::new(postgres);
+    let read_store = PostgresArtifactReadStore::new(postgres);
     let provider = ProbeProvider::from_str(&args.provider)?;
     let model = match provider {
         ProbeProvider::OpenRouter => {
