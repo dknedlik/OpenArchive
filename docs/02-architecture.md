@@ -41,6 +41,8 @@ Examples:
 
 - ChatGPT export adapter
 - Claude export adapter
+- Grok export adapter
+- Gemini Takeout adapter
 - Codex thread adapter
 - copy-paste transcript adapter
 

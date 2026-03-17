@@ -1,0 +1,61 @@
+[
+  {
+    "uuid": "claude-conv-1",
+    "name": "Lean legs and bioimpedance scale accuracy",
+    "summary": "",
+    "created_at": "2026-01-17T14:23:32.807041Z",
+    "updated_at": "2026-01-17T14:24:52.521684Z",
+    "chat_messages": [
+      null,
+      {
+        "uuid": "claude-msg-1",
+        "text": "Will very lean legs skew a bioimpedance body fat scale?",
+        "content": [
+          {
+            "start_timestamp": "2026-01-17T14:23:33.466852Z",
+            "stop_timestamp": "2026-01-17T14:23:33.466852Z",
+            "flags": null,
+            "type": "text",
+            "text": "Will very lean legs skew a bioimpedance body fat scale?",
+            "citations": []
+          }
+        ],
+        "sender": "human",
+        "created_at": "2026-01-17T14:23:33.472056Z",
+        "updated_at": "2026-01-17T14:23:33.472056Z",
+        "attachments": [],
+        "files": []
+      },
+      {
+        "uuid": "claude-msg-2",
+        "text": "Yes, very lean legs can skew bioimpedance readings.",
+        "content": [
+          {
+            "start_timestamp": "2026-01-17T14:23:38.402563Z",
+            "stop_timestamp": "2026-01-17T14:23:42.413351Z",
+            "flags": null,
+            "type": "thinking",
+            "thinking": "Thinking about bioimpedance accuracy and lean physiology implications."
+          },
+          {
+            "start_timestamp": "2026-01-17T14:23:42.476050Z",
+            "stop_timestamp": "2026-01-17T14:23:51.130097Z",
+            "flags": null,
+            "type": "text",
+            "text": "Yes, very lean legs can skew bioimpedance readings.",
+            "citations": []
+          }
+        ],
+        "sender": "assistant",
+        "created_at": "2026-01-17T14:23:51.162577Z",
+        "updated_at": "2026-01-17T14:23:51.162577Z",
+        "attachments": [],
+        "files": [
+          {
+            "file_name": "note.txt"
+          }
+        ]
+      }
+    ]
+  }
+]

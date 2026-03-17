@@ -20,18 +20,27 @@ use crate::object_store::StoredObject;
 #[serde(rename_all = "snake_case")]
 pub enum SourceType {
     ChatGptExport,
+    ClaudeExport,
+    GrokExport,
+    GeminiTakeout,
 }
 
 impl SourceType {
     pub fn as_str(&self) -> &'static str {
         match self {
             SourceType::ChatGptExport => "chatgpt_export",
+            SourceType::ClaudeExport => "claude_export",
+            SourceType::GrokExport => "grok_export",
+            SourceType::GeminiTakeout => "gemini_takeout",
         }
     }
 
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "chatgpt_export" => Some(Self::ChatGptExport),
+            "claude_export" => Some(Self::ClaudeExport),
+            "grok_export" => Some(Self::GrokExport),
+            "gemini_takeout" => Some(Self::GeminiTakeout),
             _ => None,
         }
     }
@@ -42,6 +51,9 @@ pub enum PayloadFormat {
     ChatGptExportZip,
     ChatGptExportJson,
     ChatGptExportCanonicalJson,
+    ClaudeExportJson,
+    GrokExportJson,
+    GeminiTakeoutJson,
 }
 
 impl PayloadFormat {
@@ -50,6 +62,9 @@ impl PayloadFormat {
             PayloadFormat::ChatGptExportZip => "chatgpt_export_zip",
             PayloadFormat::ChatGptExportJson => "chatgpt_export_json",
             PayloadFormat::ChatGptExportCanonicalJson => "chatgpt_export_canonical_json",
+            PayloadFormat::ClaudeExportJson => "claude_export_json",
+            PayloadFormat::GrokExportJson => "grok_export_json",
+            PayloadFormat::GeminiTakeoutJson => "gemini_takeout_json",
         }
     }
 }

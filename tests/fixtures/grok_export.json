@@ -1,0 +1,57 @@
+{
+  "conversations": [
+    {
+      "conversation": {
+        "id": "grok-conv-1",
+        "create_time": "2026-03-15T19:19:26.203416Z",
+        "modify_time": "2026-03-15T19:19:47.011477Z",
+        "title": "Anthropic and Grok Batch APIs",
+        "summary": ""
+      },
+      "responses": [
+        {
+          "response": {
+            "_id": "grok-msg-1",
+            "conversation_id": "grok-conv-1",
+            "message": "Do anthropic and grok have batch apis ?",
+            "sender": "human",
+            "create_time": {
+              "$date": {
+                "$numberLong": "1773602366234"
+              }
+            },
+            "metadata": {},
+            "model": "grok-4"
+          },
+          "share_link": null
+        },
+        {
+          "response": {
+            "_id": "grok-msg-2",
+            "conversation_id": "grok-conv-1",
+            "message": "**Yes, both Anthropic and xAI (Grok) have Batch APIs**.<grok:render card_id=\"02a86c\" type=\"render_inline_citation\"></grok:render>",
+            "sender": "ASSISTANT",
+            "create_time": {
+              "$date": {
+                "$numberLong": "1773602386619"
+              }
+            },
+            "web_search_results": [
+              {
+                "url": "https://docs.x.ai/developers/advanced-api-usage/batch-api"
+              }
+            ],
+            "model": "grok-4"
+          },
+          "share_link": null
+        }
+      ]
+    }
+  ],
+  "media_generations": [
+    {
+      "media_type": "image",
+      "original_prompt": "ignored in v1"
+    }
+  ]
+}

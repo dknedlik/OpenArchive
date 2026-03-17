@@ -5,6 +5,9 @@
 //! they do not reference Oracle SQL or storage implementation details.
 
 pub mod chatgpt;
+pub mod claude;
+pub mod gemini;
+pub mod grok;
 
 use chrono::{DateTime, Utc};
 

@@ -8,10 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::domain::SourceTimestamp;
 use crate::error::OpenArchiveError;
 use crate::object_store::{NewObject, ObjectStore, PutObjectResult};
-use crate::parser::{
-    self, ParsedConversation, ParsedMessage, CHATGPT_CONTENT_FACETS, CHATGPT_CONTENT_HASH_VERSION,
-    CHATGPT_NORMALIZATION_VERSION,
-};
+use crate::parser::{self, ParsedConversation, ParsedMessage};
 use crate::storage::{
     ArtifactClass, ArtifactPreprocessPayload, ArtifactStatus, EnrichmentStatus, ImportStatus,
     ImportWriteStore, JobStatus, JobType, NewArtifact, NewEnrichmentJob, NewImport,
@@ -35,17 +32,29 @@ pub struct ImportResponse {
     pub artifacts: Vec<ImportArtifactStatus>,
 }
 
-pub fn import_chatgpt_payload<S, O>(
+#[derive(Debug, Clone, Copy)]
+struct SourceImportSpec {
+    source_type: SourceType,
+    payload_format: PayloadFormat,
+    normalization_version: &'static str,
+    content_hash_version: &'static str,
+    content_facets: &'static [&'static str],
+}
+
+pub fn import_payload<S, O>(
     store: &S,
     object_store: &O,
+    source_type: SourceType,
+    payload_format: PayloadFormat,
     payload_bytes: &[u8],
 ) -> Result<ImportResponse, OpenArchiveError>
 where
     S: ImportWriteStore + ?Sized,
     O: ObjectStore + ?Sized,
 {
-    let parsed = parser::chatgpt::parse_conversations(payload_bytes)?;
-    let prepared = build_import_set(payload_bytes, parsed, object_store)?;
+    let spec = source_import_spec(source_type, payload_format);
+    let parsed = parse_conversations_for_source(source_type, payload_bytes)?;
+    let prepared = build_import_set(payload_bytes, spec, parsed, object_store)?;
     let result = match store.write_import(prepared.write_set) {
         Ok(result) => result,
         Err(err) => {
@@ -69,6 +78,78 @@ where
     })
 }
 
+pub fn import_chatgpt_payload<S, O>(
+    store: &S,
+    object_store: &O,
+    payload_bytes: &[u8],
+) -> Result<ImportResponse, OpenArchiveError>
+where
+    S: ImportWriteStore + ?Sized,
+    O: ObjectStore + ?Sized,
+{
+    import_payload(
+        store,
+        object_store,
+        SourceType::ChatGptExport,
+        PayloadFormat::ChatGptExportJson,
+        payload_bytes,
+    )
+}
+
+pub fn import_claude_payload<S, O>(
+    store: &S,
+    object_store: &O,
+    payload_bytes: &[u8],
+) -> Result<ImportResponse, OpenArchiveError>
+where
+    S: ImportWriteStore + ?Sized,
+    O: ObjectStore + ?Sized,
+{
+    import_payload(
+        store,
+        object_store,
+        SourceType::ClaudeExport,
+        PayloadFormat::ClaudeExportJson,
+        payload_bytes,
+    )
+}
+
+pub fn import_grok_payload<S, O>(
+    store: &S,
+    object_store: &O,
+    payload_bytes: &[u8],
+) -> Result<ImportResponse, OpenArchiveError>
+where
+    S: ImportWriteStore + ?Sized,
+    O: ObjectStore + ?Sized,
+{
+    import_payload(
+        store,
+        object_store,
+        SourceType::GrokExport,
+        PayloadFormat::GrokExportJson,
+        payload_bytes,
+    )
+}
+
+pub fn import_gemini_payload<S, O>(
+    store: &S,
+    object_store: &O,
+    payload_bytes: &[u8],
+) -> Result<ImportResponse, OpenArchiveError>
+where
+    S: ImportWriteStore + ?Sized,
+    O: ObjectStore + ?Sized,
+{
+    import_payload(
+        store,
+        object_store,
+        SourceType::GeminiTakeout,
+        PayloadFormat::GeminiTakeoutJson,
+        payload_bytes,
+    )
+}
+
 struct PreparedImportSet {
     write_set: WriteImportSet,
     payload_put: PutObjectResult,
@@ -76,6 +157,7 @@ struct PreparedImportSet {
 
 fn build_import_set(
     payload_bytes: &[u8],
+    spec: SourceImportSpec,
     conversations: Vec<ParsedConversation>,
     object_store: &(impl ObjectStore + ?Sized),
 ) -> Result<PreparedImportSet, OpenArchiveError> {
@@ -88,20 +170,22 @@ fn build_import_set(
         payload_bytes,
         &payload_sha256,
     )?;
-    let content_facets_json = serde_json::to_string(CHATGPT_CONTENT_FACETS).map_err(|err| {
+    let content_facets_json = serde_json::to_string(spec.content_facets).map_err(|err| {
         OpenArchiveError::Invariant(format!("failed to serialize content facets: {err}"))
     })?;
 
     let artifact_sets = conversations
         .into_iter()
-        .map(|conversation| build_artifact_set(&import_id, &content_facets_json, conversation))
+        .map(|conversation| {
+            build_artifact_set(&import_id, &content_facets_json, spec, conversation)
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(PreparedImportSet {
         write_set: WriteImportSet {
             payload_object: NewImportObjectRef {
                 object_id: payload_object_id.clone(),
-                payload_format: PayloadFormat::ChatGptExportJson,
+                payload_format: spec.payload_format,
                 mime_type: "application/json".to_string(),
                 copied_bytes: payload_bytes.to_vec(),
                 size_bytes: payload_bytes.len() as i64,
@@ -110,7 +194,7 @@ fn build_import_set(
             },
             import: NewImport {
                 import_id,
-                source_type: SourceType::ChatGptExport,
+                source_type: spec.source_type,
                 import_status: ImportStatus::Pending,
                 payload_object_id,
                 source_filename: None,
@@ -171,6 +255,7 @@ fn is_safe_precommit_import_failure(error: &crate::error::StorageError) -> bool 
 fn build_artifact_set(
     import_id: &str,
     content_facets_json: &str,
+    spec: SourceImportSpec,
     conversation: ParsedConversation,
 ) -> Result<WriteArtifactSet, OpenArchiveError> {
     let artifact_id = new_id("artifact");
@@ -212,7 +297,7 @@ fn build_artifact_set(
             artifact_id: artifact_id.clone(),
             import_id: import_id.to_string(),
             artifact_class: ArtifactClass::Conversation,
-            source_type: SourceType::ChatGptExport,
+            source_type: spec.source_type,
             artifact_status: ArtifactStatus::Captured,
             enrichment_status: EnrichmentStatus::Pending,
             source_conversation_key: Some(conversation.source_id.clone()),
@@ -222,9 +307,9 @@ fn build_artifact_set(
             started_at: created_at_source,
             ended_at,
             primary_language: None,
-            content_hash_version: CHATGPT_CONTENT_HASH_VERSION.to_string(),
+            content_hash_version: spec.content_hash_version.to_string(),
             content_facets_json: content_facets_json.to_string(),
-            normalization_version: CHATGPT_NORMALIZATION_VERSION.to_string(),
+            normalization_version: spec.normalization_version.to_string(),
         },
         participants,
         segments,
@@ -241,11 +326,57 @@ fn build_artifact_set(
             payload_json: ArtifactPreprocessPayload::new_v1(
                 &artifact_id,
                 import_id,
-                SourceType::ChatGptExport,
+                spec.source_type,
             )
             .to_json(),
         },
     })
+}
+
+fn parse_conversations_for_source(
+    source_type: SourceType,
+    payload_bytes: &[u8],
+) -> Result<Vec<ParsedConversation>, OpenArchiveError> {
+    match source_type {
+        SourceType::ChatGptExport => parser::chatgpt::parse_conversations(payload_bytes),
+        SourceType::ClaudeExport => parser::claude::parse_conversations(payload_bytes),
+        SourceType::GrokExport => parser::grok::parse_conversations(payload_bytes),
+        SourceType::GeminiTakeout => parser::gemini::parse_conversations(payload_bytes),
+    }
+    .map_err(OpenArchiveError::from)
+}
+
+fn source_import_spec(source_type: SourceType, payload_format: PayloadFormat) -> SourceImportSpec {
+    match source_type {
+        SourceType::ChatGptExport => SourceImportSpec {
+            source_type,
+            payload_format,
+            normalization_version: parser::CHATGPT_NORMALIZATION_VERSION,
+            content_hash_version: parser::CHATGPT_CONTENT_HASH_VERSION,
+            content_facets: parser::CHATGPT_CONTENT_FACETS,
+        },
+        SourceType::ClaudeExport => SourceImportSpec {
+            source_type,
+            payload_format,
+            normalization_version: parser::claude::CLAUDE_NORMALIZATION_VERSION,
+            content_hash_version: parser::claude::CLAUDE_CONTENT_HASH_VERSION,
+            content_facets: parser::claude::CLAUDE_CONTENT_FACETS,
+        },
+        SourceType::GrokExport => SourceImportSpec {
+            source_type,
+            payload_format,
+            normalization_version: parser::grok::GROK_NORMALIZATION_VERSION,
+            content_hash_version: parser::grok::GROK_CONTENT_HASH_VERSION,
+            content_facets: parser::grok::GROK_CONTENT_FACETS,
+        },
+        SourceType::GeminiTakeout => SourceImportSpec {
+            source_type,
+            payload_format,
+            normalization_version: parser::gemini::GEMINI_NORMALIZATION_VERSION,
+            content_hash_version: parser::gemini::GEMINI_CONTENT_HASH_VERSION,
+            content_facets: parser::gemini::GEMINI_CONTENT_FACETS,
+        },
+    }
 }
 
 fn build_segment(
@@ -314,6 +445,7 @@ fn sha256_hex(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ParserError;
     use crate::object_store::{NewObject, ObjectStore, PutObjectResult, StoredObject};
     use crate::storage::{
         ArtifactIngestResult, EnrichmentStatus, ImportWriteResult, ImportedArtifact, WriteImportSet,
@@ -631,5 +763,109 @@ mod tests {
         assert!(matches!(err, OpenArchiveError::Storage(_)));
         assert_eq!(object_store.puts.lock().unwrap().len(), 1);
         assert_eq!(object_store.deletes.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn import_claude_payload_uses_claude_source_metadata() {
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+
+        let response = import_claude_payload(
+            &store,
+            &object_store,
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/claude_export.json"
+            )),
+        )
+        .unwrap();
+
+        assert_eq!(response.artifacts.len(), 1);
+        let captured = store.captured.lock().unwrap();
+        let import_set = captured.last().unwrap();
+        assert_eq!(import_set.import.source_type, SourceType::ClaudeExport);
+        assert_eq!(
+            import_set.payload_object.payload_format,
+            PayloadFormat::ClaudeExportJson
+        );
+        assert_eq!(
+            import_set.artifact_sets[0].artifact.normalization_version,
+            parser::claude::CLAUDE_NORMALIZATION_VERSION
+        );
+    }
+
+    #[test]
+    fn import_grok_payload_uses_grok_source_metadata() {
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+
+        let response = import_grok_payload(
+            &store,
+            &object_store,
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/grok_export.json"
+            )),
+        )
+        .unwrap();
+
+        assert_eq!(response.artifacts.len(), 1);
+        let captured = store.captured.lock().unwrap();
+        let import_set = captured.last().unwrap();
+        assert_eq!(import_set.import.source_type, SourceType::GrokExport);
+        assert_eq!(
+            import_set.payload_object.payload_format,
+            PayloadFormat::GrokExportJson
+        );
+        assert_eq!(
+            import_set.artifact_sets[0].artifact.content_hash_version,
+            parser::grok::GROK_CONTENT_HASH_VERSION
+        );
+    }
+
+    #[test]
+    fn import_gemini_payload_skips_empty_items_and_imports_usable_entries() {
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+
+        let response = import_gemini_payload(
+            &store,
+            &object_store,
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/gemini_export.json"
+            )),
+        )
+        .unwrap();
+
+        assert_eq!(response.artifacts.len(), 1);
+        let captured = store.captured.lock().unwrap();
+        let import_set = captured.last().unwrap();
+        assert_eq!(import_set.import.source_type, SourceType::GeminiTakeout);
+        assert_eq!(
+            import_set.payload_object.payload_format,
+            PayloadFormat::GeminiTakeoutJson
+        );
+        assert_eq!(import_set.artifact_sets[0].segments.len(), 2);
+    }
+
+    #[test]
+    fn import_gemini_payload_rejects_payloads_without_usable_entries() {
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+        let err = import_gemini_payload(
+            &store,
+            &object_store,
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/gemini_empty_export.json"
+            )),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            OpenArchiveError::Parser(ParserError::EmptyExport)
+        ));
     }
 }

@@ -11,6 +11,9 @@ pub fn build_response(
 ) -> Response<Cursor<Vec<u8>>> {
     match (request.method(), request.url()) {
         (&Method::Post, "/imports/chatgpt") => handle_post_imports_chatgpt(request, app),
+        (&Method::Post, "/imports/claude") => handle_post_imports_claude(request, app),
+        (&Method::Post, "/imports/grok") => handle_post_imports_grok(request, app),
+        (&Method::Post, "/imports/gemini") => handle_post_imports_gemini(request, app),
         (&Method::Get, "/artifacts") => handle_get_artifacts(app),
         _ => text_response(StatusCode(404), "not found"),
     }
@@ -23,6 +26,48 @@ fn handle_post_imports_chatgpt(
     match read_request_body(request).and_then(|body| {
         app.imports
             .import_chatgpt_payload(&body)
+            .map_err(HttpError::from)
+    }) {
+        Ok(result) => json_response(StatusCode(200), &result),
+        Err(err) => err.into_response(),
+    }
+}
+
+fn handle_post_imports_claude(
+    request: &mut Request,
+    app: &ArchiveApplication,
+) -> Response<Cursor<Vec<u8>>> {
+    match read_request_body(request).and_then(|body| {
+        app.imports
+            .import_claude_payload(&body)
+            .map_err(HttpError::from)
+    }) {
+        Ok(result) => json_response(StatusCode(200), &result),
+        Err(err) => err.into_response(),
+    }
+}
+
+fn handle_post_imports_grok(
+    request: &mut Request,
+    app: &ArchiveApplication,
+) -> Response<Cursor<Vec<u8>>> {
+    match read_request_body(request).and_then(|body| {
+        app.imports
+            .import_grok_payload(&body)
+            .map_err(HttpError::from)
+    }) {
+        Ok(result) => json_response(StatusCode(200), &result),
+        Err(err) => err.into_response(),
+    }
+}
+
+fn handle_post_imports_gemini(
+    request: &mut Request,
+    app: &ArchiveApplication,
+) -> Response<Cursor<Vec<u8>>> {
+    match read_request_body(request).and_then(|body| {
+        app.imports
+            .import_gemini_payload(&body)
             .map_err(HttpError::from)
     }) {
         Ok(result) => json_response(StatusCode(200), &result),
@@ -231,6 +276,63 @@ mod tests {
         let app = test_app(store);
         let response = build_response(&mut request, app.as_ref());
         assert_eq!(response.status_code(), StatusCode(400));
+    }
+
+    #[test]
+    fn post_imports_claude_returns_json_payload() {
+        let store = MockStore {
+            artifacts: Vec::new(),
+        };
+        let mut request = TestRequest::new()
+            .with_method(Method::Post)
+            .with_path("/imports/claude")
+            .with_body(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/claude_export.json"
+            )))
+            .into();
+
+        let app = test_app(store);
+        let response = build_response(&mut request, app.as_ref());
+        assert_eq!(response.status_code(), StatusCode(200));
+    }
+
+    #[test]
+    fn post_imports_grok_returns_json_payload() {
+        let store = MockStore {
+            artifacts: Vec::new(),
+        };
+        let mut request = TestRequest::new()
+            .with_method(Method::Post)
+            .with_path("/imports/grok")
+            .with_body(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/grok_export.json"
+            )))
+            .into();
+
+        let app = test_app(store);
+        let response = build_response(&mut request, app.as_ref());
+        assert_eq!(response.status_code(), StatusCode(200));
+    }
+
+    #[test]
+    fn post_imports_gemini_returns_json_payload() {
+        let store = MockStore {
+            artifacts: Vec::new(),
+        };
+        let mut request = TestRequest::new()
+            .with_method(Method::Post)
+            .with_path("/imports/gemini")
+            .with_body(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/gemini_export.json"
+            )))
+            .into();
+
+        let app = test_app(store);
+        let response = build_response(&mut request, app.as_ref());
+        assert_eq!(response.status_code(), StatusCode(200));
     }
 
     #[test]

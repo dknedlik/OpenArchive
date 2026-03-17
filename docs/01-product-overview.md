@@ -79,7 +79,7 @@ OpenArchive probably should not initially:
 - make local MCP the practical way to use the archive day to day
 - keep the same application-layer retrieval use cases usable through local MCP,
   remote MCP, and a thin HTTP surface
-- broaden import coverage beyond the initial ChatGPT-export path
+- broaden import coverage beyond the current ChatGPT, Claude, Grok, and Gemini export paths
 - support optional local inference for users who want GPU-backed enrichment
 
 ## Current Pipeline Reality

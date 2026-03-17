@@ -45,12 +45,20 @@ make up
 This starts Postgres and the OpenArchive container. The app runs migrations on
 startup and serves on `http://localhost:3000`.
 
-Import a ChatGPT export:
+Import a supported export:
 
 ```bash
 curl -X POST http://localhost:3000/imports/chatgpt \
   -H "Content-Type: application/json" \
   -d @path/to/conversations.json
+```
+
+Other source-specific import routes:
+
+```bash
+curl -X POST http://localhost:3000/imports/claude  -H "Content-Type: application/json" -d @path/to/claude/conversations.json
+curl -X POST http://localhost:3000/imports/grok    -H "Content-Type: application/json" -d @path/to/prod-grok-backend.json
+curl -X POST http://localhost:3000/imports/gemini  -H "Content-Type: application/json" -d @path/to/MyActivity.json
 ```
 
 The enrichment worker picks up imported artifacts automatically. Once
@@ -108,7 +116,7 @@ Current providers:
 
 **Working end to end:**
 
-- ChatGPT export import with raw payload preservation
+- ChatGPT, Claude, Grok, and Gemini JSON import with raw payload preservation
 - Four-stage enrichment pipeline (preprocess → extract → retrieve-context → reconcile)
 - Archive search, artifact detail, and context-pack retrieval
 - Local MCP tool surface over all retrieval use cases
@@ -116,7 +124,7 @@ Current providers:
 **In progress:**
 
 - Search ranking quality and full-text search
-- Broader import coverage (Claude, Codex, documents, markdown, plain text)
+- Broader import coverage beyond current chat export handlers (Codex, documents, markdown, plain text)
 - Remote MCP deployment
 - First-run setup flow to replace manual `.env` configuration
 

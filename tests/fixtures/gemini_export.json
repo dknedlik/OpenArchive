@@ -1,0 +1,23 @@
+[
+  {
+    "header": "Gemini Apps",
+    "title": "Prompted For tea which sweetener would be best",
+    "time": "2026-03-14T19:50:59.998Z",
+    "products": [
+      "Gemini Apps"
+    ],
+    "activityControls": [
+      "Gemini Apps Activity"
+    ],
+    "safeHtmlItem": [
+      {
+        "html": "<p>The &quot;best&quot; sweetener for tea often depends on whether you&#39;re drinking black or green tea.</p><ul><li><strong>Splenda:</strong> Heat-stable and works well in hot tea.</li><li><strong>Honey:</strong> Adds floral complexity.</li></ul><p>Would you like a recommendation for a specific brand?</p>"
+      }
+    ],
+    "attachedFiles": [
+      {
+        "name": "tea.txt"
+      }
+    ]
+  }
+]
