@@ -1,7 +1,7 @@
 id: "14"
 title: Add GET /context-packs/conversation-resume endpoint
 assignee: david
-status: todo
+status: cancelled
 type: feature
 priority: high
 planned_order: 13
@@ -9,11 +9,10 @@ milestone: M1.first_vertical_slice
 labels: [api, context-pack, retrieval]
 depends_on: ["07", "12", "13"]
 description: |
-  Add the first context-pack retrieval use case so one enriched conversation
-  artifact can be returned as a compact, machine-readable
-  `conversation_resume` pack with supporting evidence and provenance. The
-  primary external transport is MCP, but the same application-level retrieval
-  should remain available through a secured API surface as well.
+  Historical slice-one task for the first context-pack retrieval use case.
+  This work is now superseded by the MVP retrieval milestone, which replaces
+  the `conversation_resume` naming and treats context-pack assembly as a
+  first-class application service shared by HTTP and MCP transports.
 acceptance_criteria:
   - The application exposes one `conversation_resume` retrieval use case that
     is transport-agnostic.
@@ -38,6 +37,5 @@ test_plan: |
 risks: |
   - If this endpoint grows into a transcript browser, it will lose the compact working-memory shape the slice is meant to prove.
 notes: |
-  - This is the main retrieval deliverable for slice one.
-  - MCP is the primary external interface, but the underlying use case should
-    also support a secured API surface cleanly.
+  - Superseded by M2 tasks `03` and `06`.
+  - The old `conversation_resume` name should not be used for new code.

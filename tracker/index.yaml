@@ -7,6 +7,7 @@ enums:
     - in_progress
     - blocked
     - done
+    - cancelled
   type:
     - feature
     - bug
@@ -18,4 +19,8 @@ enums:
     - high
 milestones:
   - name: M1.first_vertical_slice
+    status: closed
     description: Prove the first end-to-end OpenArchive slice from ChatGPT export ingestion through persisted canonical archive data and queued enrichment work
+  - name: M2.mvp_retrieval_and_mcp
+    status: active
+    description: Build the first real MVP retrieval surface around search, artifact detail, context-pack assembly, and MCP transport over application-layer use cases

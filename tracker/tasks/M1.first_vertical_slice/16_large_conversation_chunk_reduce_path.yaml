@@ -1,7 +1,7 @@
 id: "16"
 title: Add large-conversation chunk-and-reduce enrichment path
 assignee: david
-status: todo
+status: cancelled
 type: feature
 priority: medium
 planned_order: 15
@@ -9,10 +9,10 @@ milestone: M1.first_vertical_slice
 labels: [enrichment, chunking, large-context]
 depends_on: ["12"]
 description: |
-  Implement the slice-one large-conversation path so enrichment can fall back
-  from direct conversation-level processing to ordered message-window
-  chunk-and-reduce execution when the conversation exceeds the configured token
-  budget.
+  Historical slice-one stretch task for large-conversation chunk-and-reduce
+  enrichment. This is not on the immediate MVP critical path and is being
+  closed out of the slice-one milestone rather than left as implied remaining
+  scope.
 acceptance_criteria:
   - The enrichment pipeline can choose between direct conversation-level execution and chunk-and-reduce execution using an explicit token or size policy.
   - Large conversations can produce window-level outputs that reduce into conversation-level summary and memory outputs.
@@ -31,4 +31,5 @@ test_plan: |
 risks: |
   - If large-conversation handling is deferred implicitly, slice one will only be valid for toy transcripts even though the plan calls out this requirement.
 notes: |
-  - If milestone scope changes and this is deferred, the slice plan should be narrowed explicitly rather than leaving the requirement implied.
+  - Closed as deferred after the MVP pivot.
+  - Re-open under a later milestone if large-artifact handling becomes a near-term product blocker.

@@ -1,0 +1,33 @@
+id: "02"
+title: Split retrieval read models from the import write path
+assignee: david
+status: todo
+type: feature
+priority: high
+planned_order: 2
+milestone: M2.mvp_retrieval_and_mcp
+labels: [storage, retrieval, architecture, postgres]
+depends_on: ["01"]
+description: |
+  Introduce dedicated retrieval-oriented read traits for search, artifact
+  detail, and context-pack assembly so MVP retrieval can evolve without being
+  coupled to the import write store.
+acceptance_criteria:
+  - Search, artifact detail, and context-pack assembly depend on retrieval-specific storage traits rather than `PostgresImportWriteStore`.
+  - The application layer no longer treats import writes and retrieval reads as one store concern.
+  - Postgres is the required implementation target for the new retrieval read traits.
+  - Oracle parity is not required for initial MVP retrieval work.
+files_touched:
+  - src/app/
+  - src/bootstrap.rs
+  - src/storage/
+implementation_plan: |
+  - Add narrow read traits for each retrieval use case.
+  - Keep the existing write path stable while introducing Postgres retrieval read models in parallel.
+  - Only extract shared helpers if the read traits genuinely overlap.
+test_plan: |
+  - Add focused storage and application tests covering the new Postgres read paths.
+risks: |
+  - If retrieval keeps growing inside the import store, MVP query work will get slower and harder to reason about with each feature.
+notes: |
+  - This is the enabling refactor for the rest of the MVP retrieval milestone.

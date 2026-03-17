@@ -1,7 +1,7 @@
 id: "13"
 title: Finalize enrichment status and partial-failure semantics
 assignee: david
-status: todo
+status: done
 type: feature
 priority: high
 planned_order: 12
@@ -31,3 +31,4 @@ risks: |
   - If partial success semantics stay implicit, operators and later retrieval code will not know whether metadata is trustworthy enough to use.
 notes: |
   - This task turns enrichment status from a placeholder into a real contract.
+  - Completed in the current artifact/job finalization logic and status coverage.

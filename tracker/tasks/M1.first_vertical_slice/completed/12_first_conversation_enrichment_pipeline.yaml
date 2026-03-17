@@ -1,7 +1,7 @@
 id: "12"
 title: Implement first conversation enrichment pipeline
 assignee: david
-status: todo
+status: done
 type: feature
 priority: high
 planned_order: 11
@@ -33,3 +33,4 @@ risks: |
   - Ungrounded summary or memory output would undermine the core trust model of the archive.
 notes: |
   - Slice one needs only one concrete path here; provider selection and multi-backend inference remain out of scope.
+  - Completed in the current staged enrichment pipeline and derived-object persistence flow.

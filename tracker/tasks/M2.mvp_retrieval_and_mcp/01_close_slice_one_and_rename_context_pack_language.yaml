@@ -1,0 +1,30 @@
+id: "01"
+title: Close slice-one planning frame and standardize MVP retrieval naming
+assignee: david
+status: todo
+type: chore
+priority: medium
+planned_order: 1
+milestone: M2.mvp_retrieval_and_mcp
+labels: [docs, planning, naming]
+depends_on: []
+description: |
+  Update the remaining slice-one planning/docs language so the repo speaks in
+  terms of MVP retrieval and artifact context packs instead of the historical
+  `conversation_resume` framing.
+acceptance_criteria:
+  - The tracker clearly marks M1 as closed and M2 as the active milestone.
+  - Docs that describe the next product work use `artifact_context_pack` or an explicitly chosen replacement name instead of introducing new `conversation_resume` code-facing language.
+  - Historical references remain identifiable as historical rather than current design guidance.
+files_touched:
+  - docs/
+  - tracker/
+implementation_plan: |
+  - Update retrieval and planning docs first, before new traits and tool names are added in code.
+  - Preserve historical references where needed, but mark them explicitly as legacy naming.
+test_plan: |
+  - Manual doc review for naming consistency across the core retrieval docs.
+risks: |
+  - Leaving the legacy name half-alive will leak avoidable rename churn into traits, structs, and MCP tool contracts.
+notes: |
+  - This is intentionally small, but it should happen before the new retrieval code hardens around names.

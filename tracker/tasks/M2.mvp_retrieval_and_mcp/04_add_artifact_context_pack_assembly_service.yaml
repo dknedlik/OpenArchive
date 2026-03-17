@@ -1,0 +1,35 @@
+id: "04"
+title: Add artifact context-pack assembly as an application-layer service
+assignee: david
+status: todo
+type: feature
+priority: high
+planned_order: 4
+milestone: M2.mvp_retrieval_and_mcp
+labels: [app, context-pack, retrieval, provenance]
+depends_on: ["02"]
+description: |
+  Implement artifact-context retrieval in `src/app/` as a transport-agnostic
+  assembly service that returns compact, machine-usable context from persisted
+  archive and derived metadata.
+acceptance_criteria:
+  - The app layer exposes one artifact-context-pack retrieval use case with explicit request and response types.
+  - The response is assembled from persisted artifact, segment, derived-object, and evidence-link rows.
+  - The contract includes explicit `not_ready`, `partial`, and `ready` semantics driven by persisted state.
+  - The payload remains compact and machine-first rather than becoming a transcript dump.
+  - Supporting evidence includes segment references and short excerpts.
+files_touched:
+  - src/app/
+  - src/storage/
+  - tests/
+implementation_plan: |
+  - Define the MVP pack contract and readiness semantics in the app layer first.
+  - Build Postgres read queries for summaries, memories, classifications, relationships, and evidence excerpts.
+  - Keep selection and omission reasons visible in the returned pack provenance.
+test_plan: |
+  - Add tests for `not_ready`, `partial`, and `ready` packs.
+  - Verify evidence-backed excerpts and provenance-bearing identifiers are present.
+risks: |
+  - If this service drifts into a generic artifact dump, it will fail as a working-memory primitive for MCP clients and agents.
+notes: |
+  - This replaces the older slice-one `conversation_resume` framing.

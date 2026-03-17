@@ -1,0 +1,31 @@
+id: "05"
+title: Add artifact detail retrieval use case
+assignee: david
+status: todo
+type: feature
+priority: medium
+planned_order: 5
+milestone: M2.mvp_retrieval_and_mcp
+labels: [app, retrieval, detail, mcp]
+depends_on: ["02"]
+description: |
+  Add a stable artifact detail read use case so search results and context-pack
+  flows can link into a consistent detail view over one artifact and its
+  selected derived data.
+acceptance_criteria:
+  - The application layer exposes an artifact detail use case with an explicit response contract.
+  - The response can return artifact metadata, ordered segments, and relevant active derived objects without requiring clients to compose multiple store calls.
+  - Search results and context-pack responses can reference this use case through stable artifact identifiers.
+files_touched:
+  - src/app/
+  - src/storage/
+  - tests/
+implementation_plan: |
+  - Keep the detail contract narrow and retrieval-oriented.
+  - Avoid making this a full raw-payload browser; include enough structured context for follow-up calls and debugging.
+test_plan: |
+  - Add tests for enriched and not-yet-enriched artifacts.
+risks: |
+  - Without a detail read path, both search and context-pack use cases will end up growing ad hoc “just one more query” behavior.
+notes: |
+  - This is a supporting retrieval primitive, not the primary product surface.

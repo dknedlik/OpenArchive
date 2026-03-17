@@ -1,0 +1,34 @@
+id: "03"
+title: Add archive search as an application-layer use case service
+assignee: david
+status: todo
+type: feature
+priority: high
+planned_order: 3
+milestone: M2.mvp_retrieval_and_mcp
+labels: [app, search, retrieval, mcp]
+depends_on: ["02"]
+description: |
+  Implement archive search in `src/app/` as a transport-agnostic use case that
+  can be reused by HTTP, local MCP, and remote MCP.
+acceptance_criteria:
+  - The app layer exposes a search use case with explicit request and response types.
+  - Search results return ranked hits, not just artifact identifiers.
+  - Each hit includes match kind, snippet, score, and stable identifiers for the matched object or segment where applicable.
+  - The response contract distinguishes title matches, derived-object matches, and segment-excerpt matches.
+  - The response shape is usable directly by MCP tools and HTTP without transport-specific enrichment.
+files_touched:
+  - src/app/
+  - src/storage/
+  - tests/
+implementation_plan: |
+  - Define the app-layer search contract first.
+  - Back it with Postgres retrieval queries over artifact titles, derived objects, and segment excerpts.
+  - Keep ranking logic inside the search use case until a second consumer or ranking strategy appears.
+test_plan: |
+  - Add tests for each match kind and mixed-result ranking behavior.
+  - Verify snippets and matched identifiers are present from day one.
+risks: |
+  - If search returns only artifact IDs, every downstream consumer will need an extra read path just to understand what matched.
+notes: |
+  - Use the result shape to carry semantic match density, not just raw retrieval proximity.

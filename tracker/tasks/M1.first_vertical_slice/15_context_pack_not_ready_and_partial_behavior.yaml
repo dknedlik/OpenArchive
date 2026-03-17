@@ -1,7 +1,7 @@
 id: "15"
 title: Add not-ready and partial-enrichment context-pack behavior
 assignee: david
-status: todo
+status: cancelled
 type: feature
 priority: medium
 planned_order: 14
@@ -9,10 +9,10 @@ milestone: M1.first_vertical_slice
 labels: [api, context-pack, status]
 depends_on: ["13", "14"]
 description: |
-  Make `conversation_resume` retrieval handle not-ready and partial enrichment
-  states explicitly so clients can distinguish "nothing available yet" from
-  "best available pack with gaps." The same semantics should hold across MCP
-  and any secured API surface.
+  Historical slice-one task for context-pack readiness semantics. This work is
+  now folded into the MVP context-pack use case, where not-ready and partial
+  behavior should be defined once in the application layer and reused by HTTP
+  and MCP transports.
 acceptance_criteria:
   - The retrieval contract returns a documented not-ready response when minimum required enrichment has not completed yet.
   - Partial enrichment can return the best available pack only when the minimum required output set exists.
@@ -34,6 +34,5 @@ test_plan: |
 risks: |
   - Without explicit semantics here, clients will treat absent metadata as complete metadata and produce misleading downstream behavior.
 notes: |
-  - This task is about response semantics, not new enrichment logic.
-  - The semantics should be defined once and then exposed consistently through
-    MCP and any secured API surface.
+  - Superseded by M2 task `04`.
+  - Keep the readiness semantics in the app layer, not transport adapters.

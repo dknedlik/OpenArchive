@@ -1,0 +1,35 @@
+id: "07"
+title: Add end-to-end MVP retrieval validation
+assignee: david
+status: todo
+type: test
+priority: high
+planned_order: 7
+milestone: M2.mvp_retrieval_and_mcp
+labels: [testing, e2e, retrieval, mcp]
+depends_on: ["03", "04", "05", "06"]
+description: |
+  Add a milestone-close validation flow that proves the practical MVP path
+  from import through enrichment to search, artifact detail, and context-pack
+  retrieval through the chosen transport surface.
+acceptance_criteria:
+  - One repeatable validation path covers import, worker execution, retrieval read models, and the MVP transport surface.
+  - Validation exercises search, artifact detail, and context-pack retrieval against persisted data.
+  - The flow verifies readiness semantics and evidence-bearing results rather than only status codes.
+  - The MVP validation path is anchored on the Postgres default deployment shape.
+files_touched:
+  - tests/
+  - scripts/
+  - docs/
+implementation_plan: |
+  - Build one deterministic MVP validation flow around the default Postgres path.
+  - Reuse existing import and enrichment fixtures where possible.
+  - Keep the validation narrow enough to run regularly, but broad enough to prove the product surface works end to end.
+test_plan: |
+  - Exercise at least one ready artifact and one not-ready or partial case.
+  - Verify search hits carry match kind and snippet data.
+  - Verify context-pack responses include evidence-backed excerpts and readiness metadata.
+risks: |
+  - Without one end-to-end MVP proof, retrieval can look complete while still only working in isolated seams.
+notes: |
+  - This replaces the older slice-one “final validation” framing.

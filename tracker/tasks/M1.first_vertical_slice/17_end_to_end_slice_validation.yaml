@@ -1,7 +1,7 @@
 id: "17"
 title: Add end-to-end first-slice validation
 assignee: david
-status: todo
+status: cancelled
 type: test
 priority: high
 planned_order: 16
@@ -9,9 +9,10 @@ milestone: M1.first_vertical_slice
 labels: [testing, e2e, slice-validation]
 depends_on: ["08", "09", "12", "13", "14", "15"]
 description: |
-  Add the final slice-one validation coverage that proves the full path from
-  ChatGPT import through durable enrichment and `conversation_resume`
-  retrieval against the current local provider-backed setup.
+  Historical slice-one milestone-close validation task. The slice-one plan is
+  now closed and the remaining validation work should be recast around the MVP
+  retrieval and MCP surfaces rather than the old `conversation_resume`
+  contract.
 acceptance_criteria:
   - One end-to-end test or equivalent validation flow covers import, durable job creation, worker execution, derived metadata persistence, and context-pack retrieval.
   - The validation proves provenance-bearing outputs rather than only happy-path HTTP status codes.
@@ -31,4 +32,5 @@ test_plan: |
 risks: |
   - Without a true end-to-end proof, slice one may appear complete while key seams only work in isolation.
 notes: |
-  - This task is the milestone-close validation, not a replacement for narrower unit/integration tests.
+  - Superseded by M2 task `07`.
+  - Keep narrower import/enrichment coverage where it already exists.

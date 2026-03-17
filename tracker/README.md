@@ -15,7 +15,7 @@ Structure
 
 Conventions
 - `id`: zero-padded string matching the filename prefix.
-- `status`: one of `todo`, `in_progress`, `blocked`, `done`
+- `status`: one of `todo`, `in_progress`, `blocked`, `done`, `cancelled`
 - `type`: one of `feature`, `bug`, `chore`, `test`
 - `priority`: one of `low`, `medium`, `high`
 - `files_touched`: repo-relative paths
@@ -33,6 +33,8 @@ Completed workflow
 - Each milestone directory contains a `completed/` subfolder.
 - When a task is done, move it into `completed/` and keep the filename unchanged.
 - Re-opened tasks move back out of `completed/` with an updated `status`.
+- Cancelled or superseded tasks should stay in the milestone folder with
+  `status: cancelled` and a note pointing at the replacement work.
 
 Notes
 - This tracker is intentionally file-based and lightweight.

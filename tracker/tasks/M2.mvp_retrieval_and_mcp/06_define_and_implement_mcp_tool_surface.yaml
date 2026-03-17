@@ -1,0 +1,33 @@
+id: "06"
+title: Define and implement the MVP MCP tool surface
+assignee: david
+status: todo
+type: feature
+priority: high
+planned_order: 6
+milestone: M2.mvp_retrieval_and_mcp
+labels: [mcp, transport, tools, api]
+depends_on: ["03", "04", "05"]
+description: |
+  Define the first useful MCP tool contracts and implement the local MCP
+  transport adapter over the application-layer retrieval services.
+acceptance_criteria:
+  - The first MCP tool set is explicitly defined before transport implementation grows.
+  - The initial tool surface includes `search_archive`, `get_artifact`, and `get_context_pack` or the final chosen equivalents.
+  - The MCP adapter delegates to app-layer use cases without re-implementing retrieval logic.
+  - Tool inputs and outputs stay compact, machine-oriented, and stable enough for local and remote MCP reuse.
+files_touched:
+  - src/
+  - docs/
+  - tests/
+implementation_plan: |
+  - Define the tool contracts first.
+  - Implement the local MCP server as a transport adapter over the app services.
+  - Keep room for a remote MCP transport without coupling the core to MCP protocol details.
+test_plan: |
+  - Add transport-level tests covering each MVP MCP tool.
+  - Verify the adapter preserves app-layer readiness and error semantics.
+risks: |
+  - If MCP contracts are improvised after the app layer is built, the product surface will reflect internal convenience instead of real caller needs.
+notes: |
+  - Design the tool names and payloads before adding more HTTP endpoints.
