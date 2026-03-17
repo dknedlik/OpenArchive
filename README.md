@@ -6,6 +6,12 @@ markdown, and other source material — enriches them with structured metadata �
 and makes everything searchable and retrievable through a machine-first
 interface.
 
+OpenArchive doesn't just index your source material for search. It reads it,
+extracts what matters — key decisions, preferences, relationships between
+people and ideas, things worth remembering — and links every derived insight
+back to the exact source passage it came from. The archive builds structured
+knowledge over time, not just a pile of searchable text.
+
 ## What It Does
 
 **Import** — bring in AI chat exports, documents, markdown files, notes, or
