@@ -2,8 +2,9 @@
 
 ## Status
 
-This document captures the current product hypothesis, not a settled product
-definition.
+The architecture proof phase is complete. This document now describes the
+product direction for turning OpenArchive into something people can actually
+use, not just a concept validation exercise.
 
 ## Working Thesis
 
@@ -23,15 +24,16 @@ When a user has important AI conversations and related artifacts spread across
 multiple tools, they need one place to ingest, preserve, enrich, query, and
 reuse those artifacts across future tools and agents.
 
-## Candidate Scope
+## Product Direction
 
-OpenArchive may eventually:
+OpenArchive should:
 
 - ingest chat exports or captured transcripts from multiple AI tools
 - normalize them into a canonical internal model
 - retain raw source fidelity for audit and reprocessing
 - extract structured metadata and reusable memories
-- provide machine-oriented retrieval through MCP-first interfaces
+- provide machine-oriented retrieval, search, and context packs through
+  MCP-first interfaces
 - support both local and remote deployment shapes
 
 OpenArchive probably should not initially:
@@ -58,10 +60,10 @@ OpenArchive probably should not initially:
 - contributors who want an open source memory/archive system that runs with
   modest local setup
 
-## Near-Term Outcomes To Validate
+## Near-Term Product Outcomes
 
-- import a ChatGPT export into canonical storage
-- preserve raw payloads outside the relational database
-- query archived artifacts through a local MCP server
-- run enrichment asynchronously with a database-backed job queue
+- search the archive without dumping every artifact to the client
+- return compact, useful context packs for downstream agents
+- make local MCP the practical way to use the archive day to day
+- broaden import coverage beyond the initial ChatGPT-export path
 - support optional local inference for users who want GPU-backed enrichment

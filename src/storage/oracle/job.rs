@@ -3,7 +3,8 @@ use oracle::Connection;
 use oracle::ErrorKind;
 
 use crate::storage::types::{
-    ClaimedJob, EnrichmentTier, JobStatus, JobType, NewEnrichmentJob, RetryOutcome,
+    ClaimedJob, EnrichmentStatus, EnrichmentTier, JobStatus, JobType, NewEnrichmentJob,
+    RetryOutcome,
 };
 
 // ---------------------------------------------------------------------------
@@ -131,6 +132,7 @@ pub fn claim_next_job(conn: &Connection, worker_id: &str) -> StorageResult<Optio
         source,
     })?;
 
+    recompute_artifact_enrichment_status(conn, &artifact_id)?;
     conn.commit().map_err(|source| StorageError::Commit {
         operation: "claim enrichment job",
         source,
@@ -244,6 +246,7 @@ pub fn claim_matching_jobs(
             source,
         })?;
 
+        recompute_artifact_enrichment_status(conn, &artifact_id)?;
         claimed.push(ClaimedJob {
             job_id,
             artifact_id,
@@ -368,6 +371,7 @@ pub fn claim_jobs_by_type(
             source,
         })?;
 
+        recompute_artifact_enrichment_status(conn, &artifact_id)?;
         claimed.push(ClaimedJob {
             job_id,
             artifact_id,
@@ -392,6 +396,16 @@ pub fn claim_jobs_by_type(
 /// Mark a running job as successfully completed.
 pub fn complete_job(conn: &Connection, worker_id: &str, job_id: &str) -> StorageResult<()> {
     lock_owned_running_job(conn, worker_id, job_id)?;
+    let artifact_id: String = conn
+        .query_row_as::<(String,)>(
+            "SELECT artifact_id FROM oa_enrichment_job WHERE job_id = :1",
+            &[&job_id],
+        )
+        .map_err(|source| StorageError::UpdateJobStatus {
+            job_id: job_id.to_string(),
+            source,
+        })?
+        .0;
 
     let completed = JobStatus::Completed.as_str();
     conn.execute(
@@ -408,6 +422,7 @@ pub fn complete_job(conn: &Connection, worker_id: &str, job_id: &str) -> Storage
         source,
     })?;
 
+    recompute_artifact_enrichment_status(conn, &artifact_id)?;
     conn.commit().map_err(|source| StorageError::Commit {
         operation: "complete enrichment job",
         source,
@@ -424,6 +439,16 @@ pub fn fail_job(
     error_message: &str,
 ) -> StorageResult<()> {
     lock_owned_running_job(conn, worker_id, job_id)?;
+    let artifact_id: String = conn
+        .query_row_as::<(String,)>(
+            "SELECT artifact_id FROM oa_enrichment_job WHERE job_id = :1",
+            &[&job_id],
+        )
+        .map_err(|source| StorageError::UpdateJobStatus {
+            job_id: job_id.to_string(),
+            source,
+        })?
+        .0;
 
     let failed = JobStatus::Failed.as_str();
     conn.execute(
@@ -440,6 +465,7 @@ pub fn fail_job(
         source,
     })?;
 
+    recompute_artifact_enrichment_status(conn, &artifact_id)?;
     conn.commit().map_err(|source| StorageError::Commit {
         operation: "fail enrichment job",
         source,
@@ -471,6 +497,16 @@ pub fn mark_job_retryable(
             job_id: job_id.to_string(),
             source,
         })?;
+    let artifact_id: String = conn
+        .query_row_as::<(String,)>(
+            "SELECT artifact_id FROM oa_enrichment_job WHERE job_id = :1",
+            &[&job_id],
+        )
+        .map_err(|source| StorageError::UpdateJobStatus {
+            job_id: job_id.to_string(),
+            source,
+        })?
+        .0;
 
     if attempt_count >= max_attempts {
         // Exhausted: terminal failure.
@@ -489,6 +525,7 @@ pub fn mark_job_retryable(
             source,
         })?;
 
+        recompute_artifact_enrichment_status(conn, &artifact_id)?;
         conn.commit().map_err(|source| StorageError::Commit {
             operation: "fail exhausted enrichment job",
             source,
@@ -520,6 +557,7 @@ pub fn mark_job_retryable(
         source,
     })?;
 
+    recompute_artifact_enrichment_status(conn, &artifact_id)?;
     conn.commit().map_err(|source| StorageError::Commit {
         operation: "mark enrichment job retryable",
         source,
@@ -547,4 +585,107 @@ fn lock_owned_running_job(conn: &Connection, worker_id: &str, job_id: &str) -> S
             source,
         }),
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ArtifactEnrichmentSnapshot {
+    pending_jobs: i64,
+    running_jobs: i64,
+    retryable_jobs: i64,
+    completed_jobs: i64,
+    failed_jobs: i64,
+    extraction_results: i64,
+    retrieval_result_sets: i64,
+    reconciliation_decisions: i64,
+    completed_derivation_runs: i64,
+}
+
+fn recompute_artifact_enrichment_status(conn: &Connection, artifact_id: &str) -> StorageResult<()> {
+    let snapshot = load_artifact_enrichment_snapshot(conn, artifact_id)?;
+    let next_status = derive_artifact_enrichment_status(snapshot);
+    conn.execute(
+        "UPDATE oa_artifact SET enrichment_status = :1 WHERE artifact_id = :2",
+        &[&next_status.as_str(), &artifact_id],
+    )
+    .map_err(|source| StorageError::ListArtifacts { source })?;
+    Ok(())
+}
+
+fn load_artifact_enrichment_snapshot(
+    conn: &Connection,
+    artifact_id: &str,
+) -> StorageResult<ArtifactEnrichmentSnapshot> {
+    let row = conn
+        .query_row_as::<(i64, i64, i64, i64, i64, i64, i64, i64, i64)>(
+            "SELECT
+                (SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = :1 AND job_status = 'pending'),
+                (SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = :1 AND job_status = 'running'),
+                (SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = :1 AND job_status = 'retryable'),
+                (SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = :1 AND job_status = 'completed'),
+                (SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = :1 AND job_status = 'failed'),
+                (SELECT COUNT(*) FROM oa_artifact_extraction_result WHERE artifact_id = :1),
+                (SELECT COUNT(*) FROM oa_retrieval_result_set WHERE artifact_id = :1),
+                (SELECT COUNT(*) FROM oa_reconciliation_decision WHERE artifact_id = :1),
+                (SELECT COUNT(*) FROM oa_derivation_run WHERE artifact_id = :1 AND run_status = 'completed')
+             FROM dual",
+            &[&artifact_id],
+        )
+        .map_err(|source| StorageError::ListArtifacts { source })?;
+    Ok(ArtifactEnrichmentSnapshot {
+        pending_jobs: row.0,
+        running_jobs: row.1,
+        retryable_jobs: row.2,
+        completed_jobs: row.3,
+        failed_jobs: row.4,
+        extraction_results: row.5,
+        retrieval_result_sets: row.6,
+        reconciliation_decisions: row.7,
+        completed_derivation_runs: row.8,
+    })
+}
+
+fn derive_artifact_enrichment_status(snapshot: ArtifactEnrichmentSnapshot) -> EnrichmentStatus {
+    let has_running = snapshot.running_jobs > 0 || snapshot.retryable_jobs > 0;
+    let has_pending = snapshot.pending_jobs > 0;
+    let has_failed = snapshot.failed_jobs > 0;
+    let has_completed_jobs = snapshot.completed_jobs > 0;
+    let has_durable_outputs = snapshot.extraction_results > 0
+        || snapshot.retrieval_result_sets > 0
+        || snapshot.reconciliation_decisions > 0
+        || snapshot.completed_derivation_runs > 0;
+    let is_fully_derived = snapshot.completed_derivation_runs > 0;
+
+    if is_fully_derived && !has_running && !has_pending && !has_failed {
+        return EnrichmentStatus::Completed;
+    }
+    if has_running {
+        return if has_durable_outputs {
+            EnrichmentStatus::Partial
+        } else {
+            EnrichmentStatus::Running
+        };
+    }
+    if has_pending {
+        return if has_durable_outputs {
+            EnrichmentStatus::Partial
+        } else if has_completed_jobs {
+            EnrichmentStatus::Running
+        } else {
+            EnrichmentStatus::Pending
+        };
+    }
+    if has_failed {
+        return if has_durable_outputs {
+            EnrichmentStatus::Partial
+        } else {
+            EnrichmentStatus::Failed
+        };
+    }
+    if has_durable_outputs {
+        return EnrichmentStatus::Partial;
+    }
+    if has_completed_jobs {
+        return EnrichmentStatus::Running;
+    }
+    EnrichmentStatus::Pending
 }

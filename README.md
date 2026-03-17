@@ -38,22 +38,24 @@ agents.
 
 ## Status
 
-OpenArchive is pre-alpha and still building slice one.
+OpenArchive is pre-alpha, but the initial architecture-proof phase is done.
 
 What exists today:
 
 - a Rust codebase with the first import, storage, and enrichment boundaries
 - ChatGPT-export-oriented parsing and canonical archive work
+- durable multistage enrichment with direct and batch inference modes
+- provider support for Gemini, OpenAI, Anthropic, and Grok
 - slice-one brain-layer docs and schema planning
 - the old Oracle-first implementation path, now being replaced
 
 What is being built now:
 
-- provider-based service assembly
-- Postgres as the default relational backend
-- local filesystem-backed object storage
-- local MCP as the primary transport
-- a one-command local developer stack
+- useful retrieval and search over the enriched archive
+- local MCP as the primary machine-facing product surface
+- richer source imports beyond the initial ChatGPT export path
+- context-pack assembly for downstream agents and tools
+- product-oriented local and remote deployment flows
 
 ## Running Locally
 
@@ -120,15 +122,14 @@ relevant traits, wire config parsing, update the factory, and move on.
 
 ## Open Problems
 
-The most interesting open problems are architectural, not cosmetic:
+The most interesting open problems are now product and retrieval oriented:
 
-- Postgres-backed repository implementations
-- object-store abstraction with local filesystem and S3-compatible providers
-- provider/factory assembly from config
+- useful archive query and ranking over derived memory/summary data
 - local MCP server over the application use cases
-- ChatGPT export ingestion hardening
-- durable enrichment worker behavior and job leasing
-- optional Ollama-backed inference provider
+- context-pack assembly that is genuinely helpful to agents
+- richer imports across more AI tools and artifact types
+- optional Ollama-backed local inference provider
+- remote deployment and first-run setup flows that are not repo-first
 
 If you like Rust, AI systems, storage boundaries, retrieval, provenance, or
 personal data infrastructure, this is the class of problem the repo is trying

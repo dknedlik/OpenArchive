@@ -2,7 +2,7 @@
 
 This is a sequencing sketch, not a committed delivery plan.
 
-## Phase 0: Reset The Foundation
+## Completed Foundation Work
 
 - rewrite the project around a local-first, open source slice one
 - remove Oracle/OCI assumptions from the mainline path
@@ -10,32 +10,24 @@ This is a sequencing sketch, not a committed delivery plan.
   inference
 - make MCP the primary external interface
 
-Exit criteria:
+Completed outcomes:
 
 - docs and code describe the same architecture
 - the default local path does not require Oracle-specific tooling or accounts
-
-## Phase 1: Local Archive Slice
-
-- provide a `make up` path backed by Docker Compose
-- run Postgres, core services, and optional Ollama locally
-- ingest one concrete source format end to end
-- persist canonical rows plus copied raw payloads
-- expose artifact retrieval and context-oriented queries through local MCP
-- run enrichment asynchronously through a database-backed job queue
-
-Exit criteria:
-
 - one real export can be imported end to end
-- imported artifact data can be queried through MCP
-- import is idempotent by source identity or content hash
-- the local stack is usable with modest setup
+- raw payloads are copied into managed object storage
+- canonical records and enrichment jobs are durable
+- asynchronous enrichment is real, provider-backed, and restart-tolerant
 
-## Phase 2: Stronger Retrieval And Search
+## Current Product Priorities
+
+### Retrieval And Search
 
 - add metadata-aware retrieval and full-text search
-- improve context-pack generation
+- assemble compact artifact-context packs for downstream agents
 - add richer query flows for machine consumers
+- make the MCP surface genuinely useful as a daily machine-facing archive
+  interface
 
 Exit criteria:
 
@@ -43,22 +35,19 @@ Exit criteria:
   material
 - the MCP surface is useful as a daily machine-facing archive interface
 
-## Phase 3: Better Enrichment
+### Broader Imports And Better Brain Quality
 
 - support local inference through Ollama as a first-class provider
 - improve stored summaries, classifications, and memories
 - allow enrichment workers to run outside the main local stack when needed
-- add native hosted providers in a deliberate sequence:
-  Gemini first, then OpenAI, then Anthropic, then Grok
-- treat OpenAI-compatible endpoints as a follow-on mode built on the OpenAI
-  provider shape rather than the primary inference abstraction
+- expand import coverage across more AI tools and artifact types
 
 Exit criteria:
 
 - a user with local inference capacity can run meaningful enrichment locally
 - enrichment remains durable even when workers are restarted or moved
 
-## Phase 4: Remote Deployment Shapes
+### Deployment And Productization
 
 - add S3-compatible object storage
 - support remote MCP deployment for personal cloud-hosted use

@@ -1,7 +1,7 @@
 use crate::error::StorageResult;
 use crate::storage::types::{
-    ClaimedJob, EnrichmentTier, JobStatus, JobType, NewEnrichmentBatch, NewEnrichmentJob,
-    PersistedEnrichmentBatch, RetryOutcome,
+    ClaimedJob, EnrichmentStatus, EnrichmentTier, JobStatus, JobType, NewEnrichmentBatch,
+    NewEnrichmentJob, PersistedEnrichmentBatch, RetryOutcome,
 };
 
 pub fn insert_job(client: &mut postgres::Client, j: &NewEnrichmentJob) -> StorageResult<()> {
@@ -99,6 +99,7 @@ pub fn claim_next_job(
         )
         .map_err(map_pg_storage_err)?;
 
+    recompute_artifact_enrichment_status(client, &artifact_id)?;
     client.batch_execute("COMMIT").map_err(map_pg_storage_err)?;
 
     Ok(Some(ClaimedJob {
@@ -195,6 +196,7 @@ pub fn claim_matching_jobs(
             )
             .map_err(map_pg_storage_err)?;
 
+        recompute_artifact_enrichment_status(client, &artifact_id)?;
         claimed.push(ClaimedJob {
             job_id,
             artifact_id,
@@ -304,6 +306,7 @@ pub fn claim_jobs_by_type(
             )
             .map_err(map_pg_storage_err)?;
 
+        recompute_artifact_enrichment_status(client, &artifact_id)?;
         claimed.push(ClaimedJob {
             job_id,
             artifact_id,
@@ -363,7 +366,7 @@ pub fn mark_job_retryable(
 
     let row = client
         .query_opt(
-            "SELECT attempt_count, max_attempts \
+            "SELECT artifact_id, attempt_count, max_attempts \
              FROM oa_enrichment_job \
              WHERE job_id = $1 AND job_status = 'running' AND claimed_by = $2 \
              FOR UPDATE",
@@ -380,8 +383,9 @@ pub fn mark_job_retryable(
         });
     };
 
-    let attempt_count: i32 = row.get(0);
-    let max_attempts: i32 = row.get(1);
+    let artifact_id: String = row.get(0);
+    let attempt_count: i32 = row.get(1);
+    let max_attempts: i32 = row.get(2);
 
     if attempt_count >= max_attempts {
         client
@@ -401,6 +405,7 @@ pub fn mark_job_retryable(
             )
             .map_err(map_pg_storage_err)?;
 
+        recompute_artifact_enrichment_status(client, &artifact_id)?;
         client.batch_execute("COMMIT").map_err(map_pg_storage_err)?;
         return Ok(RetryOutcome::RetriesExhausted);
     }
@@ -424,6 +429,7 @@ pub fn mark_job_retryable(
         )
         .map_err(map_pg_storage_err)?;
 
+    recompute_artifact_enrichment_status(client, &artifact_id)?;
     client.batch_execute("COMMIT").map_err(map_pg_storage_err)?;
     Ok(RetryOutcome::Retried)
 }
@@ -699,19 +705,20 @@ fn update_terminal_job(
     _operation: &'static str,
 ) -> StorageResult<()> {
     client.batch_execute("BEGIN").map_err(map_pg_storage_err)?;
-    let rows_updated = client
-        .execute(
+    let row = client
+        .query_opt(
             "UPDATE oa_enrichment_job \
              SET job_status = $1, \
                  completed_at = CASE WHEN $1 = 'completed' THEN NOW() ELSE completed_at END, \
                  last_error_message = COALESCE($2, last_error_message), \
                  claimed_by = NULL, \
                  claimed_at = NULL \
-             WHERE job_id = $3 AND job_status = 'running' AND claimed_by = $4",
+             WHERE job_id = $3 AND job_status = 'running' AND claimed_by = $4 \
+             RETURNING artifact_id",
             &[&status, &error_message, &job_id, &worker_id],
         )
         .map_err(map_pg_storage_err)?;
-    if rows_updated == 0 {
+    let Some(row) = row else {
         client
             .batch_execute("ROLLBACK")
             .map_err(map_pg_storage_err)?;
@@ -719,9 +726,214 @@ fn update_terminal_job(
             job_id: job_id.to_string(),
             worker_id: worker_id.to_string(),
         });
-    }
+    };
+    let artifact_id: String = row.get(0);
+    recompute_artifact_enrichment_status(client, &artifact_id)?;
     client.batch_execute("COMMIT").map_err(map_pg_storage_err)?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ArtifactEnrichmentSnapshot {
+    pending_jobs: i64,
+    running_jobs: i64,
+    retryable_jobs: i64,
+    completed_jobs: i64,
+    failed_jobs: i64,
+    extraction_results: i64,
+    retrieval_result_sets: i64,
+    reconciliation_decisions: i64,
+    completed_derivation_runs: i64,
+}
+
+fn recompute_artifact_enrichment_status(
+    client: &mut postgres::Client,
+    artifact_id: &str,
+) -> StorageResult<()> {
+    let snapshot = load_artifact_enrichment_snapshot(client, artifact_id)?;
+    let next_status = derive_artifact_enrichment_status(snapshot);
+    client
+        .execute(
+            "UPDATE oa_artifact SET enrichment_status = $1 WHERE artifact_id = $2",
+            &[&next_status.as_str(), &artifact_id],
+        )
+        .map_err(map_pg_storage_err)?;
+    Ok(())
+}
+
+fn load_artifact_enrichment_snapshot(
+    client: &mut postgres::Client,
+    artifact_id: &str,
+) -> StorageResult<ArtifactEnrichmentSnapshot> {
+    let row = client
+        .query_one(
+            "SELECT
+                COALESCE((SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = $1 AND job_status = 'pending'), 0),
+                COALESCE((SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = $1 AND job_status = 'running'), 0),
+                COALESCE((SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = $1 AND job_status = 'retryable'), 0),
+                COALESCE((SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = $1 AND job_status = 'completed'), 0),
+                COALESCE((SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = $1 AND job_status = 'failed'), 0),
+                COALESCE((SELECT COUNT(*) FROM oa_artifact_extraction_result WHERE artifact_id = $1), 0),
+                COALESCE((SELECT COUNT(*) FROM oa_retrieval_result_set WHERE artifact_id = $1), 0),
+                COALESCE((SELECT COUNT(*) FROM oa_reconciliation_decision WHERE artifact_id = $1), 0),
+                COALESCE((SELECT COUNT(*) FROM oa_derivation_run WHERE artifact_id = $1 AND run_status = 'completed'), 0)",
+            &[&artifact_id],
+        )
+        .map_err(map_pg_storage_err)?;
+    Ok(ArtifactEnrichmentSnapshot {
+        pending_jobs: row.get(0),
+        running_jobs: row.get(1),
+        retryable_jobs: row.get(2),
+        completed_jobs: row.get(3),
+        failed_jobs: row.get(4),
+        extraction_results: row.get(5),
+        retrieval_result_sets: row.get(6),
+        reconciliation_decisions: row.get(7),
+        completed_derivation_runs: row.get(8),
+    })
+}
+
+fn derive_artifact_enrichment_status(snapshot: ArtifactEnrichmentSnapshot) -> EnrichmentStatus {
+    let has_running = snapshot.running_jobs > 0 || snapshot.retryable_jobs > 0;
+    let has_pending = snapshot.pending_jobs > 0;
+    let has_failed = snapshot.failed_jobs > 0;
+    let has_completed_jobs = snapshot.completed_jobs > 0;
+    let has_durable_outputs = snapshot.extraction_results > 0
+        || snapshot.retrieval_result_sets > 0
+        || snapshot.reconciliation_decisions > 0
+        || snapshot.completed_derivation_runs > 0;
+    let is_fully_derived = snapshot.completed_derivation_runs > 0;
+
+    if is_fully_derived && !has_running && !has_pending && !has_failed {
+        return EnrichmentStatus::Completed;
+    }
+    if has_running {
+        return if has_durable_outputs {
+            EnrichmentStatus::Partial
+        } else {
+            EnrichmentStatus::Running
+        };
+    }
+    if has_pending {
+        return if has_durable_outputs {
+            EnrichmentStatus::Partial
+        } else if has_completed_jobs {
+            EnrichmentStatus::Running
+        } else {
+            EnrichmentStatus::Pending
+        };
+    }
+    if has_failed {
+        return if has_durable_outputs {
+            EnrichmentStatus::Partial
+        } else {
+            EnrichmentStatus::Failed
+        };
+    }
+    if has_durable_outputs {
+        return EnrichmentStatus::Partial;
+    }
+    if has_completed_jobs {
+        return EnrichmentStatus::Running;
+    }
+    EnrichmentStatus::Pending
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{derive_artifact_enrichment_status, ArtifactEnrichmentSnapshot};
+    use crate::storage::EnrichmentStatus;
+
+    #[test]
+    fn artifact_status_is_pending_before_any_claims() {
+        let snapshot = ArtifactEnrichmentSnapshot {
+            pending_jobs: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            derive_artifact_enrichment_status(snapshot),
+            EnrichmentStatus::Pending
+        );
+    }
+
+    #[test]
+    fn artifact_status_is_running_while_preprocess_is_active_without_outputs() {
+        let snapshot = ArtifactEnrichmentSnapshot {
+            running_jobs: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            derive_artifact_enrichment_status(snapshot),
+            EnrichmentStatus::Running
+        );
+    }
+
+    #[test]
+    fn artifact_status_is_running_when_downstream_is_pending_but_no_outputs_exist() {
+        let snapshot = ArtifactEnrichmentSnapshot {
+            pending_jobs: 1,
+            completed_jobs: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            derive_artifact_enrichment_status(snapshot),
+            EnrichmentStatus::Running
+        );
+    }
+
+    #[test]
+    fn artifact_status_is_partial_when_outputs_exist_and_more_work_is_active() {
+        let snapshot = ArtifactEnrichmentSnapshot {
+            running_jobs: 1,
+            extraction_results: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            derive_artifact_enrichment_status(snapshot),
+            EnrichmentStatus::Partial
+        );
+    }
+
+    #[test]
+    fn artifact_status_is_failed_for_early_terminal_failures_without_outputs() {
+        let snapshot = ArtifactEnrichmentSnapshot {
+            failed_jobs: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            derive_artifact_enrichment_status(snapshot),
+            EnrichmentStatus::Failed
+        );
+    }
+
+    #[test]
+    fn artifact_status_is_partial_for_late_failures_with_persisted_outputs() {
+        let snapshot = ArtifactEnrichmentSnapshot {
+            failed_jobs: 1,
+            extraction_results: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            derive_artifact_enrichment_status(snapshot),
+            EnrichmentStatus::Partial
+        );
+    }
+
+    #[test]
+    fn artifact_status_is_completed_after_successful_derivation() {
+        let snapshot = ArtifactEnrichmentSnapshot {
+            completed_jobs: 4,
+            extraction_results: 1,
+            retrieval_result_sets: 1,
+            reconciliation_decisions: 2,
+            completed_derivation_runs: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            derive_artifact_enrichment_status(snapshot),
+            EnrichmentStatus::Completed
+        );
+    }
 }
 
 fn map_pg_storage_err(source: postgres::Error) -> crate::error::StorageError {

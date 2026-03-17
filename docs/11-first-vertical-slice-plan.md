@@ -1,5 +1,9 @@
 # First Vertical Slice Plan
 
+This document is now historical. The architecture-proof slice it describes is
+substantially complete, and the repo is moving on to broader product
+capabilities.
+
 ## Summary
 
 Build one end-to-end brain slice that ingests a `ChatGPT export`, persists
@@ -7,7 +11,8 @@ canonical records in `Postgres`, stores copied raw payloads in a local
 filesystem-backed object store, enriches the archive asynchronously, and
 returns machine-usable retrieval through a local MCP server.
 
-This slice should prove the core architecture, not the whole product.
+This slice was intended to prove the core architecture, not define the whole
+product.
 
 It should validate:
 
@@ -17,9 +22,10 @@ It should validate:
 - database-backed asynchronous enrichment
 - MCP-first retrieval for machine consumers
 
-## Current Status
+## Final Status
 
-As of the current local-first rewrite, slice one is partially complete.
+As of the current local-first rewrite, the slice-one architecture proof is
+complete enough to retire this planning frame.
 
 What is in place now:
 
@@ -35,20 +41,19 @@ What is in place now:
   Storage
 - idempotent import write path with payload/object references
 - durable database-backed enrichment job queue
-- in-process enrichment worker skeleton
+- real multistage enrichment pipeline with direct and batch execution modes
+- hosted inference providers wired and validated
 - artifact listing and ChatGPT import HTTP paths
 - provider-parity integration coverage for import, job lifecycle, and derived
   metadata persistence
+- artifact-level enrichment-status finalization semantics
 
-What is not done yet:
+What remains useful from this document:
 
 - local MCP server
-- real enrichment processor boundary and first concrete summary /
-  classification / memory pipeline
-- artifact enrichment-status finalization semantics
-- `conversation_resume` context-pack retrieval and not-ready / partial behavior
+- an artifact-context retrieval surface and not-ready / partial behavior
 - large-conversation chunk-and-reduce path
-- final slice end-to-end validation for the full retrieval flow
+- final end-to-end validation for the full retrieval flow
 
 ## Implementation Changes
 
@@ -67,7 +72,9 @@ What is not done yet:
   - `Classification`
   - `Memory`
   - `Summary`
-- Produce exactly one context-pack type: `conversation_resume`
+- Produce exactly one initial context-pack type. The old name
+  `conversation_resume` should be treated as historical slice-one naming, not
+  the shape of the long-term core.
 
 ### Public interfaces
 
@@ -126,17 +133,16 @@ What is not done yet:
 
 ### MCP scope
 
-- Keep slice-one MCP narrow and useful
+- Keep MCP narrow and useful
 - Prioritize:
-  - list artifacts
+  - archive search
   - fetch artifact details
-  - fetch `conversation_resume` context packs
-  - basic search or retrieval if it lands cleanly
+  - fetch artifact-context packs
 - Do not let MCP transport concerns leak into the application core
 
 ## Success Criteria
 
-Current completed success criteria:
+Completed success criteria:
 
 - `make up` brings the local system up with Docker Compose
 - one real ChatGPT export can be ingested end to end
@@ -145,11 +151,13 @@ Current completed success criteria:
 - canonical records and jobs are durable in Postgres
 - Oracle remains viable as a secondary relational provider
 - enrichment can run asynchronously without request-path blocking
+- one real enrichment path persists summary, classification, memory, and
+  relationship outputs with evidence
+- batch and direct inference execution both work through the same staged
+  pipeline topology
 
-Remaining slice-one exit criteria:
+Remaining capability work after slice one:
 
 - a local MCP client can retrieve useful machine-facing results
-- one real enrichment path persists summary, classification, and memory
-  outputs with evidence
-- `conversation_resume` retrieval works for ready, partial, and not-ready
-  artifacts
+- archive search and artifact-context retrieval need to become practical
+- richer import coverage and context-pack quality still need product work

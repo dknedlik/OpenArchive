@@ -2,9 +2,10 @@
 
 ## Status
 
-This is a working architecture sketch, not a final design.
+This is a working architecture sketch for the current product direction.
 
-The current direction is local-first, containerized, and machine-first.
+The initial local-first archive slice has been proved out. The current focus is
+building a useful retrieval and MCP-facing product on top of that foundation.
 
 ## Candidate System Shape
 
@@ -16,9 +17,9 @@ responsibilities:
 3. derive searchable metadata and reusable memory
 4. expose retrieval through MCP and other transport adapters
 
-## Primary Slice-One Deployment Shape
+## Current Deployment Shape
 
-Slice one should run locally with one command.
+The current default deployment should run locally with one command.
 
 Target shape:
 
@@ -124,7 +125,7 @@ Likely providers:
 
 ### Retrieval surface
 
-MCP is the primary external interface for slice one.
+MCP is the primary external interface for the product.
 
 That does not mean the application core should be shaped like the MCP
 protocol. Instead:
@@ -132,6 +133,13 @@ protocol. Instead:
 - use-case services live in the middle
 - local MCP and remote MCP become transport adapters over those use cases
 - CLI and later HTTP can reuse the same application services
+
+The next useful operators are not “dump every artifact.” They are:
+
+- archive search
+- artifact detail retrieval
+- artifact-context assembly
+- later, broader cross-artifact context-pack retrieval
 
 ## Provider Model
 
