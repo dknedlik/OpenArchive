@@ -1,7 +1,7 @@
 id: "04"
 title: Add artifact context-pack assembly as an application-layer service
 assignee: david
-status: todo
+status: done
 type: feature
 priority: high
 planned_order: 4
@@ -33,3 +33,4 @@ risks: |
   - If this service drifts into a generic artifact dump, it will fail as a working-memory primitive for MCP clients and agents.
 notes: |
   - This replaces the older slice-one `conversation_resume` framing.
+  - Completed in `src/app/context_pack.rs` with Postgres-backed wiring through the application layer.
