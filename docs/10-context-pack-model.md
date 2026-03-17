@@ -11,6 +11,10 @@ For the MVP product phase, the preferred framing is `artifact_context_pack`
 for the first concrete retrieval contract, with narrower pack types layered on
 later if needed.
 
+The current MVP implementation is narrower than the broader design space in
+this document. The live artifact-context-pack contract is already implemented
+and returned by the app layer and local MCP surface.
+
 ## Purpose
 
 The artifact model defines what exists.
@@ -97,6 +101,40 @@ The recommended first-pass model has six parts:
 4. consumer-oriented structure
 5. provenance envelope
 6. policy and budget
+
+## Current MVP Pack Shape
+
+The current implemented `artifact_context_pack` is intentionally compact and
+artifact-scoped.
+
+It returns:
+
+- artifact identity and title
+- source type
+- readiness:
+  - `not_ready`
+  - `partial`
+  - `ready`
+- grouped derived entries:
+  - summaries
+  - classifications
+  - memories
+  - relationships
+- evidence excerpts for each derived entry
+- pack provenance:
+  - total segments
+  - referenced segments
+  - whether enrichment is still incomplete
+  - omission counts for segments with no evidence links
+
+Readiness is currently derived from the artifact's persisted
+`enrichment_status` plus whether the minimum useful derived output set exists,
+not from evidence coverage ratio alone.
+
+In other words:
+
+- `referenced_segments < total_segments` is a provenance observation
+- `not_ready` / `partial` / `ready` is a lifecycle-and-output judgment
 
 ## 1. Request Frame
 

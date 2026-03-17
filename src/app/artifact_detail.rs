@@ -5,12 +5,12 @@ use crate::storage::{
     ArtifactDetailReadStore, DerivedObjectType, EnrichmentStatus, ParticipantRole, SourceType,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ArtifactDetailRequest {
     pub artifact_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ArtifactDetailSegmentView {
     pub segment_id: String,
     pub participant_id: Option<String>,
@@ -19,7 +19,7 @@ pub struct ArtifactDetailSegmentView {
     pub text_content: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ArtifactDetailDerivedObjectView {
     pub derived_object_id: String,
     pub derived_object_type: DerivedObjectType,
@@ -28,7 +28,7 @@ pub struct ArtifactDetailDerivedObjectView {
     pub confidence_score: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ArtifactDetailResponse {
     pub artifact_id: String,
     pub title: Option<String>,

@@ -14,7 +14,7 @@ machine-first interface.
 OpenArchive is a pipeline:
 
 ```text
-ingest -> normalize -> store -> enrich -> retrieve
+ingest -> normalize -> store -> preprocess -> extract -> retrieve_context -> reconcile -> retrieve
 ```
 
 The current MVP build phase is intentionally local-first:
@@ -57,6 +57,25 @@ What is being built now:
 - richer source imports beyond the initial ChatGPT export path
 - remote MCP over the same application-layer use cases
 - product-oriented local and remote deployment flows
+
+What is now working end to end:
+
+- import persists raw payloads, canonical artifacts, participants, and segments
+- the enrichment pipeline runs as durable staged jobs:
+  - `artifact_preprocess`
+  - `artifact_extract`
+  - `artifact_retrieve_context`
+  - `artifact_reconcile`
+- app-layer retrieval services expose:
+  - archive search
+  - artifact detail
+  - artifact context packs
+- local MCP exposes those retrieval use cases through:
+  - `search_archive`
+  - `get_artifact`
+  - `get_context_pack`
+- real persisted archive data can now be searched and retrieved through the MCP
+  surface
 
 ## Running Locally
 
@@ -120,6 +139,28 @@ application core.
 This is not intended to become a generic plugin system. The target is simpler:
 if someone wants to add a provider, they should be able to implement the
 relevant traits, wire config parsing, update the factory, and move on.
+
+## Current Data Flow
+
+The current implemented pipeline is:
+
+1. import accepts a source payload, parses it, copies the raw payload into
+   object storage, writes canonical rows, and enqueues `artifact_preprocess`
+2. preprocess inspects the artifact and decides extraction shape, including
+   whole-artifact, windowed, or topic-thread-oriented extraction
+3. extract runs the main semantic derivation pass and persists one durable
+   extraction result
+4. retrieve-context runs archive retrieval from extraction-produced intents and
+   persists one retrieval result set
+5. reconcile combines extraction outputs with retrieved context, persists
+   reconciliation decisions, and writes the final derivation attempt with
+   active derived objects and evidence links
+6. retrieval services read the persisted artifact, segment, derived-object, and
+   evidence state to support search, artifact detail, and artifact-context
+   assembly
+
+The artifact-level `enrichment_status` is intended to be derived from the
+durable job and output state rather than inferred by retrieval at read time.
 
 ## Open Problems
 

@@ -7,6 +7,7 @@ pub mod enrichment_worker;
 pub mod error;
 pub mod http;
 pub mod import_service;
+pub mod mcp;
 pub mod migrations;
 pub mod object_store;
 pub mod parser;

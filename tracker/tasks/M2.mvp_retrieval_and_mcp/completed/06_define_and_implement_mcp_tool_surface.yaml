@@ -1,7 +1,7 @@
 id: "06"
 title: Define and implement the MVP MCP tool surface
 assignee: david
-status: todo
+status: done
 type: feature
 priority: high
 planned_order: 6
@@ -31,3 +31,4 @@ risks: |
   - If MCP contracts are improvised after the app layer is built, the product surface will reflect internal convenience instead of real caller needs.
 notes: |
   - Design the tool names and payloads before adding more HTTP endpoints.
+  - Completed with a standalone `src/bin/mcp.rs` entrypoint and `src/mcp/` stdio JSON-RPC transport over the app-layer retrieval services.

@@ -36,6 +36,16 @@ OpenArchive should:
   MCP-first interfaces
 - support both local and remote deployment shapes
 
+The current MVP product surface is now concrete:
+
+- import and preserve source payloads and canonicalized artifacts
+- run a durable staged enrichment pipeline over those artifacts
+- expose the resulting archive through:
+  - ranked archive search
+  - artifact detail retrieval
+  - artifact-context packs
+  - local MCP tools over those same use cases
+
 OpenArchive probably should not initially:
 
 - become a full end-user chat client
@@ -71,3 +81,22 @@ OpenArchive probably should not initially:
   remote MCP, and a thin HTTP surface
 - broaden import coverage beyond the initial ChatGPT-export path
 - support optional local inference for users who want GPU-backed enrichment
+
+## Current Pipeline Reality
+
+The implemented pipeline is no longer just conceptual. The current Postgres
+default path is:
+
+1. import and normalization
+2. raw payload copy into object storage
+3. canonical relational persistence
+4. staged enrichment:
+   - `artifact_preprocess`
+   - `artifact_extract`
+   - `artifact_retrieve_context`
+   - `artifact_reconcile`
+5. machine-first retrieval through app-layer services and local MCP
+
+This matters because the MVP question is no longer “can the architecture hold
+the shape?” It is “can real persisted data flow through the whole path and come
+back as useful machine-readable retrieval?” The answer is now yes.

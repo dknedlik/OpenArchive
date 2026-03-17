@@ -53,8 +53,12 @@ What remains useful from this document:
 
 - local MCP server
 - an artifact-context retrieval surface and not-ready / partial behavior
-- large-conversation chunk-and-reduce path
 - final end-to-end validation for the full retrieval flow
+
+One historical note: the earlier “large-conversation chunk-and-reduce path”
+callout is now implemented in the enrichment worker. The still-open problems
+are quality, readiness/finalization correctness, and broader productization,
+not whether chunked extract-and-merge exists at all.
 
 Where current planning now lives:
 

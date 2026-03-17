@@ -83,6 +83,27 @@ That means:
 - optional local inference through Ollama
 - provider-specific model details kept below the application boundary
 
+The current implemented enrichment flow is:
+
+1. `artifact_preprocess`
+2. `artifact_extract`
+3. `artifact_retrieve_context`
+4. `artifact_reconcile`
+
+That is important because the current brain layer is no longer only “raw
+archive plus some derived metadata.” It is a durable staged pipeline with
+explicit intermediate state:
+
+- preprocess chooses extraction shape
+- extract produces summaries, classifications, memories, relationships,
+  entities, and retrieval intents
+- retrieve-context gathers archive-wide context from those intents
+- reconcile decides what survives into durable derived objects and evidence
+
+For large conversations, extract can already operate on whole-artifact,
+windowed, or topic-thread-oriented inputs and merge chunk outputs before
+persisting the extraction result.
+
 This should eventually become brain-aware rather than artifact-isolated.
 
 That means later enrichment and reconciliation passes should be able to read
@@ -139,3 +160,7 @@ It is:
 - enrich and organize the data asynchronously
 - retrieve and assemble machine-usable context
 - expose that capability through MCP-first interfaces
+
+The practical proof point now exists: real imported data can flow through the
+brain layer and come back through local MCP as ranked search hits, artifact
+detail, and artifact-context packs.

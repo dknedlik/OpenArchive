@@ -16,7 +16,8 @@ use crate::object_store::StoredObject;
 // Enums
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SourceType {
     ChatGptExport,
 }
@@ -325,7 +326,8 @@ impl InputScopeType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DerivedObjectType {
     Summary,
     Classification,
@@ -414,7 +416,8 @@ impl ScopeType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EvidenceRole {
     PrimarySupport,
     SecondarySupport,
@@ -440,7 +443,8 @@ impl EvidenceRole {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SupportStrength {
     Strong,
     Medium,

@@ -18,6 +18,7 @@ Completed outcomes:
 - raw payloads are copied into managed object storage
 - canonical records and enrichment jobs are durable
 - asynchronous enrichment is real, provider-backed, and restart-tolerant
+- local MCP retrieval is real against persisted Postgres-backed archive data
 
 ## Current MVP Priorities
 
@@ -36,6 +37,26 @@ Exit criteria:
 - search results carry enough match context to be useful without follow-up
   guesswork
 - the MCP surface is useful as a daily machine-facing archive interface
+- at least one real import can be traced through preprocess, extract,
+  retrieve-context, reconcile, and MCP retrieval
+
+## Current Proven Outcome
+
+The MVP retrieval path is now proven against real data on the default Postgres
+deployment shape:
+
+- import creates canonical archive rows and the initial preprocess job
+- staged enrichment runs through preprocess, extract, retrieve-context, and
+  reconcile
+- the app layer exposes search, artifact detail, and artifact-context
+  retrieval
+- local MCP successfully serves:
+  - `search_archive`
+  - `get_artifact`
+  - `get_context_pack`
+
+The next work is less about proving the path exists and more about tightening
+quality, readiness semantics, broader imports, and deployment ergonomics.
 
 ### Broader Imports And Better Brain Quality
 

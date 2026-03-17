@@ -14,7 +14,7 @@ const EXCERPT_MAX_CHARS: usize = 200;
 // Request
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ContextPackRequest {
     pub artifact_id: String,
 }
@@ -23,7 +23,8 @@ pub struct ContextPackRequest {
 // Response
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ContextPackReadiness {
     /// Enrichment has not produced any usable output yet.
     NotReady,
@@ -34,7 +35,7 @@ pub enum ContextPackReadiness {
     Ready,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct EvidenceExcerpt {
     pub segment_id: String,
     pub evidence_role: EvidenceRole,
@@ -43,7 +44,7 @@ pub struct EvidenceExcerpt {
     pub text_excerpt: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ContextDerivedEntry {
     pub derived_object_id: String,
     pub derived_object_type: DerivedObjectType,
@@ -53,19 +54,20 @@ pub struct ContextDerivedEntry {
     pub evidence: Vec<EvidenceExcerpt>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OmissionReason {
     /// Segment exists but no derived object references it via evidence links.
     NoEvidenceLinks,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PackOmission {
     pub reason: OmissionReason,
     pub count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PackProvenance {
     pub total_segments: usize,
     pub referenced_segments: usize,
@@ -75,7 +77,7 @@ pub struct PackProvenance {
     pub omissions: Vec<PackOmission>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ContextPackResponse {
     pub artifact_id: String,
     pub title: Option<String>,
@@ -318,10 +320,7 @@ mod tests {
         }
     }
 
-    fn make_derived_object(
-        id: &str,
-        obj_type: DerivedObjectType,
-    ) -> ArtifactContextDerivedObject {
+    fn make_derived_object(id: &str, obj_type: DerivedObjectType) -> ArtifactContextDerivedObject {
         ArtifactContextDerivedObject {
             derived_object_id: id.to_string(),
             derived_object_type: obj_type,
@@ -423,7 +422,10 @@ mod tests {
         let svc = service_with(Some(ArtifactContextPackMaterial {
             artifact: make_artifact(EnrichmentStatus::Completed),
             segments: vec![make_segment("seg-1", "hello")],
-            derived_objects: vec![make_derived_object("cls-1", DerivedObjectType::Classification)],
+            derived_objects: vec![make_derived_object(
+                "cls-1",
+                DerivedObjectType::Classification,
+            )],
             evidence_links: vec![make_evidence_link("el-1", "cls-1", "seg-1", 1)],
         }));
 
@@ -470,7 +472,10 @@ mod tests {
         assert_eq!(pack.summaries.len(), 1);
         assert_eq!(pack.memories.len(), 1);
         assert_eq!(pack.summaries[0].evidence.len(), 1);
-        assert_eq!(pack.summaries[0].evidence[0].text_excerpt, "first segment text");
+        assert_eq!(
+            pack.summaries[0].evidence[0].text_excerpt,
+            "first segment text"
+        );
     }
 
     #[test]
@@ -512,7 +517,10 @@ mod tests {
         assert_eq!(pack.provenance.total_segments, 4);
         assert_eq!(pack.provenance.referenced_segments, 2);
         assert_eq!(pack.provenance.omissions.len(), 1);
-        assert_eq!(pack.provenance.omissions[0].reason, OmissionReason::NoEvidenceLinks);
+        assert_eq!(
+            pack.provenance.omissions[0].reason,
+            OmissionReason::NoEvidenceLinks
+        );
         assert_eq!(pack.provenance.omissions[0].count, 2);
     }
 

@@ -104,6 +104,35 @@ That means workers may run:
 - on another local machine
 - in a remote deployment later
 
+The current implemented stages are:
+
+1. `artifact_preprocess`
+2. `artifact_extract`
+3. `artifact_retrieve_context`
+4. `artifact_reconcile`
+
+Current responsibilities:
+
+- preprocess:
+  - inspects the artifact shape
+  - decides whether extraction should run whole-artifact, by conversation
+    windows, or by topic-thread inputs
+- extract:
+  - runs the primary semantic derivation pass
+  - can merge chunked outputs when multiple windows or threads are processed
+  - persists one extraction result
+- retrieve-context:
+  - executes archive retrieval from extraction-produced retrieval intents
+  - persists one retrieval result set
+- reconcile:
+  - combines extraction outputs with retrieved context
+  - persists reconciliation decisions
+  - writes the final derivation attempt with active derived objects and
+    evidence links
+
+Artifact-level `enrichment_status` is then derived from durable job and output
+state in the relational store.
+
 ### Inference boundary
 
 Inference should follow the same boundary discipline as storage.
@@ -140,6 +169,12 @@ The next useful operators are not “dump every artifact.” They are:
 - artifact detail retrieval
 - artifact-context assembly
 - later, broader cross-artifact context-pack retrieval
+
+The current local MCP tool surface now implements the first three directly:
+
+- `search_archive`
+- `get_artifact`
+- `get_context_pack`
 
 ## Provider Model
 
@@ -179,8 +214,11 @@ Stages:
 
 1. intake and validation
 2. canonical normalization and persistence
-3. enrichment and derivation
-4. retrieval and context assembly
+3. preprocess
+4. extract
+5. retrieve-context
+6. reconcile and derivation persistence
+7. retrieval and context assembly
 
 These stages may start in one local stack, but they should behave as decoupled
 pipeline stages rather than one long synchronous request path.

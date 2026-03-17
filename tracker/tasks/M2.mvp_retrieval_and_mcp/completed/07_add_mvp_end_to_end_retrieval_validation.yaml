@@ -1,7 +1,7 @@
 id: "07"
 title: Add end-to-end MVP retrieval validation
 assignee: david
-status: todo
+status: done
 type: test
 priority: high
 planned_order: 7
@@ -33,3 +33,8 @@ risks: |
   - Without one end-to-end MVP proof, retrieval can look complete while still only working in isolated seams.
 notes: |
   - This replaces the older slice-one “final validation” framing.
+  - Completed via real Postgres-backed validation through the local MCP binary.
+  - The validation path exercised initialize, tools/list, search_archive,
+    get_artifact, and get_context_pack against persisted archive data.
+  - The work surfaced and fixed real issues in MCP stdio transport compliance,
+    protocol-version negotiation, and artifact-detail confidence-score reads.

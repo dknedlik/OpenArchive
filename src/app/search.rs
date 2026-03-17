@@ -3,13 +3,14 @@ use std::sync::Arc;
 use crate::error::{OpenArchiveError, Result};
 use crate::storage::{ArchiveSearchReadStore, DerivedObjectType, SearchCandidateKind};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ArchiveSearchRequest {
     pub query_text: String,
     pub limit: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SearchMatchKind {
     ArtifactTitle,
     DerivedObject {
@@ -21,7 +22,7 @@ pub enum SearchMatchKind {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ArchiveSearchHit {
     pub artifact_id: String,
     pub match_kind: SearchMatchKind,
@@ -29,7 +30,7 @@ pub struct ArchiveSearchHit {
     pub score: f32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ArchiveSearchResponse {
     pub hits: Vec<ArchiveSearchHit>,
 }

@@ -258,7 +258,8 @@ fn load_artifact_detail_derived_objects(
 ) -> StorageResult<Vec<ArtifactDetailDerivedObject>> {
     let rows = client
         .query(
-            "SELECT derived_object_id, derived_object_type, title, body_text, confidence_score
+            "SELECT derived_object_id, derived_object_type, title, body_text,
+                    confidence_score::double precision AS confidence_score
              FROM oa_derived_object
              WHERE artifact_id = $1 AND object_status = 'active'
              ORDER BY derived_object_type ASC, derived_object_id ASC",
@@ -268,9 +269,10 @@ fn load_artifact_detail_derived_objects(
 
     let mut objects = Vec::with_capacity(rows.len());
     for row in rows {
+        let derived_object_id: String = row.get(0);
         let derived_object_type: String = row.get(1);
         objects.push(ArtifactDetailDerivedObject {
-            derived_object_id: row.get(0),
+            derived_object_id: derived_object_id.clone(),
             derived_object_type: DerivedObjectType::from_str(&derived_object_type).ok_or_else(
                 || StorageError::InvalidDerivedObjectType {
                     artifact_id: artifact_id.to_string(),
@@ -279,7 +281,13 @@ fn load_artifact_detail_derived_objects(
             )?,
             title: row.get(2),
             body_text: row.get(3),
-            confidence_score: row.get(4),
+            confidence_score: row.try_get(4).map_err(|source| {
+                StorageError::ReadDerivedObjectConfidenceScore {
+                    artifact_id: artifact_id.to_string(),
+                    derived_object_id: derived_object_id.clone(),
+                    source,
+                }
+            })?,
         });
     }
 

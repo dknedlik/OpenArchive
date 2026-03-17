@@ -497,6 +497,16 @@ pub enum StorageError {
 
     #[error("invalid support_strength '{value}' while loading context for {artifact_id}")]
     InvalidSupportStrength { artifact_id: String, value: String },
+
+    #[error(
+        "failed to read confidence_score for derived object {derived_object_id} while loading artifact {artifact_id}"
+    )]
+    ReadDerivedObjectConfidenceScore {
+        artifact_id: String,
+        derived_object_id: String,
+        #[source]
+        source: postgres::Error,
+    },
 }
 
 #[derive(Debug, Error)]
