@@ -31,7 +31,16 @@ pub fn parse_conversations(input: &[u8]) -> ParserResult<Vec<ParsedConversation>
         return Err(ParserError::EmptyExport);
     }
 
-    raw.iter().map(normalize_conversation).collect()
+    let conversations = raw
+        .iter()
+        .filter_map(normalize_conversation)
+        .collect::<Vec<_>>();
+
+    if conversations.is_empty() {
+        return Err(ParserError::EmptyExport);
+    }
+
+    Ok(conversations)
 }
 
 #[derive(Deserialize)]
@@ -67,7 +76,7 @@ struct RawContentPart {
     thinking: Option<String>,
 }
 
-fn normalize_conversation(raw: &RawConversation) -> ParserResult<ParsedConversation> {
+fn normalize_conversation(raw: &RawConversation) -> Option<ParsedConversation> {
     let mut messages = Vec::new();
     let mut orphaned_skipped = Vec::new();
     let mut participants_by_key = HashMap::new();
@@ -122,9 +131,7 @@ fn normalize_conversation(raw: &RawConversation) -> ParserResult<ParsedConversat
     }
 
     if messages.is_empty() {
-        return Err(ParserError::EmptyConversation {
-            conversation_id: raw.uuid.clone(),
-        });
+        return None;
     }
 
     let participants = participant_order
@@ -132,7 +139,7 @@ fn normalize_conversation(raw: &RawConversation) -> ParserResult<ParsedConversat
         .filter_map(|key| participants_by_key.remove(&key))
         .collect::<Vec<_>>();
 
-    Ok(ParsedConversation {
+    Some(ParsedConversation {
         source_id: raw.uuid.clone(),
         title: non_empty(raw.name.as_deref())
             .map(str::to_string)
@@ -306,5 +313,47 @@ mod tests {
             .unsupported_content
             .iter()
             .any(|item| item.content_type == "files"));
+    }
+
+    #[test]
+    fn skips_empty_conversations_in_export() {
+        let payload = br#"[
+          {
+            "uuid": "empty-conv",
+            "name": "Empty",
+            "summary": "",
+            "created_at": "2026-01-17T14:23:32.807041Z",
+            "updated_at": "2026-01-17T14:24:52.521684Z",
+            "chat_messages": []
+          },
+          {
+            "uuid": "real-conv",
+            "name": "Real",
+            "summary": "",
+            "created_at": "2026-01-17T14:23:32.807041Z",
+            "updated_at": "2026-01-17T14:24:52.521684Z",
+            "chat_messages": [
+              {
+                "uuid": "msg-1",
+                "text": "hello",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "hello"
+                  }
+                ],
+                "sender": "human",
+                "created_at": "2026-01-17T14:23:33.472056Z",
+                "updated_at": "2026-01-17T14:23:33.472056Z",
+                "attachments": [],
+                "files": []
+              }
+            ]
+          }
+        ]"#;
+
+        let conversations = parse_conversations(payload).unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].source_id, "real-conv");
     }
 }
