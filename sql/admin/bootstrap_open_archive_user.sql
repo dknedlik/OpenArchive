@@ -38,6 +38,7 @@ begin
   execute immediate 'grant create sequence to ' || lower(:schema_username);
   execute immediate 'grant create procedure to ' || lower(:schema_username);
   execute immediate 'grant create trigger to ' || lower(:schema_username);
+  execute immediate 'grant ctxapp to ' || lower(:schema_username);
   execute immediate 'alter user ' || lower(:schema_username) || ' quota unlimited on data';
 end;
 /

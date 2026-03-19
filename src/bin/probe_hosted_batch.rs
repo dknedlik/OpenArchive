@@ -9,6 +9,7 @@ use open_archive::processor::{
     AnthropicProcessorFactory, ArtifactProcessorFactory, ArtifactProcessorInput, BatchPollResult,
     GrokProcessorFactory, MemoryOutput, OpenAiProcessorFactory, PreprocessProcessorInput,
     ReconciliationProcessorInput, RelationshipOutput, SummaryOutput,
+    memory_candidate_key_from_fields,
 };
 use open_archive::storage::enrichment_state_store::EnrichmentStateStore;
 use open_archive::storage::types::{ArtifactReconcilePayload, EnrichmentTier};
@@ -311,6 +312,17 @@ fn run_reconcile(
                 .memories
                 .iter()
                 .map(|memory| MemoryOutput {
+                    candidate_key: if memory.candidate_key.is_empty() {
+                        memory_candidate_key_from_fields(
+                            &memory.memory_type,
+                            memory.memory_scope,
+                            &memory.memory_scope_value,
+                            memory.title.as_deref(),
+                            &memory.body_text,
+                        )
+                    } else {
+                        memory.candidate_key.clone()
+                    },
                     title: memory.title.clone(),
                     body_text: memory.body_text.clone(),
                     memory_type: memory.memory_type.clone(),

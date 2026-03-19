@@ -15,21 +15,22 @@ use super::{
     build_conversation_user_prompt, build_preprocess_phase_one_user_prompt,
     build_preprocess_phase_two_user_prompt, build_reconciliation_prompt, preprocess_output_schema,
     preprocess_phase_one_schema, reconciliation_output_schema, should_shape_conversation_input,
-    structured_output_schema, ArtifactBatchProcessor, ArtifactProcessor, ArtifactProcessorFactory,
-    ArtifactProcessorInput, ArtifactProcessorOutput, BatchHandle, BatchPollResult,
-    ConversationEnrichmentStrategy, ExtractionBatchSubmitter, HostedArtifactProcessor,
-    HostedPreprocessProcessor, HostedReconciliationProcessor, InferenceClient, InferenceResult,
-    InferenceUsage, ModelPreprocessPhaseOneOutput, PreprocessBatchProcessor,
-    PreprocessBatchSubmitter, PreprocessPhaseOneSpanResolved, PreprocessProcessor,
-    PreprocessProcessorInput, ProcessorError, ReconciliationBatchProcessor,
-    ReconciliationBatchSubmitter, ReconciliationProcessor, ReconciliationProcessorInput,
-    GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, PREPROCESS_PROMPT_VERSION,
-    RECONCILIATION_SYSTEM_PROMPT,
+    structured_output_schema, structured_output_schema_wrapper, ArtifactBatchProcessor,
+    ArtifactProcessor, ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
+    BatchHandle, BatchPollResult, ExtractionBatchSubmitter, HostedPreprocessProcessor,
+    HostedReconciliationProcessor, InferenceClient, InferenceResult, InferenceUsage,
+    ModelPreprocessPhaseOneOutput, PreprocessBatchProcessor, PreprocessBatchSubmitter,
+    PreprocessPhaseOneSpanResolved, PreprocessProcessor, PreprocessProcessorInput, ProcessorError,
+    ReconciliationBatchProcessor, ReconciliationBatchSubmitter, ReconciliationProcessor,
+    ReconciliationProcessorInput, GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+    PREPROCESS_PROMPT_VERSION, RECONCILIATION_SYSTEM_PROMPT,
 };
 
 pub struct GeminiProcessorFactory {
-    client: Arc<dyn InferenceClient>,
+    client: Arc<GeminiClient>,
     batch_client: Option<Arc<GeminiBatchClient>>,
+    extract_max_output_tokens: u32,
+    extract_repair_max_output_tokens: u32,
     standard_model: String,
     quality_model: String,
 }
@@ -51,6 +52,10 @@ impl GeminiProcessorFactory {
             } else {
                 None
             },
+            extract_max_output_tokens: config.max_output_tokens,
+            extract_repair_max_output_tokens: config
+                .repair_max_output_tokens
+                .max(config.max_output_tokens),
             standard_model: config.standard_model,
             quality_model,
         })
@@ -66,8 +71,9 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
             EnrichmentTier::Standard => self.standard_model.clone(),
             EnrichmentTier::Quality => self.quality_model.clone(),
         };
+        let client: Arc<dyn InferenceClient> = self.client.clone();
         Ok(Box::new(HostedPreprocessProcessor {
-            client: Arc::clone(&self.client),
+            client,
             model,
             pipeline_name: "gemini_preprocess",
             provider_name: "gemini",
@@ -81,12 +87,11 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
             EnrichmentTier::Quality => self.quality_model.clone(),
         };
 
-        Ok(Box::new(HostedArtifactProcessor {
+        Ok(Box::new(GeminiArtifactProcessor {
             client: Arc::clone(&self.client),
             model,
-            pipeline_name: "gemini_enrichment",
-            provider_name: "gemini",
-            strategy: ConversationEnrichmentStrategy::gemini_default(),
+            max_output_tokens: self.extract_max_output_tokens,
+            repair_max_output_tokens: self.extract_repair_max_output_tokens,
         }))
     }
 
@@ -98,8 +103,9 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
             EnrichmentTier::Standard => self.standard_model.clone(),
             EnrichmentTier::Quality => self.quality_model.clone(),
         };
+        let client: Arc<dyn InferenceClient> = self.client.clone();
         Ok(Box::new(HostedReconciliationProcessor {
-            client: Arc::clone(&self.client),
+            client,
             model,
             system_prompt: RECONCILIATION_SYSTEM_PROMPT,
         }))
@@ -184,8 +190,9 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
             EnrichmentTier::Standard => self.standard_model.clone(),
             EnrichmentTier::Quality => self.quality_model.clone(),
         };
+        let direct_client: Arc<dyn InferenceClient> = self.client.clone();
         Ok(Some(Box::new(GeminiPreprocessSubmitter {
-            direct_client: Arc::clone(&self.client),
+            direct_client,
             client: Arc::clone(batch_client),
             model,
         })))
@@ -214,6 +221,13 @@ struct GeminiBatchProcessor {
     model: String,
 }
 
+struct GeminiArtifactProcessor {
+    client: Arc<GeminiClient>,
+    model: String,
+    max_output_tokens: u32,
+    repair_max_output_tokens: u32,
+}
+
 struct GeminiPreprocessBatchProcessor {
     client: Arc<GeminiBatchClient>,
     model: String,
@@ -225,6 +239,59 @@ const GEMINI_PREPROCESS_PHASE_TWO_BATCH_JOBS: usize = 1;
 struct GeminiReconciliationBatchProcessor {
     client: Arc<GeminiBatchClient>,
     model: String,
+}
+
+impl ArtifactProcessor for GeminiArtifactProcessor {
+    fn process(
+        &self,
+        input: &ArtifactProcessorInput,
+    ) -> Result<ArtifactProcessorOutput, ProcessorError> {
+        super::validate_input(input)?;
+        let prompt = build_conversation_user_prompt(input)?;
+        match self.process_once(input, &prompt, self.max_output_tokens) {
+            Ok(output) => Ok(output),
+            Err(error) if super::should_retry_with_repair(&error) => {
+                let repair_prompt = super::build_repair_prompt(&prompt, &error);
+                self.process_once(input, &repair_prompt, self.repair_max_output_tokens)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl GeminiArtifactProcessor {
+    fn process_once(
+        &self,
+        input: &ArtifactProcessorInput,
+        user_prompt: &str,
+        max_output_tokens: u32,
+    ) -> Result<ArtifactProcessorOutput, ProcessorError> {
+        let inference_result = self.client.complete_json_with_max_output_tokens(
+            &self.model,
+            GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+            user_prompt,
+            &structured_output_schema_wrapper(),
+            max_output_tokens,
+        )?;
+        let parsed: super::ModelArtifactOutput =
+            serde_json::from_str(&inference_result.output_text).map_err(|source| {
+                ProcessorError::ParseModelJson {
+                    source,
+                    body_preview: super::preview(&inference_result.output_text),
+                }
+            })?;
+        let parsed = parsed.resolve_evidence_aliases(input);
+        parsed
+            .validate_against(input)
+            .map_err(|err| super::attach_output_preview(err, &inference_result.output_text))?;
+        Ok(parsed.into_processor_output(
+            self.model.clone(),
+            inference_result.usage,
+            "gemini_enrichment",
+            "gemini",
+            super::GEMINI_PROMPT_VERSION,
+        ))
+    }
 }
 
 impl ArtifactBatchProcessor for GeminiBatchProcessor {
@@ -1269,6 +1336,7 @@ impl GeminiClient {
         system_prompt: &str,
         user_prompt: &str,
         schema: &serde_json::Value,
+        max_output_tokens: u32,
     ) -> Result<InferenceResult, ProcessorError> {
         let endpoint = format!(
             "{}/{}:generateContent",
@@ -1292,7 +1360,7 @@ impl GeminiClient {
             generation_config: GeminiGenerationConfig {
                 response_mime_type: "application/json".to_string(),
                 response_schema: normalize_gemini_response_schema(schema),
-                max_output_tokens: self.max_output_tokens,
+                max_output_tokens,
             },
         };
         let request_body = serde_json::to_vec(&body)
@@ -1344,6 +1412,23 @@ impl GeminiClient {
                 .clone()
                 .and_then(InferenceUsage::from_gemini_usage),
         })
+    }
+
+    fn complete_json_with_max_output_tokens(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        schema: &serde_json::Value,
+        max_output_tokens: u32,
+    ) -> Result<InferenceResult, ProcessorError> {
+        self.complete_via_generate_content(
+            model,
+            system_prompt,
+            user_prompt,
+            schema,
+            max_output_tokens,
+        )
     }
 }
 
@@ -1424,7 +1509,13 @@ impl InferenceClient for GeminiClient {
         user_prompt: &str,
         schema: &serde_json::Value,
     ) -> Result<InferenceResult, ProcessorError> {
-        self.complete_via_generate_content(model, system_prompt, user_prompt, schema)
+        self.complete_json_with_max_output_tokens(
+            model,
+            system_prompt,
+            user_prompt,
+            schema,
+            self.max_output_tokens,
+        )
     }
 }
 

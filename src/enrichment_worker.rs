@@ -1,13 +1,17 @@
-use crate::config::{EnrichmentPipelineConfig, InferenceExecutionMode};
+use crate::config::{EnrichmentPipelineConfig, ExtractionChunkingConfig, InferenceExecutionMode};
 use crate::domain::SourceTimestamp;
+use crate::extraction_chunking::{
+    build_chunk_inputs, build_preprocess_coverage_windows, build_topic_thread_inputs,
+};
 use crate::processor::{
     ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
     ClassificationOutput, EntityOutput, MemoryOutput, PreprocessProcessorInput, ProcessorError,
     ReconciliationProcessorInput, RelationshipOutput, StubProcessorFactory, SummaryOutput,
+    memory_candidate_key_from_fields,
 };
 use crate::rate_limiter::RateLimiter;
 use crate::shutdown::ShutdownToken;
-use crate::stage_poller::{stage_poller_loop, ExtractStage, PreprocessStage, ReconcileStage};
+use crate::stage_poller::{stage_poller_loop, PreprocessStage, ReconcileStage};
 use crate::storage::JobType;
 use crate::storage::{
     ArchiveRetrievalStore, ArtifactExtractPayload, ArtifactExtractionResult,
@@ -19,7 +23,7 @@ use crate::storage::{
     InputScopeType, MemoryObjectJson, NewDerivationRun, NewDerivedObject, NewEnrichmentJob,
     NewEvidenceLink, ObjectStatus, OriginKind, ReconciliationDecision, ReconciliationDecisionKind,
     RelationshipObjectJson, RetrievalIntent, RetrievalResultSet, ScopeType, SummaryObjectJson,
-    SupportStrength, TopicThreadRef, WriteDerivationAttempt, WriteDerivedObject,
+    SupportStrength, WriteDerivationAttempt, WriteDerivedObject,
 };
 use anyhow::Result;
 use log::{debug, error, info};
@@ -31,9 +35,6 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RETRYABLE_INFERENCE_BACKOFF_SECONDS: i64 = 60;
-const PREPROCESS_WINDOW_SEGMENTS: usize = 24;
-const PREPROCESS_WINDOW_OVERLAP: usize = 4;
-
 /// Worker ID format: enrichment:<pid>:<worker_index>
 pub fn format_worker_id(pid: u32, worker_index: usize) -> String {
     format!("enrichment:{}:{}", pid, worker_index)
@@ -47,6 +48,7 @@ fn enrichment_worker(
     state_store: Arc<dyn EnrichmentStateStore>,
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
+    chunking: Arc<ExtractionChunkingConfig>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
 ) {
@@ -71,6 +73,7 @@ fn enrichment_worker(
                     derived_store.as_ref(),
                     processor_factory.as_ref(),
                     InferenceExecutionMode::Direct,
+                    chunking.as_ref(),
                 ) {
                     error!(
                         "Worker {} failed to process claimed work: {}",
@@ -97,6 +100,7 @@ fn process_claimed_jobs(
     derived_store: &dyn DerivedMetadataWriteStore,
     processor_factory: &dyn ArtifactProcessorFactory,
     execution_mode: InferenceExecutionMode,
+    chunking: &ExtractionChunkingConfig,
 ) -> std::result::Result<(), String> {
     if execution_mode == InferenceExecutionMode::Batch {
         match first_job.job_type {
@@ -131,6 +135,7 @@ fn process_claimed_jobs(
                         read_store,
                         processor_factory,
                         batch_processor.as_ref(),
+                        chunking,
                     );
                 }
             }
@@ -166,6 +171,7 @@ fn process_claimed_jobs(
                         state_store,
                         processor_factory,
                         batch_processor.as_ref(),
+                        chunking,
                     );
                 }
             }
@@ -218,6 +224,7 @@ fn process_claimed_jobs(
         state_store,
         derived_store,
         processor_factory,
+        chunking,
     )
 }
 
@@ -230,6 +237,7 @@ fn process_claimed_job(
     state_store: &dyn EnrichmentStateStore,
     derived_store: &dyn DerivedMetadataWriteStore,
     processor_factory: &dyn ArtifactProcessorFactory,
+    chunking: &ExtractionChunkingConfig,
 ) -> std::result::Result<(), String> {
     match claimed_job.job_type {
         crate::storage::JobType::ArtifactPreprocess => process_preprocess_job(
@@ -238,6 +246,7 @@ fn process_claimed_job(
             job_store,
             read_store,
             processor_factory,
+            chunking,
         ),
         crate::storage::JobType::ArtifactExtract => process_extract_job(
             worker_id,
@@ -246,6 +255,7 @@ fn process_claimed_job(
             read_store,
             state_store,
             processor_factory,
+            chunking,
         ),
         crate::storage::JobType::ArtifactRetrieveContext => process_retrieve_context_job(
             worker_id,
@@ -274,6 +284,7 @@ fn process_extract_job_batch(
     state_store: &dyn EnrichmentStateStore,
     processor_factory: &dyn ArtifactProcessorFactory,
     batch_processor: &dyn crate::processor::ArtifactBatchProcessor,
+    chunking: &ExtractionChunkingConfig,
 ) -> std::result::Result<(), String> {
     let mut batchable = Vec::new();
     let mut fallbacks = Vec::new();
@@ -419,6 +430,7 @@ fn process_extract_job_batch(
             read_store,
             state_store,
             processor_factory,
+            chunking,
         )?;
     }
 
@@ -659,6 +671,7 @@ fn process_preprocess_job(
     job_store: &dyn EnrichmentJobLifecycleStore,
     read_store: &dyn ArtifactReadStore,
     processor_factory: &dyn ArtifactProcessorFactory,
+    chunking: &ExtractionChunkingConfig,
 ) -> std::result::Result<(), String> {
     let payload =
         ArtifactPreprocessPayload::from_json(&claimed_job.payload_json).map_err(|err| {
@@ -732,6 +745,7 @@ fn process_preprocess_job(
         &claimed_job.artifact_id,
         &processor_input.segments,
         &preprocess_output.topic_threads,
+        chunking,
     );
     let extract_job = NewEnrichmentJob {
         job_id: new_id("job"),
@@ -774,6 +788,7 @@ fn process_preprocess_job_batch(
     read_store: &dyn ArtifactReadStore,
     processor_factory: &dyn ArtifactProcessorFactory,
     batch_processor: &dyn crate::processor::PreprocessBatchProcessor,
+    chunking: &ExtractionChunkingConfig,
 ) -> std::result::Result<(), String> {
     let mut batchable = Vec::new();
     let mut fallbacks = Vec::new();
@@ -863,6 +878,7 @@ fn process_preprocess_job_batch(
                         &claimed_job.artifact_id,
                         &input.segments,
                         &output.topic_threads,
+                        chunking,
                     );
                     let extract_job = NewEnrichmentJob {
                         job_id: new_id("job"),
@@ -909,6 +925,7 @@ fn process_preprocess_job_batch(
             job_store,
             read_store,
             processor_factory,
+            chunking,
         )?;
     }
 
@@ -922,6 +939,7 @@ fn process_extract_job(
     read_store: &dyn ArtifactReadStore,
     state_store: &dyn EnrichmentStateStore,
     processor_factory: &dyn ArtifactProcessorFactory,
+    chunking: &ExtractionChunkingConfig,
 ) -> std::result::Result<(), String> {
     let payload = ArtifactExtractPayload::from_json(&claimed_job.payload_json).map_err(|err| {
         fail_job(
@@ -996,6 +1014,7 @@ fn process_extract_job(
             &processor_input,
             &payload.topic_threads,
             &payload.conversation_windows,
+            chunking,
         ) {
             let chunk_output = processor.process(&chunk_input).map_err(|err| {
                 handle_processor_error(job_store, worker_id, &claimed_job.job_id, err)
@@ -1005,7 +1024,9 @@ fn process_extract_job(
         merge_chunk_outputs(&processor_input, &chunk_outputs)
     } else if payload.conversation_windows.len() > 1 {
         let mut chunk_outputs = Vec::new();
-        for chunk_input in build_chunk_inputs(&processor_input, &payload.conversation_windows) {
+        for chunk_input in
+            build_chunk_inputs(&processor_input, &payload.conversation_windows, chunking)
+        {
             let chunk_output = processor.process(&chunk_input).map_err(|err| {
                 handle_processor_error(job_store, worker_id, &claimed_job.job_id, err)
             })?;
@@ -1375,76 +1396,6 @@ fn process_reconcile_job(
     Ok(())
 }
 
-fn build_preprocess_coverage_windows(
-    artifact_id: &str,
-    segments: &[crate::storage::LoadedSegment],
-    topic_threads: &[TopicThreadRef],
-) -> Vec<ConversationWindowRef> {
-    if segments.is_empty() {
-        return Vec::new();
-    }
-    let covered: HashSet<i32> = topic_threads
-        .iter()
-        .flat_map(|thread| thread.spans.iter())
-        .flat_map(|span| span.start_sequence_no..=span.end_sequence_no)
-        .collect();
-    let uncovered: Vec<_> = segments
-        .iter()
-        .filter(|segment| !covered.contains(&segment.sequence_no))
-        .cloned()
-        .collect();
-    if uncovered.is_empty() {
-        return Vec::new();
-    }
-
-    build_contiguous_windows(artifact_id, &uncovered)
-}
-
-fn build_contiguous_windows(
-    artifact_id: &str,
-    segments: &[crate::storage::LoadedSegment],
-) -> Vec<ConversationWindowRef> {
-    if segments.is_empty() {
-        return Vec::new();
-    }
-    if segments.len() <= PREPROCESS_WINDOW_SEGMENTS {
-        return vec![ConversationWindowRef {
-            window_id: format!("{artifact_id}:window:0"),
-            label: "coverage fallback".to_string(),
-            start_sequence_no: segments
-                .first()
-                .map(|segment| segment.sequence_no)
-                .unwrap_or(0),
-            end_sequence_no: segments
-                .last()
-                .map(|segment| segment.sequence_no)
-                .unwrap_or(0),
-        }];
-    }
-
-    let mut windows = Vec::new();
-    let mut start = 0usize;
-    let step = PREPROCESS_WINDOW_SEGMENTS
-        .saturating_sub(PREPROCESS_WINDOW_OVERLAP)
-        .max(1);
-    while start < segments.len() {
-        let end = (start + PREPROCESS_WINDOW_SEGMENTS).min(segments.len());
-        let first = &segments[start];
-        let last = &segments[end - 1];
-        windows.push(ConversationWindowRef {
-            window_id: format!("{artifact_id}:window:{}", windows.len()),
-            label: format!("messages {}-{}", first.sequence_no, last.sequence_no),
-            start_sequence_no: first.sequence_no,
-            end_sequence_no: last.sequence_no,
-        });
-        if end == segments.len() {
-            break;
-        }
-        start += step;
-    }
-    windows
-}
-
 fn build_extraction_result(
     claimed_job: &ClaimedJob,
     input: &ArtifactProcessorInput,
@@ -1475,6 +1426,7 @@ fn build_extraction_result(
             .memories
             .iter()
             .map(|memory| ExtractedMemory {
+                candidate_key: memory.candidate_key.clone(),
                 title: memory.title.clone(),
                 body_text: memory.body_text.clone(),
                 memory_type: memory.memory_type.clone(),
@@ -1519,102 +1471,6 @@ fn build_extraction_result(
             .collect(),
         status: "completed".to_string(),
         error_message: None,
-    }
-}
-
-fn build_chunk_inputs(
-    input: &ArtifactProcessorInput,
-    windows: &[ConversationWindowRef],
-) -> Vec<ArtifactProcessorInput> {
-    windows
-        .iter()
-        .map(|window| ArtifactProcessorInput {
-            artifact_id: input.artifact_id.clone(),
-            import_id: input.import_id.clone(),
-            source_type: input.source_type,
-            title: input.title.clone(),
-            participants: input.participants.clone(),
-            segments: input
-                .segments
-                .iter()
-                .filter(|segment| {
-                    segment.sequence_no >= window.start_sequence_no
-                        && segment.sequence_no <= window.end_sequence_no
-                })
-                .cloned()
-                .collect(),
-        })
-        .filter(|chunk| !chunk.segments.is_empty())
-        .collect()
-}
-
-fn build_topic_thread_inputs(
-    input: &ArtifactProcessorInput,
-    topic_threads: &[TopicThreadRef],
-    coverage_windows: &[ConversationWindowRef],
-) -> Vec<ArtifactProcessorInput> {
-    let mut inputs = Vec::new();
-    let mut covered = HashSet::new();
-
-    for thread in topic_threads {
-        let segments: Vec<_> = input
-            .segments
-            .iter()
-            .filter(|segment| {
-                thread.spans.iter().any(|span| {
-                    segment.sequence_no >= span.start_sequence_no
-                        && segment.sequence_no <= span.end_sequence_no
-                })
-            })
-            .cloned()
-            .collect();
-        if segments.is_empty() {
-            continue;
-        }
-        for segment in &segments {
-            covered.insert(segment.sequence_no);
-        }
-        inputs.push(ArtifactProcessorInput {
-            artifact_id: input.artifact_id.clone(),
-            import_id: input.import_id.clone(),
-            source_type: input.source_type,
-            title: Some(match &input.title {
-                Some(title) => format!("{title} [{}]", thread.label),
-                None => thread.label.clone(),
-            }),
-            participants: input.participants.clone(),
-            segments,
-        });
-    }
-
-    for window in coverage_windows {
-        let segments: Vec<_> = input
-            .segments
-            .iter()
-            .filter(|segment| {
-                !covered.contains(&segment.sequence_no)
-                    && segment.sequence_no >= window.start_sequence_no
-                    && segment.sequence_no <= window.end_sequence_no
-            })
-            .cloned()
-            .collect();
-        if segments.is_empty() {
-            continue;
-        }
-        inputs.push(ArtifactProcessorInput {
-            artifact_id: input.artifact_id.clone(),
-            import_id: input.import_id.clone(),
-            source_type: input.source_type,
-            title: input.title.clone(),
-            participants: input.participants.clone(),
-            segments,
-        });
-    }
-
-    if inputs.is_empty() {
-        vec![input.clone()]
-    } else {
-        inputs
     }
 }
 
@@ -1753,6 +1609,17 @@ fn build_reconciliation_input(
             .memories
             .iter()
             .map(|memory| MemoryOutput {
+                candidate_key: if memory.candidate_key.is_empty() {
+                    memory_candidate_key_from_fields(
+                        &memory.memory_type,
+                        memory.memory_scope,
+                        &memory.memory_scope_value,
+                        memory.title.as_deref(),
+                        &memory.body_text,
+                    )
+                } else {
+                    memory.candidate_key.clone()
+                },
                 title: memory.title.clone(),
                 body_text: memory.body_text.clone(),
                 memory_type: memory.memory_type.clone(),
@@ -1807,17 +1674,21 @@ fn build_reconciliation_decisions(
 }
 
 fn memory_target_key(memory: &ExtractedMemory) -> String {
-    memory
-        .title
-        .clone()
-        .unwrap_or_else(|| memory.body_text.chars().take(64).collect())
+    if memory.candidate_key.is_empty() {
+        memory_candidate_key_from_fields(
+            &memory.memory_type,
+            memory.memory_scope,
+            &memory.memory_scope_value,
+            memory.title.as_deref(),
+            &memory.body_text,
+        )
+    } else {
+        memory.candidate_key.clone()
+    }
 }
 
 fn memory_target_key_from_output(memory: &MemoryOutput) -> String {
-    memory
-        .title
-        .clone()
-        .unwrap_or_else(|| memory.body_text.chars().take(64).collect())
+    memory.candidate_key.clone()
 }
 
 fn relationship_target_key(relationship: &CandidateRelationship) -> String {
@@ -2044,6 +1915,7 @@ fn build_derivation_attempt(
                     title: memory.title.clone(),
                     body_text: memory.body_text.clone(),
                     object_json: MemoryObjectJson {
+                        candidate_key: memory_target_key(memory),
                         memory_type: memory.memory_type.clone(),
                         memory_scope: memory.memory_scope,
                         memory_scope_value: memory.memory_scope_value.clone(),
@@ -2302,6 +2174,11 @@ pub fn start_enrichment_workers_with_factory(
             let derived_store = Arc::clone(&derived_store);
             let shutdown = shutdown.clone();
             let processor_factory = Arc::clone(&processor_factory);
+            let chunking = Arc::new(ExtractionChunkingConfig {
+                max_segments_per_chunk: 20,
+                chunk_overlap_segments: 4,
+                max_chars_per_chunk: 25_000,
+            });
 
             thread::Builder::new()
                 .name(format!("enrichment-worker-{}", worker_index))
@@ -2314,6 +2191,7 @@ pub fn start_enrichment_workers_with_factory(
                         state_store,
                         derived_store,
                         processor_factory,
+                        chunking,
                         poll_interval,
                         shutdown,
                     );
@@ -2333,12 +2211,17 @@ pub fn start_enrichment_workers_with_factory(
 /// retrieve-context workers.
 ///
 /// Spawns:
-/// - 1 preprocess poller thread
-/// - 1 extract poller thread
-/// - 1 reconcile poller thread
-/// - N retrieve_context worker threads
+/// - batch mode:
+///   - preprocess poller threads
+///   - reconcile poller threads
+///   - direct extract worker threads
+/// - direct mode:
+///   - direct preprocess/extract/reconcile worker threads
+/// - both modes:
+///   - retrieve-context worker threads
 ///
-/// All batch-stage pollers share a single rate limiter per provider.
+/// Extraction currently runs through the direct worker path so shaped extract
+/// payloads always honor the shared chunking policy.
 pub fn start_enrichment_pipeline(
     config: &EnrichmentPipelineConfig,
     execution_mode: InferenceExecutionMode,
@@ -2355,6 +2238,7 @@ pub fn start_enrichment_pipeline(
     }
     let pid = std::process::id();
     let rate_limiter = Arc::new(RateLimiter::new(config.rate_limit_requests_per_minute));
+    let chunking = Arc::new(config.chunking.clone());
     let poll_interval = config.poll_interval;
     let mut handles = Vec::new();
 
@@ -2371,20 +2255,22 @@ pub fn start_enrichment_pipeline(
                 Arc::clone(&derived_store),
                 Arc::clone(&processor_factory),
                 Arc::clone(&rate_limiter),
+                Arc::clone(&chunking),
                 poll_interval,
                 shutdown.clone(),
             )?);
-            handles.extend(spawn_extract_batch_workers(
+            handles.extend(spawn_direct_stage_workers(
                 pid,
+                "extract",
+                JobType::ArtifactExtract,
                 config.extract_workers,
-                config.extract.batch_size,
-                config.extract.max_concurrent_batches,
                 Arc::clone(&job_store),
                 Arc::clone(&read_store),
+                Arc::clone(&retrieval_store),
                 Arc::clone(&state_store),
                 Arc::clone(&derived_store),
                 Arc::clone(&processor_factory),
-                Arc::clone(&rate_limiter),
+                Arc::clone(&chunking),
                 poll_interval,
                 shutdown.clone(),
             )?);
@@ -2415,6 +2301,7 @@ pub fn start_enrichment_pipeline(
                 Arc::clone(&state_store),
                 Arc::clone(&derived_store),
                 Arc::clone(&processor_factory),
+                Arc::clone(&chunking),
                 poll_interval,
                 shutdown.clone(),
             )?);
@@ -2429,6 +2316,7 @@ pub fn start_enrichment_pipeline(
                 Arc::clone(&state_store),
                 Arc::clone(&derived_store),
                 Arc::clone(&processor_factory),
+                Arc::clone(&chunking),
                 poll_interval,
                 shutdown.clone(),
             )?);
@@ -2443,6 +2331,7 @@ pub fn start_enrichment_pipeline(
                 Arc::clone(&state_store),
                 Arc::clone(&derived_store),
                 Arc::clone(&processor_factory),
+                Arc::clone(&chunking),
                 poll_interval,
                 shutdown.clone(),
             )?);
@@ -2474,12 +2363,16 @@ pub fn start_enrichment_pipeline(
     }
 
     info!(
-        "Enrichment pipeline started: mode={:?}, preprocess_workers={}, extract_workers={}, reconcile_workers={}, retrieve_context_workers={}",
+        "Enrichment pipeline started: mode={:?}, preprocess_workers={}, extract_workers={}, reconcile_workers={}, retrieve_context_workers={}, chunk_segments={}, chunk_overlap={}, chunk_max_chars={}",
         execution_mode,
         config.preprocess_workers,
         config.extract_workers,
         config.reconcile_workers,
         config.retrieve_context_workers
+        ,
+        config.chunking.max_segments_per_chunk,
+        config.chunking.chunk_overlap_segments,
+        config.chunking.max_chars_per_chunk
     );
     Ok(handles)
 }
@@ -2495,14 +2388,6 @@ fn validate_batch_execution_support(
     {
         return Err(anyhow::anyhow!(
             "batch execution mode requires preprocess batch submitter support"
-        ));
-    }
-    if processor_factory
-        .build_extraction_submitter(EnrichmentTier::Standard)?
-        .is_none()
-    {
-        return Err(anyhow::anyhow!(
-            "batch execution mode requires extraction batch submitter support"
         ));
     }
     if processor_factory
@@ -2527,6 +2412,7 @@ fn spawn_preprocess_batch_workers(
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
     rate_limiter: Arc<RateLimiter>,
+    chunking: Arc<ExtractionChunkingConfig>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
 ) -> Result<Vec<thread::JoinHandle<()>>> {
@@ -2539,6 +2425,7 @@ fn spawn_preprocess_batch_workers(
             let derived_store = Arc::clone(&derived_store);
             let processor_factory = Arc::clone(&processor_factory);
             let rate_limiter = Arc::clone(&rate_limiter);
+            let chunking = Arc::clone(&chunking);
             let shutdown = shutdown.clone();
             thread::Builder::new()
                 .name(format!("preprocess-poller-{}", i))
@@ -2556,6 +2443,7 @@ fn spawn_preprocess_batch_workers(
                         crate::storage::EnrichmentTier::Standard,
                         batch_size,
                         max_concurrent,
+                        (*chunking).clone(),
                     );
                     stage_poller_loop(
                         &stage,
@@ -2570,64 +2458,6 @@ fn spawn_preprocess_batch_workers(
                     );
                 })
                 .map_err(|e| anyhow::anyhow!("Failed to spawn preprocess poller: {}", e))
-        })
-        .collect()
-}
-
-fn spawn_extract_batch_workers(
-    pid: u32,
-    worker_count: usize,
-    batch_size: usize,
-    max_concurrent: usize,
-    job_store: Arc<dyn EnrichmentJobLifecycleStore>,
-    read_store: Arc<dyn ArtifactReadStore>,
-    state_store: Arc<dyn EnrichmentStateStore>,
-    derived_store: Arc<dyn DerivedMetadataWriteStore>,
-    processor_factory: Arc<dyn ArtifactProcessorFactory>,
-    rate_limiter: Arc<RateLimiter>,
-    poll_interval: Duration,
-    shutdown: ShutdownToken,
-) -> Result<Vec<thread::JoinHandle<()>>> {
-    (0..worker_count)
-        .map(|i| {
-            let worker_id = format!("enrichment:{}:extract:{}", pid, i);
-            let job_store = Arc::clone(&job_store);
-            let read_store = Arc::clone(&read_store);
-            let state_store = Arc::clone(&state_store);
-            let derived_store = Arc::clone(&derived_store);
-            let processor_factory = Arc::clone(&processor_factory);
-            let rate_limiter = Arc::clone(&rate_limiter);
-            let shutdown = shutdown.clone();
-            thread::Builder::new()
-                .name(format!("extract-poller-{}", i))
-                .spawn(move || {
-                    let submitter = processor_factory
-                        .build_extraction_submitter(crate::storage::EnrichmentTier::Standard)
-                        .ok()
-                        .flatten();
-                    let Some(submitter) = submitter else {
-                        info!("No extraction batch submitter available; extract poller exiting");
-                        return;
-                    };
-                    let stage = ExtractStage::new(
-                        submitter,
-                        crate::storage::EnrichmentTier::Standard,
-                        batch_size,
-                        max_concurrent,
-                    );
-                    stage_poller_loop(
-                        &stage,
-                        worker_id,
-                        job_store.as_ref(),
-                        read_store.as_ref(),
-                        state_store.as_ref(),
-                        derived_store.as_ref(),
-                        &rate_limiter,
-                        poll_interval,
-                        shutdown,
-                    );
-                })
-                .map_err(|e| anyhow::anyhow!("Failed to spawn extract poller: {}", e))
         })
         .collect()
 }
@@ -2703,6 +2533,7 @@ fn spawn_direct_stage_workers(
     state_store: Arc<dyn EnrichmentStateStore>,
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
+    chunking: Arc<ExtractionChunkingConfig>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
 ) -> Result<Vec<thread::JoinHandle<()>>> {
@@ -2715,6 +2546,7 @@ fn spawn_direct_stage_workers(
             let state_store = Arc::clone(&state_store);
             let derived_store = Arc::clone(&derived_store);
             let processor_factory = Arc::clone(&processor_factory);
+            let chunking = Arc::clone(&chunking);
             let shutdown = shutdown.clone();
             thread::Builder::new()
                 .name(format!("direct-{}-{}", stage_name, i))
@@ -2728,6 +2560,7 @@ fn spawn_direct_stage_workers(
                         state_store.as_ref(),
                         derived_store.as_ref(),
                         processor_factory.as_ref(),
+                        chunking.as_ref(),
                         poll_interval,
                         shutdown,
                     );
@@ -2751,6 +2584,7 @@ fn direct_stage_worker_loop(
     state_store: &dyn EnrichmentStateStore,
     derived_store: &dyn DerivedMetadataWriteStore,
     processor_factory: &dyn ArtifactProcessorFactory,
+    chunking: &ExtractionChunkingConfig,
     poll_interval: Duration,
     shutdown: ShutdownToken,
 ) {
@@ -2784,6 +2618,7 @@ fn direct_stage_worker_loop(
                     state_store,
                     derived_store,
                     processor_factory,
+                    chunking,
                 ) {
                     error!(
                         "Direct stage worker {} failed to process stage job: {}",

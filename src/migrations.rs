@@ -454,6 +454,7 @@ fn split_sql_statements(sql: &str) -> MigrationsResult<Vec<String>> {
     let mut statements = Vec::new();
     let mut current = String::new();
     let mut in_single_quote = false;
+    let mut in_plsql_block = false;
 
     for line in sql.lines() {
         let trimmed = line.trim();
@@ -462,6 +463,7 @@ fn split_sql_statements(sql: &str) -> MigrationsResult<Vec<String>> {
                 statements.push(current.trim().to_string());
                 current.clear();
             }
+            in_plsql_block = false;
             continue;
         }
 
@@ -473,12 +475,22 @@ fn split_sql_statements(sql: &str) -> MigrationsResult<Vec<String>> {
         }
         current.push('\n');
 
-        if !in_single_quote && trimmed.ends_with(';') {
-            let statement = current.trim().trim_end_matches(';').trim().to_string();
-            if !statement.is_empty() {
-                statements.push(statement);
+        if !in_single_quote {
+            let upper = trimmed.to_ascii_uppercase();
+            if upper == "BEGIN"
+                || upper == "DECLARE"
+                || upper.starts_with("BEGIN ")
+                || upper.starts_with("DECLARE ")
+            {
+                in_plsql_block = true;
             }
-            current.clear();
+            if !in_plsql_block && trimmed.ends_with(';') {
+                let statement = current.trim().trim_end_matches(';').trim().to_string();
+                if !statement.is_empty() {
+                    statements.push(statement);
+                }
+                current.clear();
+            }
         }
     }
 

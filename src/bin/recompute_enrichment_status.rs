@@ -18,7 +18,9 @@ fn main() -> Result<(), anyhow::Error> {
     let config = AppConfig::from_env().context("failed to load application configuration")?;
     let pg_config = match &config.relational_store {
         RelationalStoreConfig::Postgres(pg_config) => pg_config,
-        _ => anyhow::bail!("recompute_enrichment_status only supports OA_RELATIONAL_STORE=postgres"),
+        _ => {
+            anyhow::bail!("recompute_enrichment_status only supports OA_RELATIONAL_STORE=postgres")
+        }
     };
 
     let mut client = postgres_db::connect(pg_config)

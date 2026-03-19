@@ -3,9 +3,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::app::{
-    artifact_detail, context_pack, search, ArchiveApplication,
-};
+use crate::app::{artifact_detail, context_pack, search, ArchiveApplication};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const SEARCH_LIMIT_CAP: usize = 50;
@@ -429,10 +427,7 @@ mod tests {
 
         let err = read_jsonrpc_message(&mut reader).expect_err("header framing should be rejected");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(
-            err.to_string()
-                .contains("newline-delimited JSON-RPC input")
-        );
+        assert!(err.to_string().contains("newline-delimited JSON-RPC input"));
     }
 
     struct MockSearchReadStore;

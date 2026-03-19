@@ -5,6 +5,7 @@ pub mod db;
 pub mod domain;
 pub mod enrichment_worker;
 pub mod error;
+pub mod extraction_chunking;
 pub mod http;
 pub mod import_service;
 pub mod mcp;

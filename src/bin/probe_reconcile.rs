@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use open_archive::config::{GeminiConfig, PostgresConfig};
 use open_archive::processor::{
     InferenceUsage, MemoryOutput, ReconciliationProcessorInput, RelationshipOutput, SummaryOutput,
+    memory_candidate_key_from_fields,
 };
 use open_archive::storage::enrichment_state_store::EnrichmentStateStore;
 use open_archive::storage::types::{ArtifactReconcilePayload, SourceType};
@@ -215,6 +216,17 @@ fn build_reconciliation_input(
             .memories
             .iter()
             .map(|memory| MemoryOutput {
+                candidate_key: if memory.candidate_key.is_empty() {
+                    memory_candidate_key_from_fields(
+                        &memory.memory_type,
+                        memory.memory_scope,
+                        &memory.memory_scope_value,
+                        memory.title.as_deref(),
+                        &memory.body_text,
+                    )
+                } else {
+                    memory.candidate_key.clone()
+                },
                 title: memory.title.clone(),
                 body_text: memory.body_text.clone(),
                 memory_type: memory.memory_type.clone(),
@@ -247,12 +259,7 @@ fn candidate_target_keys(
     input
         .memories
         .iter()
-        .map(|memory| {
-            memory
-                .title
-                .clone()
-                .unwrap_or_else(|| memory.body_text.chars().take(64).collect())
-        })
+        .map(|memory| memory.candidate_key.clone())
         .chain(input.relationships.iter().map(|relationship| {
             format!(
                 "{}:{}:{}",
@@ -289,10 +296,7 @@ fn build_reconciliation_prompt(
         .memories
         .iter()
         .map(|memory| CandidateMemory {
-            target_key: memory
-                .title
-                .clone()
-                .unwrap_or_else(|| memory.body_text.chars().take(64).collect()),
+            target_key: memory.candidate_key.clone(),
             title: memory.title.as_deref(),
             body_text: memory.body_text.as_str(),
             evidence_segment_ids: &memory.evidence_segment_ids,

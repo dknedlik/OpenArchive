@@ -7,6 +7,7 @@ use open_archive::config::{GeminiConfig, PostgresConfig};
 use open_archive::processor::{
     ArtifactProcessorInput, ArtifactProcessorOutput, ClassificationOutput, EntityOutput,
     MemoryOutput, PreprocessProcessorInput, RelationshipOutput, SummaryOutput,
+    memory_candidate_key_from_fields,
 };
 use open_archive::storage::types::{RetrievalIntent, SegmentSpanRef, TopicThreadRef};
 use open_archive::storage::{ArtifactReadStore, PostgresArtifactReadStore};
@@ -30,6 +31,8 @@ fn main() -> Result<()> {
 
     println!("Extraction compare");
     println!("Provider: gemini");
+    println!("Model: {}", gemini.standard_model);
+    println!("Max output tokens: {}", gemini.max_output_tokens);
     if let Some(model) = &args.model {
         println!("Model override: {model}");
     }
@@ -109,12 +112,23 @@ fn run_extract(
         &build_extract_user_prompt(input)?,
         &extract_schema(),
     )?;
+    eprintln!(
+        "    [debug] raw JSON length={} first_200={}",
+        body.len(),
+        &body.chars().take(200).collect::<String>()
+    );
     let parsed: ExtractModelOutput = serde_json::from_str(&body).map_err(|source| {
         anyhow!(
             "failed to parse extraction JSON: {source}: {}",
             preview(&body)
         )
     })?;
+    eprintln!(
+        "    [debug] parsed: memories={} classifications={} importance={}",
+        parsed.memories.len(),
+        parsed.classifications.len(),
+        parsed.importance_score
+    );
     Ok(parsed.into_output())
 }
 
@@ -163,6 +177,35 @@ fn print_extract_summary(output: &ArtifactProcessorOutput) {
             .join(" | ");
         println!("    intents: {}", truncate(&values, 280));
     }
+    // Evidence coverage: count unique segments referenced across all output objects
+    let mut all_evidence: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for seg in &output.summary.evidence_segment_ids {
+        all_evidence.insert(seg.clone());
+    }
+    for m in &output.memories {
+        for seg in &m.evidence_segment_ids {
+            all_evidence.insert(seg.clone());
+        }
+    }
+    for e in &output.entities {
+        for seg in &e.evidence_segment_ids {
+            all_evidence.insert(seg.clone());
+        }
+    }
+    for r in &output.relationships {
+        for seg in &r.evidence_segment_ids {
+            all_evidence.insert(seg.clone());
+        }
+    }
+    for c in &output.classifications {
+        for seg in &c.evidence_segment_ids {
+            all_evidence.insert(seg.clone());
+        }
+    }
+    println!(
+        "    evidence: {} unique segments referenced",
+        all_evidence.len()
+    );
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
@@ -292,6 +335,13 @@ impl ExtractModelOutput {
                 .memories
                 .into_iter()
                 .map(|item| MemoryOutput {
+                    candidate_key: memory_candidate_key_from_fields(
+                        &item.memory_type,
+                        item.memory_scope,
+                        &item.memory_scope_value,
+                        item.title.as_deref(),
+                        &item.body_text,
+                    ),
                     title: item.title,
                     body_text: item.body_text,
                     memory_type: item.memory_type,
@@ -672,11 +722,15 @@ fn merge_retrieval_intent(existing: &mut RetrievalIntent, incoming: &RetrievalIn
 }
 
 fn memory_target_key_from_output(memory: &MemoryOutput) -> String {
+    let title_part = memory.title.as_deref().unwrap_or("");
+    let body_prefix: String = memory.body_text.chars().take(48).collect();
     format!(
-        "{}:{}:{}",
+        "{}:{}:{}:{}:{}",
         memory.memory_type,
         memory.memory_scope.as_str(),
-        memory.memory_scope_value
+        memory.memory_scope_value,
+        title_part,
+        body_prefix
     )
 }
 
@@ -860,10 +914,30 @@ fn build_extract_user_prompt(input: &ArtifactProcessorInput) -> Result<String> {
         })
         .collect();
     Ok(format!(
-        "Extract durable knowledge from this artifact.\nartifact_id: {}\ntitle: {}\nsegments:\n{}\n",
-        input.artifact_id,
-        input.title.as_deref().unwrap_or(""),
-        serde_json::to_string_pretty(&prompt_segments)?,
+        "Input artifact:\n\
+         artifact_id: {artifact_id}\n\
+         source_type: {source_type}\n\
+         title: {title}\n\
+         \n\
+         segments:\n\
+         {segments_json}\n\
+         \n\
+         Output guidance:\n\
+         - summary: 2-4 compact sentences covering the main topics discussed\n\
+         - classifications: 1-3 covering the major domains of the conversation\n\
+         - memories: extract every durable personal fact, preference, decision, health detail, biographical event, ongoing state, constraint, or project fact that could be independently retrieved later. A long or rich conversation should produce many memories, not a summary of a few. Categories to look for: preferences, history, decisions made, conclusions reached, ongoing state, goals, constraints, relationships between entities, health and medical context, biographical facts, and named workflows or systems.\n\
+         - entities: include all explicit named people, projects, systems, organizations, and domain-specific proper nouns with durable retrieval value\n\
+         - relationships: include explicit supported links between emitted entities or durable facts\n\
+         - retrieval_intents: ask archive-only follow-up questions when duplicate detection, prior-state matching, or contradiction checks matter\n\
+         - importance: be conservative\n\
+         - evidence_segment_ids must use only the evidence_ref values shown in segments (for example s1, s2)\n\
+         - cite every segment that directly supports each derived object, not just the primary one\n\
+         - memory_scope_value must be {artifact_id}\n\
+         ",
+        artifact_id = input.artifact_id,
+        source_type = input.source_type.as_str(),
+        title = input.title.as_deref().unwrap_or(""),
+        segments_json = serde_json::to_string_pretty(&prompt_segments)?,
     ))
 }
 
@@ -964,9 +1038,11 @@ const GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's st
 fn extract_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
+        "required": ["summary", "classifications", "memories", "entities", "relationships", "retrieval_intents", "importance_score", "escalate_to_frontier", "escalation_reason"],
         "properties": {
             "summary": {
                 "type": "object",
+                "required": ["body_text", "evidence_segment_ids"],
                 "properties": {
                     "title": { "type": "string" },
                     "body_text": { "type": "string" },

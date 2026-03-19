@@ -17,6 +17,8 @@ use std::time::Duration;
 
 use log::{debug, error, info, warn};
 
+use crate::config::ExtractionChunkingConfig;
+use crate::extraction_chunking::build_preprocess_coverage_windows;
 use crate::processor::{
     ArtifactProcessorInput, BatchHandle, BatchPollResult, ExtractionBatchSubmitter,
     PreprocessBatchSubmitter, PreprocessProcessorInput, ProcessorError,
@@ -30,7 +32,7 @@ use crate::storage::{
     DerivedMetadataWriteStore, EnrichmentJobLifecycleStore, EnrichmentStateStore, EnrichmentTier,
     JobType, LoadedArtifactForEnrichment, NewEnrichmentBatch, NewEnrichmentJob,
     PersistedEnrichmentBatch, ReconciliationDecision, ReconciliationDecisionKind,
-    RetrievalResultSet, SourceType, TopicThreadRef,
+    RetrievalResultSet, SourceType,
 };
 
 const RETRYABLE_INFERENCE_BACKOFF_SECONDS: i64 = 60;
@@ -558,6 +560,7 @@ pub struct PreprocessStage {
     tier: EnrichmentTier,
     batch_size: usize,
     max_concurrent: usize,
+    chunking: ExtractionChunkingConfig,
 }
 
 impl PreprocessStage {
@@ -566,12 +569,14 @@ impl PreprocessStage {
         tier: EnrichmentTier,
         batch_size: usize,
         max_concurrent: usize,
+        chunking: ExtractionChunkingConfig,
     ) -> Self {
         Self {
             submitter,
             tier,
             batch_size,
             max_concurrent,
+            chunking,
         }
     }
 }
@@ -809,6 +814,7 @@ impl StageBehavior for PreprocessStage {
                                 &job.artifact_id,
                                 &input.segments,
                                 &output.topic_threads,
+                                &self.chunking,
                             );
                             let extract_job = NewEnrichmentJob {
                                 job_id: new_id("job"),
@@ -856,6 +862,7 @@ impl StageBehavior for PreprocessStage {
                                             &job.artifact_id,
                                             &input.segments,
                                             &output.topic_threads,
+                                            &self.chunking,
                                         );
                                         let extract_job = NewEnrichmentJob {
                                             job_id: new_id("job"),
@@ -1930,15 +1937,15 @@ impl StageBehavior for ReconcileStage {
 use crate::domain::SourceTimestamp;
 use crate::processor::{
     ArtifactProcessorOutput, MemoryOutput, ReconciliationDecisionOutput, RelationshipOutput,
-    SummaryOutput,
+    SummaryOutput, memory_candidate_key_from_fields,
 };
 use crate::storage::{
     CandidateEntity, CandidateRelationship, ClassificationObjectJson, ConversationWindowRef,
     DerivationRunStatus, DerivationRunType, DerivedObjectPayload, EvidenceRole,
-    ExtractedClassification, ExtractedMemory, InputScopeType, LoadedSegment, MemoryObjectJson,
-    NewDerivationRun, NewDerivedObject, NewEvidenceLink, ObjectStatus, OriginKind,
-    RelationshipObjectJson, RetrievalIntent, ScopeType, SummaryObjectJson, SupportStrength,
-    WriteDerivationAttempt, WriteDerivedObject,
+    ExtractedClassification, ExtractedMemory, InputScopeType, MemoryObjectJson, NewDerivationRun,
+    NewDerivedObject, NewEvidenceLink, ObjectStatus, OriginKind, RelationshipObjectJson,
+    RetrievalIntent, ScopeType, SummaryObjectJson, SupportStrength, WriteDerivationAttempt,
+    WriteDerivedObject,
 };
 use rand::random;
 use std::collections::HashSet;
@@ -2110,79 +2117,6 @@ fn complete_reconcile_without_candidates(
     Ok(())
 }
 
-const PREPROCESS_WINDOW_SEGMENTS: usize = 24;
-const PREPROCESS_WINDOW_OVERLAP: usize = 4;
-
-fn build_preprocess_coverage_windows(
-    artifact_id: &str,
-    segments: &[LoadedSegment],
-    topic_threads: &[TopicThreadRef],
-) -> Vec<ConversationWindowRef> {
-    if segments.is_empty() {
-        return Vec::new();
-    }
-    let covered: HashSet<i32> = topic_threads
-        .iter()
-        .flat_map(|thread| thread.spans.iter())
-        .flat_map(|span| span.start_sequence_no..=span.end_sequence_no)
-        .collect();
-    let uncovered: Vec<_> = segments
-        .iter()
-        .filter(|segment| !covered.contains(&segment.sequence_no))
-        .cloned()
-        .collect();
-    if uncovered.is_empty() {
-        return Vec::new();
-    }
-
-    build_contiguous_windows(artifact_id, &uncovered)
-}
-
-fn build_contiguous_windows(
-    artifact_id: &str,
-    segments: &[LoadedSegment],
-) -> Vec<ConversationWindowRef> {
-    if segments.is_empty() {
-        return Vec::new();
-    }
-    if segments.len() <= PREPROCESS_WINDOW_SEGMENTS {
-        return vec![ConversationWindowRef {
-            window_id: format!("{artifact_id}:window:0"),
-            label: "coverage fallback".to_string(),
-            start_sequence_no: segments
-                .first()
-                .map(|segment| segment.sequence_no)
-                .unwrap_or(0),
-            end_sequence_no: segments
-                .last()
-                .map(|segment| segment.sequence_no)
-                .unwrap_or(0),
-        }];
-    }
-
-    let mut windows = Vec::new();
-    let mut start = 0usize;
-    let step = PREPROCESS_WINDOW_SEGMENTS
-        .saturating_sub(PREPROCESS_WINDOW_OVERLAP)
-        .max(1);
-    while start < segments.len() {
-        let end = (start + PREPROCESS_WINDOW_SEGMENTS).min(segments.len());
-        let first = &segments[start];
-        let last = &segments[end - 1];
-        windows.push(ConversationWindowRef {
-            window_id: format!("{artifact_id}:window:{}", windows.len()),
-            label: format!("messages {}-{}", first.sequence_no, last.sequence_no),
-            start_sequence_no: first.sequence_no,
-            end_sequence_no: last.sequence_no,
-        });
-        if end == segments.len() {
-            break;
-        }
-        start += step;
-    }
-    windows
-}
-
 fn build_extraction_result(
     claimed_job: &ClaimedJob,
     input: &ArtifactProcessorInput,
@@ -2213,6 +2147,7 @@ fn build_extraction_result(
             .memories
             .iter()
             .map(|m| ExtractedMemory {
+                candidate_key: m.candidate_key.clone(),
                 title: m.title.clone(),
                 body_text: m.body_text.clone(),
                 memory_type: m.memory_type.clone(),
@@ -2279,6 +2214,17 @@ fn build_reconciliation_input(
             .memories
             .iter()
             .map(|m| MemoryOutput {
+                candidate_key: if m.candidate_key.is_empty() {
+                    memory_candidate_key_from_fields(
+                        &m.memory_type,
+                        m.memory_scope,
+                        &m.memory_scope_value,
+                        m.title.as_deref(),
+                        &m.body_text,
+                    )
+                } else {
+                    m.candidate_key.clone()
+                },
                 title: m.title.clone(),
                 body_text: m.body_text.clone(),
                 memory_type: m.memory_type.clone(),
@@ -2333,10 +2279,17 @@ fn build_reconciliation_decisions(
 }
 
 fn memory_target_key(memory: &ExtractedMemory) -> String {
-    memory
-        .title
-        .clone()
-        .unwrap_or_else(|| memory.body_text.chars().take(64).collect())
+    if memory.candidate_key.is_empty() {
+        memory_candidate_key_from_fields(
+            &memory.memory_type,
+            memory.memory_scope,
+            &memory.memory_scope_value,
+            memory.title.as_deref(),
+            &memory.body_text,
+        )
+    } else {
+        memory.candidate_key.clone()
+    }
 }
 
 fn relationship_target_key(relationship: &CandidateRelationship) -> String {
@@ -2482,6 +2435,7 @@ fn build_derivation_attempt(
                     title: memory.title.clone(),
                     body_text: memory.body_text.clone(),
                     object_json: MemoryObjectJson {
+                        candidate_key: memory_target_key(memory),
                         memory_type: memory.memory_type.clone(),
                         memory_scope: memory.memory_scope,
                         memory_scope_value: memory.memory_scope_value.clone(),

@@ -675,6 +675,8 @@ pub struct ClassificationObjectJson {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct MemoryObjectJson {
+    #[serde(default)]
+    pub candidate_key: String,
     pub memory_type: String,
     pub memory_scope: ScopeType,
     pub memory_scope_value: String,
@@ -1059,6 +1061,8 @@ pub struct ExtractedClassification {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ExtractedMemory {
+    #[serde(default)]
+    pub candidate_key: String,
     pub title: Option<String>,
     pub body_text: String,
     pub memory_type: String,

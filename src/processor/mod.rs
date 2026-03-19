@@ -6,6 +6,7 @@ use reqwest::blocking::{multipart, Client};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::config::{OpenAiConfig, OpenAiReasoningEffort};
@@ -74,6 +75,7 @@ pub struct ClassificationOutput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryOutput {
+    pub candidate_key: String,
     pub title: Option<String>,
     pub body_text: String,
     pub memory_type: String,
@@ -149,6 +151,8 @@ pub struct InferenceUsage {
     pub reported_cost_micros: Option<u64>,
 }
 
+const MAX_CLASSIFICATIONS: usize = 5;
+const MAX_MEMORIES: usize = 15;
 const MAX_RETRIEVAL_INTENTS: usize = 8;
 
 pub trait ArtifactProcessor {
@@ -225,6 +229,16 @@ impl ArtifactProcessor for StubProcessor {
                 evidence_segment_ids: evidence_segment_ids.clone(),
             }],
             memories: vec![MemoryOutput {
+                candidate_key: memory_candidate_key_from_fields(
+                    "project_fact",
+                    ScopeType::Artifact,
+                    &input.artifact_id,
+                    Some("Artifact memory"),
+                    &format!(
+                        "Stub memory for artifact {} derived from {} segments.",
+                        input.artifact_id, segment_count
+                    ),
+                ),
                 title: Some("Artifact memory".to_string()),
                 body_text: format!(
                     "Stub memory for artifact {} derived from {} segments.",
@@ -356,10 +370,7 @@ impl ReconciliationProcessor for StubReconciliationProcessor {
             .map(|memory| ReconciliationDecisionOutput {
                 decision_kind: ReconciliationDecisionKind::CreateNew,
                 target_kind: "memory".to_string(),
-                target_key: memory
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| memory.body_text.chars().take(64).collect()),
+                target_key: memory.candidate_key.clone(),
                 matched_object_id: None,
                 rationale: "Stub reconciliation defaults to create_new.".to_string(),
                 evidence_segment_ids: memory.evidence_segment_ids.clone(),
@@ -893,14 +904,6 @@ impl ConversationEnrichmentStrategy {
             prompt_version: OPENAI_PROMPT_VERSION,
             system_prompt: OPENAI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
             extraction_schema: openai_structured_output_schema_wrapper,
-        })
-    }
-
-    fn gemini_default() -> Arc<dyn EnrichmentStrategy> {
-        Arc::new(Self {
-            prompt_version: GEMINI_PROMPT_VERSION,
-            system_prompt: GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
-            extraction_schema: structured_output_schema_wrapper,
         })
     }
 
@@ -2525,11 +2528,12 @@ impl ModelArtifactOutput {
             &valid_segment_ids,
         )?;
 
-        if self.classifications.len() > 2 {
+        if self.classifications.len() > MAX_CLASSIFICATIONS {
             return Err(ProcessorError::InvalidModelOutput {
                 detail: format!(
-                    "model returned {} classifications; expected at most 2",
-                    self.classifications.len()
+                    "model returned {} classifications; expected at most {}",
+                    self.classifications.len(),
+                    MAX_CLASSIFICATIONS
                 ),
             });
         }
@@ -2564,11 +2568,12 @@ impl ModelArtifactOutput {
             )?;
         }
 
-        if self.memories.len() > 5 {
+        if self.memories.len() > MAX_MEMORIES {
             return Err(ProcessorError::InvalidModelOutput {
                 detail: format!(
-                    "model returned {} memories; expected at most 5",
-                    self.memories.len()
+                    "model returned {} memories; expected at most {}",
+                    self.memories.len(),
+                    MAX_MEMORIES
                 ),
             });
         }
@@ -2752,13 +2757,25 @@ impl ModelArtifactOutput {
             memories: self
                 .memories
                 .into_iter()
-                .map(|memory| MemoryOutput {
-                    title: normalize_optional_text(memory.title),
-                    body_text: memory.body_text.trim().to_string(),
-                    memory_type: memory.memory_type,
-                    memory_scope: memory.memory_scope,
-                    memory_scope_value: memory.memory_scope_value,
-                    evidence_segment_ids: memory.evidence_segment_ids,
+                .map(|memory| {
+                    let title = normalize_optional_text(memory.title);
+                    let body_text = memory.body_text.trim().to_string();
+                    let candidate_key = memory_candidate_key_from_fields(
+                        &memory.memory_type,
+                        memory.memory_scope,
+                        &memory.memory_scope_value,
+                        title.as_deref(),
+                        &body_text,
+                    );
+                    MemoryOutput {
+                        candidate_key,
+                        title,
+                        body_text,
+                        memory_type: memory.memory_type,
+                        memory_scope: memory.memory_scope,
+                        memory_scope_value: memory.memory_scope_value,
+                        evidence_segment_ids: memory.evidence_segment_ids,
+                    }
                 })
                 .collect(),
             entities: self
@@ -3078,12 +3095,7 @@ impl ModelReconciliationOutput {
         let valid_targets: HashSet<String> = input
             .memories
             .iter()
-            .map(|memory| {
-                memory
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| memory.body_text.chars().take(64).collect())
-            })
+            .map(|memory| memory.candidate_key.clone())
             .chain(input.relationships.iter().map(|relationship| {
                 format!(
                     "{}:{}:{}",
@@ -3219,6 +3231,58 @@ fn normalize_optional_text(value: String) -> Option<String> {
     }
 }
 
+fn normalize_candidate_key_text(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut previous_was_space = true;
+
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        let ch = if ch.is_ascii_alphanumeric() || ch.is_whitespace() {
+            ch
+        } else {
+            ' '
+        };
+        if ch.is_whitespace() {
+            if !previous_was_space {
+                normalized.push(' ');
+                previous_was_space = true;
+            }
+        } else {
+            normalized.push(ch);
+            previous_was_space = false;
+        }
+    }
+
+    normalized.trim().to_string()
+}
+
+fn hex_prefix(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
+}
+
+pub fn memory_candidate_key_from_fields(
+    memory_type: &str,
+    memory_scope: ScopeType,
+    memory_scope_value: &str,
+    title: Option<&str>,
+    body_text: &str,
+) -> String {
+    let canonical = format!(
+        "{}|{}|{}|{}|{}",
+        normalize_candidate_key_text(memory_type),
+        memory_scope.as_str(),
+        normalize_candidate_key_text(memory_scope_value),
+        normalize_candidate_key_text(title.unwrap_or_default()),
+        normalize_candidate_key_text(body_text),
+    );
+    let digest = Sha256::digest(canonical.as_bytes());
+    format!("mem:{}", hex_prefix(&digest[..16]))
+}
+
 pub(crate) fn combine_inference_usage(
     first: Option<InferenceUsage>,
     second: Option<InferenceUsage>,
@@ -3338,15 +3402,15 @@ pub(crate) fn build_conversation_user_prompt(
          {segments_json}\n\
          \n\
          Output guidance:\n\
-         - summary: 2-4 compact sentences\n\
-         - classifications: prefer 0 or 1\n\
-         - memories: only durable engineering facts or explicit next steps\n\
-         - entities: include only explicit named people, projects, systems, or organizations with durable retrieval value\n\
-         - relationships: include only explicit supported links between emitted entities or durable facts\n\
+         - summary: 2-4 compact sentences covering the main topics discussed\n\
+         - classifications: 1-3 covering the major domains of the conversation\n\
+         - memories: extract every durable personal fact, preference, decision, health detail, biographical event, ongoing state, constraint, or project fact that could be independently retrieved later. A long or rich conversation should produce many memories, not a summary of a few. Categories to look for: preferences, history, decisions made, conclusions reached, ongoing state, goals, constraints, relationships between entities, health and medical context, biographical facts, and named workflows or systems.\n\
+         - entities: include all explicit named people, projects, systems, organizations, and domain-specific proper nouns with durable retrieval value\n\
+         - relationships: include explicit supported links between emitted entities or durable facts\n\
          - retrieval_intents: ask archive-only follow-up questions when duplicate detection, prior-state matching, or contradiction checks matter\n\
          - importance: be conservative\n\
          - evidence_segment_ids must use only the evidence_ref values shown in segments (for example s1, s2)\n\
-         - cite the minimum evidence needed; prefer 1-2 refs per item\n\
+         - cite every segment that directly supports each derived object, not just the primary one\n\
          - memory_scope_value must be {artifact_id}\n\
          ",
         artifact_id = input.artifact_id,
@@ -3517,10 +3581,7 @@ pub(crate) fn build_reconciliation_prompt(
         .memories
         .iter()
         .map(|memory| CandidateMemory {
-            target_key: memory
-                .title
-                .clone()
-                .unwrap_or_else(|| memory.body_text.chars().take(64).collect()),
+            target_key: memory.candidate_key.clone(),
             title: memory.title.as_deref(),
             body_text: memory.body_text.as_str(),
             evidence_segment_ids: &memory.evidence_segment_ids,
@@ -3808,7 +3869,7 @@ pub(crate) fn preprocess_output_schema() -> serde_json::Value {
     })
 }
 
-pub(crate) fn structured_output_schema() -> serde_json::Value {
+pub fn structured_output_schema() -> serde_json::Value {
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -3840,7 +3901,7 @@ pub(crate) fn structured_output_schema() -> serde_json::Value {
             },
             "classifications": {
                 "type": "array",
-                "maxItems": 2,
+                "maxItems": MAX_CLASSIFICATIONS,
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
@@ -3869,7 +3930,7 @@ pub(crate) fn structured_output_schema() -> serde_json::Value {
             },
             "memories": {
                 "type": "array",
-                "maxItems": 5,
+                "maxItems": MAX_MEMORIES,
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
@@ -3995,7 +4056,7 @@ pub(crate) fn openai_structured_output_schema() -> serde_json::Value {
         .and_then(|properties| properties.get_mut("memories"))
         .and_then(serde_json::Value::as_object_mut)
     {
-        memories.insert("maxItems".to_string(), serde_json::json!(2));
+        memories.insert("maxItems".to_string(), serde_json::json!(MAX_MEMORIES));
         if let Some(items) = memories
             .get_mut("items")
             .and_then(serde_json::Value::as_object_mut)
@@ -4075,18 +4136,18 @@ pub(crate) fn reconciliation_output_schema() -> serde_json::Value {
 
 const OPENAI_PROMPT_VERSION: &str = "openai-strict-v2";
 pub(crate) const ANTHROPIC_PROMPT_VERSION: &str = "anthropic-strict-v1";
-pub(crate) const GEMINI_PROMPT_VERSION: &str = "gemini-strict-v5";
+pub(crate) const GEMINI_PROMPT_VERSION: &str = "gemini-strict-v6";
 pub(crate) const GROK_PROMPT_VERSION: &str = "grok-strict-v2";
 const PREPROCESS_PROMPT_VERSION: &str = "preprocess-v3";
 pub(crate) const PREPROCESS_PHASE_ONE_SYSTEM_PROMPT: &str = "You are OpenArchive's local segmentation engine. Return ONLY valid JSON.\n\nRules:\n1. Partition the conversation into contiguous topic_spans.\n2. Every segment must be covered exactly once.\n3. Keep spans local and contiguous. Do not merge non-contiguous returns in this phase.\n4. Split when the active question, decision, troubleshooting target, work item, or named subject changes in a meaningful way.\n5. Do not create tiny spans for brief clarifications unless the thread actually changes.\n6. Labels must be short and specific.\n7. Summaries must be one short sentence.\n8. focus_key must be a short phrase naming the concrete thread target, such as the specific question, workflow, entity, or decision under discussion.\n9. start_evidence_ref and end_evidence_ref must be copied exactly from the provided evidence_ref strings.\n10. Never invent, transform, expand, or combine ids.\n11. Never output values like segment-*, seg-*, span-*, artifact ids, or sequence numbers in evidence ref fields.\n12. Output valid JSON only.";
 pub(crate) const PREPROCESS_PHASE_TWO_SYSTEM_PROMPT: &str = "You are OpenArchive's thread consolidation engine. Return ONLY valid JSON.\n\nRules:\n1. Merge local spans into durable topic_threads.\n2. Revisited topics should reuse one thread with multiple spans.\n3. Do not merge spans on broad domain overlap alone.\n4. Only merge when the later span clearly resumes the same specific thread of work, question, workflow, or investigation.\n5. Treat focus_key as a strong identity signal; different focus_key values usually imply different threads unless the excerpts show a clear return to the same exact thread.\n6. Prefer separate threads when unsure.\n7. In topic_threads.spans, start_evidence_ref and end_evidence_ref must be copied exactly from the provided spans.\n8. Never output span_id in evidence ref fields.\n9. Never invent, transform, expand, or combine ids.\n10. Never output values like segment-*, seg-*, span-*, artifact ids, or sequence numbers in evidence ref fields.\n11. Summaries must be one short sentence.\n12. Output valid JSON only.";
-const OPENAI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for OpenAI. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Prefer fewer, stronger memories over weak ones.\n5. Generic how-to advice, recipes, troubleshooting steps, code snippets, schema conversions, bookkeeping guidance, API usage examples, and one-off utility answers should usually produce zero memories.\n6. If the artifact is primarily generic instructions, code examples, or reusable advice rather than durable user/project state, you must return `memories: []`.\n7. If importance_score is 4 or lower, memories should usually be empty. Do not create memories just because the content is useful.\n8. Do not create `project_fact` memories for generic instructions, implementation fragments, or topic summaries. `project_fact` requires a named project, system, migration, architecture decision, implementation plan, or durable operating model that would still matter later.\n9. `reference` memories are rare. Emit a reference memory only when the artifact contains a named durable reference, policy, design, migration plan, schema, or workflow the user is plausibly going to want recalled later. Do not create reference memories for generic instructions, cooking methods, finance categorization advice, or reusable code examples by default.\n10. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact or decomposes a generic artifact into multiple procedural memories.\n11. If the artifact mixes multiple topics and no single durable memory clearly stands out, keep the information in the summary/classification and emit zero memories.\n12. When uncertain, keep the information in the summary instead of emitting memories.\n13. Use retrieval_intents only for archive lookups that matter for duplicate detection, contradiction checks, or prior-state matching.\n14. Do not guess prior continuity; emit retrieval_intents instead.\n15. Emit relationships only when the artifact explicitly supports the link.\n16. relationship confidence_label must be low, medium, or high.\n17. memory_scope is always artifact and memory_scope_value is the artifact_id.\n18. Low-signal artifacts should usually have low importance and no classifications.\n19. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n20. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+const OPENAI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for OpenAI. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, ongoing state, and personal history that could be independently retrieved later. A rich conversation should produce many memories — not a summary of a few highlights.\n5. Generic how-to advice, recipes, troubleshooting steps, code snippets, and one-off utility answers should produce zero memories unless they reveal a stable user preference or durable personal fact.\n6. If the artifact is primarily generic instructions or reusable advice with no durable user/project state, return `memories: []`.\n7. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, architecture decision, implementation plan, or durable operating model.\n8. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact.\n9. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n10. When uncertain on a low-signal artifact, keep the information in the summary instead of emitting memories.\n11. Use retrieval_intents only for archive lookups that matter for duplicate detection, contradiction checks, or prior-state matching.\n12. Do not guess prior continuity; emit retrieval_intents instead.\n13. Emit relationships only when the artifact explicitly supports the link.\n14. relationship confidence_label must be low, medium, or high.\n15. memory_scope is always artifact and memory_scope_value is the artifact_id.\n16. Low-signal artifacts should usually have low importance and no classifications.\n17. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n18. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
-pub(crate) const ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Anthropic. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Prefer fewer, stronger memories over weak ones.\n5. Generic how-to advice, recipes, troubleshooting steps, code snippets, schema conversions, API usage examples, and one-off utility answers should usually produce zero memories.\n6. Do not create `project_fact` memories for generic instructions, implementation fragments, or topic summaries. `project_fact` requires a named project, system, migration, architecture decision, implementation plan, or durable operating model that would still matter later.\n7. `reference` memories are rare. Emit them only for named durable references, policies, designs, migration plans, schemas, or workflows the user is plausibly going to want recalled later.\n8. If the artifact contains several unrelated tasks or code snippets, do not split them into multiple memory items. Keep them in the summary/classification and emit zero memories unless one durable item clearly stands out.\n9. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact.\n10. When uncertain, keep the information in the summary instead of emitting memories.\n11. Use retrieval_intents only for archive lookups that matter for duplicate detection, contradiction checks, or prior-state matching.\n12. Do not guess prior continuity; emit retrieval_intents instead.\n13. Emit relationships only when the artifact explicitly supports the link.\n14. relationship confidence_label must be low, medium, or high.\n15. memory_scope is always artifact and memory_scope_value is the artifact_id.\n16. Low-signal artifacts should usually have low importance and no classifications.\n17. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n18. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+pub(crate) const ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Anthropic. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, ongoing state, and personal history that could be independently retrieved later. A rich conversation should produce many memories — not a summary of a few highlights.\n5. Generic how-to advice, recipes, troubleshooting steps, code snippets, and one-off utility answers should produce zero memories unless they reveal a stable user preference or durable personal fact.\n6. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, architecture decision, implementation plan, or durable operating model.\n7. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact.\n8. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n9. When uncertain on a low-signal artifact, keep the information in the summary instead of emitting memories.\n10. Use retrieval_intents only for archive lookups that matter for duplicate detection, contradiction checks, or prior-state matching.\n11. Do not guess prior continuity; emit retrieval_intents instead.\n12. Emit relationships only when the artifact explicitly supports the link.\n13. relationship confidence_label must be low, medium, or high.\n14. memory_scope is always artifact and memory_scope_value is the artifact_id.\n15. Low-signal artifacts should usually have low importance and no classifications.\n16. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n17. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
-pub(crate) const GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Gemini. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, or commitments.\n4. Keep the output compact, but do not overcompress rich artifacts.\n5. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n6. Do not guess prior continuity; emit retrieval_intents instead.\n7. Emit relationships only when the artifact explicitly supports the link.\n8. relationship confidence_label must be low, medium, or high.\n9. memory_scope is always artifact and memory_scope_value is the artifact_id.\n10. Low-signal artifacts should usually have low importance and no classifications.\n11. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n12. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+pub(crate) const GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Gemini. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, and ongoing state that could be independently retrieved later. A rich conversation should produce many memories.\n5. Each memory must be one standalone durable item. Do not bundle multiple distinct facts into one memory. Do not emit a memory that merely summarizes the whole artifact.\n6. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n7. Generic how-to advice and one-off utility answers should produce zero memories unless they reveal a stable user preference or durable personal fact.\n8. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n9. Do not guess prior continuity; emit retrieval_intents instead.\n10. Emit relationships only when the artifact explicitly supports the link.\n11. relationship confidence_label must be low, medium, or high.\n12. memory_scope is always artifact and memory_scope_value is the artifact_id.\n13. Low-signal artifacts should usually have low importance and no classifications.\n14. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n15. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
-pub(crate) const GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Grok. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Prefer fewer, stronger memories over weak ones.\n5. Generic how-to advice, recipes, troubleshooting steps, product explanations, and one-off utility answers should usually produce zero memories unless the artifact clearly reveals a stable user preference, durable project fact, recurring workflow, named system architecture choice, reusable reference, or durable personal plan the user is likely to need later.\n6. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, migration, architecture decision, implementation plan, durable operating model, or explicit workflow choice that would still matter later.\n7. Named projects, workflows, architecture choices, migration plans, integration patterns, durable finance plans, and repeated operating preferences should be preserved as memories when the artifact provides explicit evidence and the resulting memory can stand alone later.\n8. If an artifact contains both generic instructions and one durable project/workflow/plan decision, keep the generic material in the summary and still emit the durable memory.\n9. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact or bundles multiple unrelated subtopics together.\n10. On named project, workflow, architecture, or finance-plan artifacts, prefer concrete memories for the specific durable items discussed, such as one implementation decision, one operating preference, one migration step, one persistent constraint, or one long-lived plan.\n11. Do not collapse several concrete durable items into one broad rollup memory like a conversation summary. If multiple durable items are clearly supported, emit separate concrete memories instead of one catch-all memory.\n12. If the artifact mixes multiple topics and no single durable memory clearly stands out, keep the information in the summary/classification and emit zero memories.\n13. Do not split one generic instructional artifact into multiple tiny procedural memories. When uncertain on a low-signal artifact, keep the information in the summary instead of emitting memories.\n14. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n15. Do not guess prior continuity; emit retrieval_intents instead.\n16. Emit relationships only when the artifact explicitly supports the link.\n17. relationship confidence_label must be low, medium, or high.\n18. memory_scope is always artifact and memory_scope_value is the artifact_id.\n19. Low-signal artifacts should usually have low importance and no classifications.\n20. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n21. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+pub(crate) const GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Grok. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, ongoing state, and personal history that could be independently retrieved later. A rich conversation should produce many memories — not a summary of a few highlights.\n5. Generic how-to advice, recipes, troubleshooting steps, and one-off utility answers should produce zero memories unless they reveal a stable user preference, durable personal fact, or ongoing state.\n6. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, architecture decision, implementation plan, or durable operating model.\n7. Named projects, workflows, architecture choices, health protocols, training programs, and repeated operating preferences should be preserved as memories when the artifact provides explicit evidence.\n8. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact or bundles multiple unrelated subtopics together.\n9. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n10. When uncertain on a low-signal artifact, keep the information in the summary instead of emitting memories.\n11. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n12. Do not guess prior continuity; emit retrieval_intents instead.\n13. Emit relationships only when the artifact explicitly supports the link.\n14. relationship confidence_label must be low, medium, or high.\n15. memory_scope is always artifact and memory_scope_value is the artifact_id.\n16. Low-signal artifacts should usually have low importance and no classifications.\n17. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n18. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
 pub(crate) const RECONCILIATION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict reconciliation engine. Use only the provided extraction candidates, retrieval results, and source evidence. Return ONLY valid JSON.\n\nRules:\n1. Prefer no merge over a weak merge.\n2. Choose create_new when the archive evidence is insufficient.\n3. Use attach_to_existing or strengthen_existing only when the retrieved object clearly matches the candidate.\n4. Use supersede_existing only when the new artifact clearly updates or replaces prior state.\n5. Use contradicts_existing only when the artifact clearly conflicts with retrieved prior state.\n6. Never merge identities, projects, or relationships on vague topical overlap.\n7. Every decision must cite real evidence_segment_ids from the extraction candidates.\n8. Output valid JSON only.";
 

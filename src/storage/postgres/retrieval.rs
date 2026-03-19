@@ -18,21 +18,12 @@ fn map_pg_err(connection_string: &str, source: postgres::Error) -> StorageError 
     })
 }
 
-fn escape_like_query(query_text: &str) -> String {
-    query_text
-        .to_lowercase()
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
-}
-
 pub fn search_candidates(
     client: &mut Client,
     connection_string: &str,
     query_text: &str,
     limit: usize,
 ) -> StorageResult<Vec<ArchiveSearchCandidate>> {
-    let like_pattern = format!("%{}%", escape_like_query(query_text));
     let limit = i64::try_from(limit).map_err(|_| StorageError::InvalidDerivationWrite {
         detail: format!("search limit {limit} exceeds Postgres BIGINT range"),
     })?;
@@ -47,7 +38,7 @@ pub fn search_candidates(
                        COALESCE(a.title, '') AS snippet,
                        300 AS score_hint
                   FROM oa_artifact a
-                 WHERE lower(COALESCE(a.title, '')) LIKE $1 ESCAPE '\'
+                 WHERE a.title_tsv @@ websearch_to_tsquery('english', $1)
                 UNION ALL
                 SELECT d.artifact_id AS artifact_id,
                        d.derived_object_id AS match_record_id,
@@ -57,11 +48,7 @@ pub fn search_candidates(
                        200 AS score_hint
                   FROM oa_derived_object d
                  WHERE d.object_status = 'active'
-                   AND (
-                        lower(COALESCE(d.title, '')) LIKE $1 ESCAPE '\'
-                        OR lower(COALESCE(d.body_text, '')) LIKE $1 ESCAPE '\'
-                        OR lower(COALESCE(d.object_json::text, '')) LIKE $1 ESCAPE '\'
-                   )
+                   AND d.search_tsv @@ websearch_to_tsquery('english', $1)
                 UNION ALL
                 SELECT s.artifact_id AS artifact_id,
                        s.segment_id AS match_record_id,
@@ -70,11 +57,11 @@ pub fn search_candidates(
                        COALESCE(s.text_content, '') AS snippet,
                        100 AS score_hint
                   FROM oa_segment s
-                 WHERE lower(COALESCE(s.text_content, '')) LIKE $1 ESCAPE '\'
+                 WHERE s.text_content_tsv @@ websearch_to_tsquery('english', $1)
             ) matches
             ORDER BY score_hint DESC, artifact_id ASC, match_record_id ASC
             LIMIT $2",
-            &[&like_pattern, &limit],
+            &[&query_text, &limit],
         )
         .map_err(|source| map_pg_err(connection_string, source))?;
 

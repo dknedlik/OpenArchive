@@ -213,6 +213,7 @@ pub struct GeminiConfig {
     pub api_key: String,
     pub base_url: String,
     pub max_output_tokens: u32,
+    pub repair_max_output_tokens: u32,
     pub standard_model: String,
     pub quality_model: Option<String>,
     pub batch_enabled: bool,
@@ -231,6 +232,10 @@ impl GeminiConfig {
                 .ok()
                 .and_then(|value| value.parse::<u32>().ok())
                 .unwrap_or(4000),
+            repair_max_output_tokens: env::var("OA_GEMINI_REPAIR_MAX_OUTPUT_TOKENS")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(8000),
             standard_model: required_env("OA_GEMINI_STANDARD_MODEL")?,
             quality_model: optional_trimmed_env("OA_GEMINI_QUALITY_MODEL"),
             batch_enabled: env::var("OA_GEMINI_BATCH_ENABLED")
@@ -535,6 +540,13 @@ pub struct StageConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractionChunkingConfig {
+    pub max_segments_per_chunk: usize,
+    pub chunk_overlap_segments: usize,
+    pub max_chars_per_chunk: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnrichmentPipelineConfig {
     pub poll_interval: Duration,
     pub preprocess_workers: usize,
@@ -545,6 +557,7 @@ pub struct EnrichmentPipelineConfig {
     pub reconcile: StageConfig,
     pub retrieve_context_workers: usize,
     pub rate_limit_requests_per_minute: u32,
+    pub chunking: ExtractionChunkingConfig,
 }
 
 impl EnrichmentPipelineConfig {
@@ -577,6 +590,14 @@ impl EnrichmentPipelineConfig {
             retrieve_context_workers: positive_usize_env("OA_RETRIEVE_CONTEXT_WORKERS")?
                 .unwrap_or(2),
             rate_limit_requests_per_minute: positive_u32_env("OA_RATE_LIMIT_RPM")?.unwrap_or(60),
+            chunking: ExtractionChunkingConfig {
+                max_segments_per_chunk: positive_usize_env("OA_EXTRACT_CHUNK_SEGMENTS")?
+                    .unwrap_or(20),
+                chunk_overlap_segments: optional_usize_env("OA_EXTRACT_CHUNK_OVERLAP")?
+                    .unwrap_or(4),
+                max_chars_per_chunk: positive_usize_env("OA_EXTRACT_CHUNK_MAX_CHARS")?
+                    .unwrap_or(25_000),
+            },
         })
     }
 }
@@ -613,6 +634,7 @@ mod tests {
             "OA_GEMINI_API_KEY",
             "OA_GEMINI_BASE_URL",
             "OA_GEMINI_MAX_OUTPUT_TOKENS",
+            "OA_GEMINI_REPAIR_MAX_OUTPUT_TOKENS",
             "OA_GEMINI_STANDARD_MODEL",
             "OA_GEMINI_QUALITY_MODEL",
             "OA_ANTHROPIC_API_KEY",
@@ -639,6 +661,9 @@ mod tests {
             "OA_HTTP_REQUEST_WORKERS",
             "OA_ENRICHMENT_WORKERS",
             "OA_ENRICHMENT_POLL_INTERVAL_MS",
+            "OA_EXTRACT_CHUNK_SEGMENTS",
+            "OA_EXTRACT_CHUNK_OVERLAP",
+            "OA_EXTRACT_CHUNK_MAX_CHARS",
             "OA_POSTGRES_URL",
             "DATABASE_URL",
         ] {
@@ -782,6 +807,23 @@ mod tests {
     }
 
     #[test]
+    fn enrichment_pipeline_defaults_include_windowed_chunking_profile() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
+
+        let config =
+            EnrichmentPipelineConfig::from_env().expect("pipeline config should load defaults");
+
+        assert_eq!(config.chunking.max_segments_per_chunk, 20);
+        assert_eq!(config.chunking.chunk_overlap_segments, 4);
+        assert_eq!(config.chunking.max_chars_per_chunk, 25_000);
+    }
+
+    #[test]
     fn inference_execution_mode_loads_when_configured() {
         let _guard = env_lock();
         clear_test_env();
@@ -818,6 +860,7 @@ mod tests {
             "https://generativelanguage.googleapis.com/v1beta"
         );
         assert_eq!(config.max_output_tokens, 4000);
+        assert_eq!(config.repair_max_output_tokens, 8000);
         assert_eq!(config.standard_model, "gemini-2.5-flash-lite");
         assert_eq!(config.quality_model, None);
     }
