@@ -255,6 +255,7 @@ pub struct OpenAiConfig {
     pub api_key: String,
     pub base_url: String,
     pub max_output_tokens: u32,
+    pub repair_max_output_tokens: u32,
     pub reasoning_effort_override: OpenAiReasoningEffort,
     pub standard_model: String,
     pub quality_model: Option<String>,
@@ -270,6 +271,10 @@ impl OpenAiConfig {
                 .ok()
                 .and_then(|value| value.parse::<u32>().ok())
                 .unwrap_or(4000),
+            repair_max_output_tokens: env::var("OA_OPENAI_REPAIR_MAX_OUTPUT_TOKENS")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(8000),
             reasoning_effort_override: OpenAiReasoningEffort::from_env()?,
             standard_model: required_env("OA_OPENAI_STANDARD_MODEL")?,
             quality_model: optional_trimmed_env("OA_OPENAI_QUALITY_MODEL"),
@@ -280,6 +285,7 @@ impl OpenAiConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenAiReasoningEffort {
     Auto,
+    None,
     Minimal,
     Low,
     Medium,
@@ -291,6 +297,7 @@ impl OpenAiReasoningEffort {
         let value = env::var("OA_OPENAI_REASONING_EFFORT").unwrap_or_else(|_| "auto".to_string());
         match value.as_str() {
             "auto" => Ok(Self::Auto),
+            "none" => Ok(Self::None),
             "minimal" => Ok(Self::Minimal),
             "low" => Ok(Self::Low),
             "medium" => Ok(Self::Medium),
@@ -298,7 +305,7 @@ impl OpenAiReasoningEffort {
             _ => Err(ConfigError::InvalidEnumEnv {
                 key: "OA_OPENAI_REASONING_EFFORT",
                 value,
-                expected: "auto, minimal, low, medium, high",
+                expected: "auto, none, minimal, low, medium, high",
             }),
         }
     }
@@ -306,6 +313,7 @@ impl OpenAiReasoningEffort {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Auto => "auto",
+            Self::None => "none",
             Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
@@ -344,6 +352,7 @@ pub struct GrokConfig {
     pub api_key: String,
     pub base_url: String,
     pub max_output_tokens: u32,
+    pub repair_max_output_tokens: u32,
     pub standard_model: String,
     pub quality_model: Option<String>,
 }
@@ -358,6 +367,10 @@ impl GrokConfig {
                 .ok()
                 .and_then(|value| value.parse::<u32>().ok())
                 .unwrap_or(4000),
+            repair_max_output_tokens: env::var("OA_GROK_REPAIR_MAX_OUTPUT_TOKENS")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(8000),
             standard_model: required_env("OA_GROK_STANDARD_MODEL")?,
             quality_model: optional_trimmed_env("OA_GROK_QUALITY_MODEL"),
         })
@@ -533,6 +546,27 @@ fn optional_usize_env(key: &'static str) -> ConfigResult<Option<usize>> {
     }
 }
 
+fn optional_percentage_env(key: &'static str) -> ConfigResult<Option<u8>> {
+    match env::var(key) {
+        Ok(raw) => {
+            let value = raw
+                .parse::<u8>()
+                .map_err(|_| ConfigError::InvalidPositiveIntegerEnv {
+                    key,
+                    value: raw.clone(),
+                })?;
+            if value == 0 {
+                return Err(ConfigError::InvalidPositiveIntegerEnv { key, value: raw });
+            }
+            if value > 100 {
+                return Err(ConfigError::InvalidPositiveIntegerEnv { key, value: raw });
+            }
+            Ok(Some(value))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageConfig {
     pub batch_size: usize,
@@ -558,6 +592,8 @@ pub struct EnrichmentPipelineConfig {
     pub retrieve_context_workers: usize,
     pub rate_limit_requests_per_minute: u32,
     pub chunking: ExtractionChunkingConfig,
+    pub extract_min_coverage_percent: u8,
+    pub extract_max_gap_fill_passes: usize,
 }
 
 impl EnrichmentPipelineConfig {
@@ -598,6 +634,12 @@ impl EnrichmentPipelineConfig {
                 max_chars_per_chunk: positive_usize_env("OA_EXTRACT_CHUNK_MAX_CHARS")?
                     .unwrap_or(25_000),
             },
+            extract_min_coverage_percent: optional_percentage_env(
+                "OA_EXTRACT_MIN_COVERAGE_PERCENT",
+            )?
+            .unwrap_or(60),
+            extract_max_gap_fill_passes: positive_usize_env("OA_EXTRACT_MAX_GAP_FILL_PASSES")?
+                .unwrap_or(1),
         })
     }
 }
@@ -645,6 +687,7 @@ mod tests {
             "OA_GROK_API_KEY",
             "OA_GROK_BASE_URL",
             "OA_GROK_MAX_OUTPUT_TOKENS",
+            "OA_GROK_REPAIR_MAX_OUTPUT_TOKENS",
             "OA_GROK_STANDARD_MODEL",
             "OA_GROK_QUALITY_MODEL",
             "OA_ORACLE_CONNECT_STRING",
@@ -664,6 +707,8 @@ mod tests {
             "OA_EXTRACT_CHUNK_SEGMENTS",
             "OA_EXTRACT_CHUNK_OVERLAP",
             "OA_EXTRACT_CHUNK_MAX_CHARS",
+            "OA_EXTRACT_MIN_COVERAGE_PERCENT",
+            "OA_EXTRACT_MAX_GAP_FILL_PASSES",
             "OA_POSTGRES_URL",
             "DATABASE_URL",
         ] {
@@ -790,7 +835,7 @@ mod tests {
         );
         std::env::set_var("OA_INFERENCE_PROVIDER", "openai");
         std::env::set_var("OA_OPENAI_API_KEY", "test-key");
-        std::env::set_var("OA_OPENAI_REASONING_EFFORT", "low");
+        std::env::set_var("OA_OPENAI_REASONING_EFFORT", "none");
         std::env::set_var("OA_OPENAI_STANDARD_MODEL", "gpt-4.1-mini");
 
         let config = AppConfig::from_env().expect("openai inference provider should load");
@@ -800,8 +845,9 @@ mod tests {
 
         assert_eq!(config.api_key, "test-key");
         assert_eq!(config.base_url, "https://api.openai.com/v1");
-        assert_eq!(config.reasoning_effort_override, OpenAiReasoningEffort::Low);
+        assert_eq!(config.reasoning_effort_override, OpenAiReasoningEffort::None);
         assert_eq!(config.max_output_tokens, 4000);
+        assert_eq!(config.repair_max_output_tokens, 8000);
         assert_eq!(config.standard_model, "gpt-4.1-mini");
         assert_eq!(config.quality_model, None);
     }
@@ -821,6 +867,8 @@ mod tests {
         assert_eq!(config.chunking.max_segments_per_chunk, 20);
         assert_eq!(config.chunking.chunk_overlap_segments, 4);
         assert_eq!(config.chunking.max_chars_per_chunk, 25_000);
+        assert_eq!(config.extract_min_coverage_percent, 60);
+        assert_eq!(config.extract_max_gap_fill_passes, 1);
     }
 
     #[test]
@@ -909,6 +957,7 @@ mod tests {
         assert_eq!(config.api_key, "test-key");
         assert_eq!(config.base_url, "https://api.x.ai/v1");
         assert_eq!(config.max_output_tokens, 4000);
+        assert_eq!(config.repair_max_output_tokens, 8000);
         assert_eq!(config.standard_model, "grok-4-fast-reasoning");
         assert_eq!(config.quality_model, None);
     }

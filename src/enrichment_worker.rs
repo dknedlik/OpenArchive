@@ -7,7 +7,8 @@ use crate::processor::{
     ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
     ClassificationOutput, EntityOutput, MemoryOutput, PreprocessProcessorInput, ProcessorError,
     ReconciliationProcessorInput, RelationshipOutput, StubProcessorFactory, SummaryOutput,
-    memory_candidate_key_from_fields,
+    cleanup_artifact_processor_output, memory_candidate_key_from_fields,
+    should_shape_conversation_input,
 };
 use crate::rate_limiter::RateLimiter;
 use crate::shutdown::ShutdownToken;
@@ -35,6 +36,12 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RETRYABLE_INFERENCE_BACKOFF_SECONDS: i64 = 60;
+
+#[derive(Clone)]
+struct ExtractCoveragePolicy {
+    min_coverage_percent: u8,
+    max_gap_fill_passes: usize,
+}
 /// Worker ID format: enrichment:<pid>:<worker_index>
 pub fn format_worker_id(pid: u32, worker_index: usize) -> String {
     format!("enrichment:{}:{}", pid, worker_index)
@@ -49,6 +56,7 @@ fn enrichment_worker(
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
     chunking: Arc<ExtractionChunkingConfig>,
+    coverage_policy: Arc<ExtractCoveragePolicy>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
 ) {
@@ -74,6 +82,7 @@ fn enrichment_worker(
                     processor_factory.as_ref(),
                     InferenceExecutionMode::Direct,
                     chunking.as_ref(),
+                    coverage_policy.as_ref(),
                 ) {
                     error!(
                         "Worker {} failed to process claimed work: {}",
@@ -101,6 +110,7 @@ fn process_claimed_jobs(
     processor_factory: &dyn ArtifactProcessorFactory,
     execution_mode: InferenceExecutionMode,
     chunking: &ExtractionChunkingConfig,
+    coverage_policy: &ExtractCoveragePolicy,
 ) -> std::result::Result<(), String> {
     if execution_mode == InferenceExecutionMode::Batch {
         match first_job.job_type {
@@ -172,6 +182,7 @@ fn process_claimed_jobs(
                         processor_factory,
                         batch_processor.as_ref(),
                         chunking,
+                        coverage_policy,
                     );
                 }
             }
@@ -225,6 +236,7 @@ fn process_claimed_jobs(
         derived_store,
         processor_factory,
         chunking,
+        coverage_policy,
     )
 }
 
@@ -238,6 +250,7 @@ fn process_claimed_job(
     derived_store: &dyn DerivedMetadataWriteStore,
     processor_factory: &dyn ArtifactProcessorFactory,
     chunking: &ExtractionChunkingConfig,
+    coverage_policy: &ExtractCoveragePolicy,
 ) -> std::result::Result<(), String> {
     match claimed_job.job_type {
         crate::storage::JobType::ArtifactPreprocess => process_preprocess_job(
@@ -256,6 +269,7 @@ fn process_claimed_job(
             state_store,
             processor_factory,
             chunking,
+            coverage_policy,
         ),
         crate::storage::JobType::ArtifactRetrieveContext => process_retrieve_context_job(
             worker_id,
@@ -285,6 +299,7 @@ fn process_extract_job_batch(
     processor_factory: &dyn ArtifactProcessorFactory,
     batch_processor: &dyn crate::processor::ArtifactBatchProcessor,
     chunking: &ExtractionChunkingConfig,
+    coverage_policy: &ExtractCoveragePolicy,
 ) -> std::result::Result<(), String> {
     let mut batchable = Vec::new();
     let mut fallbacks = Vec::new();
@@ -431,6 +446,7 @@ fn process_extract_job_batch(
             state_store,
             processor_factory,
             chunking,
+            coverage_policy,
         )?;
     }
 
@@ -940,6 +956,7 @@ fn process_extract_job(
     state_store: &dyn EnrichmentStateStore,
     processor_factory: &dyn ArtifactProcessorFactory,
     chunking: &ExtractionChunkingConfig,
+    coverage_policy: &ExtractCoveragePolicy,
 ) -> std::result::Result<(), String> {
     let payload = ArtifactExtractPayload::from_json(&claimed_job.payload_json).map_err(|err| {
         fail_job(
@@ -1038,6 +1055,16 @@ fn process_extract_job(
             .process(&processor_input)
             .map_err(|err| handle_processor_error(job_store, worker_id, &claimed_job.job_id, err))?
     };
+    let output = maybe_gap_fill_extraction_output(
+        worker_id,
+        claimed_job,
+        job_store,
+        processor.as_ref(),
+        &processor_input,
+        output,
+        chunking,
+        coverage_policy,
+    )?;
 
     let extraction_result = build_extraction_result(
         claimed_job,
@@ -1560,7 +1587,7 @@ fn merge_chunk_outputs(
         }
     }
 
-    ArtifactProcessorOutput {
+    cleanup_artifact_processor_output(ArtifactProcessorOutput {
         pipeline_name: first.pipeline_name,
         pipeline_version: first.pipeline_version,
         provider_name: first.provider_name,
@@ -1587,7 +1614,118 @@ fn merge_chunk_outputs(
         } else {
             None
         },
+    })
+}
+
+fn collected_output_evidence_segment_ids(output: &ArtifactProcessorOutput) -> HashSet<String> {
+    let mut cited = HashSet::new();
+    cited.extend(output.summary.evidence_segment_ids.iter().cloned());
+    for classification in &output.classifications {
+        cited.extend(classification.evidence_segment_ids.iter().cloned());
     }
+    for memory in &output.memories {
+        cited.extend(memory.evidence_segment_ids.iter().cloned());
+    }
+    for entity in &output.entities {
+        cited.extend(entity.evidence_segment_ids.iter().cloned());
+    }
+    for relationship in &output.relationships {
+        cited.extend(relationship.evidence_segment_ids.iter().cloned());
+    }
+    for intent in &output.retrieval_intents {
+        cited.extend(intent.evidence_segment_ids.iter().cloned());
+    }
+    cited
+}
+
+fn compute_output_coverage_percent(
+    input: &ArtifactProcessorInput,
+    output: &ArtifactProcessorOutput,
+) -> u8 {
+    if input.segments.is_empty() {
+        return 100;
+    }
+    let cited = collected_output_evidence_segment_ids(output);
+    let total = input.segments.len();
+    let covered = input
+        .segments
+        .iter()
+        .filter(|segment| cited.contains(&segment.segment_id))
+        .count();
+    ((covered * 100) / total) as u8
+}
+
+fn uncovered_segments_for_output<'a>(
+    input: &'a ArtifactProcessorInput,
+    output: &ArtifactProcessorOutput,
+) -> Vec<crate::storage::LoadedSegment> {
+    let cited = collected_output_evidence_segment_ids(output);
+    input
+        .segments
+        .iter()
+        .filter(|segment| !cited.contains(&segment.segment_id))
+        .cloned()
+        .collect()
+}
+
+fn maybe_gap_fill_extraction_output(
+    worker_id: &str,
+    claimed_job: &ClaimedJob,
+    job_store: &dyn EnrichmentJobLifecycleStore,
+    processor: &dyn crate::processor::ArtifactProcessor,
+    input: &ArtifactProcessorInput,
+    output: ArtifactProcessorOutput,
+    chunking: &ExtractionChunkingConfig,
+    coverage_policy: &ExtractCoveragePolicy,
+) -> std::result::Result<ArtifactProcessorOutput, String> {
+    if coverage_policy.max_gap_fill_passes == 0 || !should_shape_conversation_input(input) {
+        return Ok(output);
+    }
+
+    let mut merged_output = output;
+    for pass in 0..coverage_policy.max_gap_fill_passes {
+        let coverage = compute_output_coverage_percent(input, &merged_output);
+        if coverage >= coverage_policy.min_coverage_percent {
+            break;
+        }
+
+        let uncovered_segments = uncovered_segments_for_output(input, &merged_output);
+        if uncovered_segments.is_empty() {
+            break;
+        }
+
+        let uncovered_windows =
+            build_preprocess_coverage_windows(&input.artifact_id, &uncovered_segments, &[], chunking);
+        if uncovered_windows.is_empty() {
+            break;
+        }
+
+        info!(
+            "Extraction gap-fill for artifact {} pass {}/{} coverage={} uncovered_segments={} windows={}",
+            input.artifact_id,
+            pass + 1,
+            coverage_policy.max_gap_fill_passes,
+            coverage,
+            uncovered_segments.len(),
+            uncovered_windows.len()
+        );
+
+        let mut gap_outputs = Vec::new();
+        for chunk_input in build_chunk_inputs(input, &uncovered_windows, chunking) {
+            let chunk_output = processor.process(&chunk_input).map_err(|err| {
+                handle_processor_error(job_store, worker_id, &claimed_job.job_id, err)
+            })?;
+            gap_outputs.push(chunk_output);
+        }
+        if gap_outputs.is_empty() {
+            break;
+        }
+
+        let gap_output = merge_chunk_outputs(input, &gap_outputs);
+        merged_output = merge_chunk_outputs(input, &[merged_output, gap_output]);
+    }
+
+    Ok(merged_output)
 }
 
 fn build_reconciliation_input(
@@ -2179,6 +2317,10 @@ pub fn start_enrichment_workers_with_factory(
                 chunk_overlap_segments: 4,
                 max_chars_per_chunk: 25_000,
             });
+            let coverage_policy = Arc::new(ExtractCoveragePolicy {
+                min_coverage_percent: 60,
+                max_gap_fill_passes: 1,
+            });
 
             thread::Builder::new()
                 .name(format!("enrichment-worker-{}", worker_index))
@@ -2192,6 +2334,7 @@ pub fn start_enrichment_workers_with_factory(
                         derived_store,
                         processor_factory,
                         chunking,
+                        coverage_policy,
                         poll_interval,
                         shutdown,
                     );
@@ -2239,6 +2382,10 @@ pub fn start_enrichment_pipeline(
     let pid = std::process::id();
     let rate_limiter = Arc::new(RateLimiter::new(config.rate_limit_requests_per_minute));
     let chunking = Arc::new(config.chunking.clone());
+    let coverage_policy = Arc::new(ExtractCoveragePolicy {
+        min_coverage_percent: config.extract_min_coverage_percent,
+        max_gap_fill_passes: config.extract_max_gap_fill_passes,
+    });
     let poll_interval = config.poll_interval;
     let mut handles = Vec::new();
 
@@ -2271,6 +2418,7 @@ pub fn start_enrichment_pipeline(
                 Arc::clone(&derived_store),
                 Arc::clone(&processor_factory),
                 Arc::clone(&chunking),
+                Arc::clone(&coverage_policy),
                 poll_interval,
                 shutdown.clone(),
             )?);
@@ -2302,6 +2450,7 @@ pub fn start_enrichment_pipeline(
                 Arc::clone(&derived_store),
                 Arc::clone(&processor_factory),
                 Arc::clone(&chunking),
+                Arc::clone(&coverage_policy),
                 poll_interval,
                 shutdown.clone(),
             )?);
@@ -2317,6 +2466,7 @@ pub fn start_enrichment_pipeline(
                 Arc::clone(&derived_store),
                 Arc::clone(&processor_factory),
                 Arc::clone(&chunking),
+                Arc::clone(&coverage_policy),
                 poll_interval,
                 shutdown.clone(),
             )?);
@@ -2332,6 +2482,7 @@ pub fn start_enrichment_pipeline(
                 Arc::clone(&derived_store),
                 Arc::clone(&processor_factory),
                 Arc::clone(&chunking),
+                Arc::clone(&coverage_policy),
                 poll_interval,
                 shutdown.clone(),
             )?);
@@ -2534,6 +2685,7 @@ fn spawn_direct_stage_workers(
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
     chunking: Arc<ExtractionChunkingConfig>,
+    coverage_policy: Arc<ExtractCoveragePolicy>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
 ) -> Result<Vec<thread::JoinHandle<()>>> {
@@ -2547,6 +2699,7 @@ fn spawn_direct_stage_workers(
             let derived_store = Arc::clone(&derived_store);
             let processor_factory = Arc::clone(&processor_factory);
             let chunking = Arc::clone(&chunking);
+            let coverage_policy = Arc::clone(&coverage_policy);
             let shutdown = shutdown.clone();
             thread::Builder::new()
                 .name(format!("direct-{}-{}", stage_name, i))
@@ -2561,6 +2714,7 @@ fn spawn_direct_stage_workers(
                         derived_store.as_ref(),
                         processor_factory.as_ref(),
                         chunking.as_ref(),
+                        coverage_policy.as_ref(),
                         poll_interval,
                         shutdown,
                     );
@@ -2585,6 +2739,7 @@ fn direct_stage_worker_loop(
     derived_store: &dyn DerivedMetadataWriteStore,
     processor_factory: &dyn ArtifactProcessorFactory,
     chunking: &ExtractionChunkingConfig,
+    coverage_policy: &ExtractCoveragePolicy,
     poll_interval: Duration,
     shutdown: ShutdownToken,
 ) {
@@ -2619,6 +2774,7 @@ fn direct_stage_worker_loop(
                     derived_store,
                     processor_factory,
                     chunking,
+                    coverage_policy,
                 ) {
                     error!(
                         "Direct stage worker {} failed to process stage job: {}",

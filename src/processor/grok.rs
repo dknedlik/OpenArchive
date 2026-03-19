@@ -8,21 +8,22 @@ use crate::config::GrokConfig;
 use crate::storage::types::EnrichmentTier;
 
 use super::{
-    ArtifactProcessor, ArtifactProcessorFactory, BatchHandle, BatchPollResult,
-    ConversationEnrichmentStrategy, ExtractionBatchSubmitter, HostedArtifactProcessor,
-    HostedPreprocessProcessor, HostedReconciliationProcessor, InferenceClient, InferenceResult,
-    InferenceUsage, OpenRouterResponsesContentItem, OpenRouterResponsesInputItem,
-    OpenRouterResponsesReasoningConfig, OpenRouterResponsesRequest, OpenRouterResponsesResponse,
-    OpenRouterResponsesTextConfig, PreprocessBatchSubmitter, PreprocessPhaseOneSpanResolved,
-    PreprocessProcessor, ProcessorError, ReconciliationBatchSubmitter, ReconciliationProcessor,
-    GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, GROK_PROMPT_VERSION,
+    ArtifactProcessor, ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
+    BatchHandle, BatchPollResult, ExtractionBatchSubmitter, HostedPreprocessProcessor,
+    HostedReconciliationProcessor, InferenceClient, InferenceResult, InferenceUsage,
+    OpenRouterResponsesContentItem, OpenRouterResponsesInputItem, OpenRouterResponsesReasoningConfig,
+    OpenRouterResponsesRequest, OpenRouterResponsesResponse, OpenRouterResponsesTextConfig,
+    PreprocessBatchSubmitter, PreprocessPhaseOneSpanResolved, PreprocessProcessor, ProcessorError,
+    ReconciliationBatchSubmitter, ReconciliationProcessor, GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, GROK_PROMPT_VERSION,
     PREPROCESS_PHASE_ONE_SYSTEM_PROMPT, PREPROCESS_PHASE_TWO_SYSTEM_PROMPT,
-    PREPROCESS_PROMPT_VERSION, RECONCILIATION_SYSTEM_PROMPT,
+    PREPROCESS_PROMPT_VERSION, RECONCILIATION_SYSTEM_PROMPT, structured_output_schema_wrapper,
 };
 
 pub struct GrokProcessorFactory {
-    client: Arc<dyn InferenceClient>,
+    client: Arc<GrokClient>,
     batch_client: Option<Arc<GrokClient>>,
+    extract_max_output_tokens: u32,
+    extract_repair_max_output_tokens: u32,
     standard_model: String,
     quality_model: String,
 }
@@ -38,6 +39,10 @@ impl GrokProcessorFactory {
         Ok(Self {
             client: client.clone(),
             batch_client: Some(client),
+            extract_max_output_tokens: config.max_output_tokens,
+            extract_repair_max_output_tokens: config
+                .repair_max_output_tokens
+                .max(config.max_output_tokens),
             standard_model: config.standard_model,
             quality_model,
         })
@@ -53,8 +58,9 @@ impl ArtifactProcessorFactory for GrokProcessorFactory {
             EnrichmentTier::Standard => self.standard_model.clone(),
             EnrichmentTier::Quality => self.quality_model.clone(),
         };
+        let client: Arc<dyn InferenceClient> = self.client.clone();
         Ok(Box::new(HostedPreprocessProcessor {
-            client: Arc::clone(&self.client),
+            client,
             model,
             pipeline_name: "grok_preprocess",
             provider_name: "grok",
@@ -68,12 +74,11 @@ impl ArtifactProcessorFactory for GrokProcessorFactory {
             EnrichmentTier::Quality => self.quality_model.clone(),
         };
 
-        Ok(Box::new(HostedArtifactProcessor {
+        Ok(Box::new(GrokArtifactProcessor {
             client: Arc::clone(&self.client),
             model,
-            pipeline_name: "grok_enrichment",
-            provider_name: "grok",
-            strategy: ConversationEnrichmentStrategy::grok_default(),
+            max_output_tokens: self.extract_max_output_tokens,
+            repair_max_output_tokens: self.extract_repair_max_output_tokens,
         }))
     }
 
@@ -85,8 +90,9 @@ impl ArtifactProcessorFactory for GrokProcessorFactory {
             EnrichmentTier::Standard => self.standard_model.clone(),
             EnrichmentTier::Quality => self.quality_model.clone(),
         };
+        let client: Arc<dyn InferenceClient> = self.client.clone();
         Ok(Box::new(HostedReconciliationProcessor {
-            client: Arc::clone(&self.client),
+            client,
             model,
             system_prompt: RECONCILIATION_SYSTEM_PROMPT,
         }))
@@ -150,6 +156,13 @@ struct GrokClient {
     max_output_tokens: u32,
 }
 
+struct GrokArtifactProcessor {
+    client: Arc<GrokClient>,
+    model: String,
+    max_output_tokens: u32,
+    repair_max_output_tokens: u32,
+}
+
 impl GrokClient {
     fn new(config: &GrokConfig) -> Result<Self, ProcessorError> {
         let mut default_headers = HeaderMap::new();
@@ -181,10 +194,29 @@ impl InferenceClient for GrokClient {
         user_prompt: &str,
         schema: &serde_json::Value,
     ) -> Result<InferenceResult, ProcessorError> {
+        self.complete_json_with_max_output_tokens(
+            model,
+            system_prompt,
+            user_prompt,
+            schema,
+            self.max_output_tokens,
+        )
+    }
+}
+
+impl GrokClient {
+    fn complete_json_with_max_output_tokens(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        schema: &serde_json::Value,
+        max_output_tokens: u32,
+    ) -> Result<InferenceResult, ProcessorError> {
         let request = self.client.post(format!("{}/responses", self.base_url));
         let body = OpenRouterResponsesRequest {
             model,
-            max_output_tokens: self.max_output_tokens,
+            max_output_tokens,
             reasoning: OpenRouterResponsesReasoningConfig { effort: None },
             text: OpenRouterResponsesTextConfig {
                 format: schema.clone(),
@@ -250,9 +282,7 @@ impl InferenceClient for GrokClient {
             usage,
         })
     }
-}
 
-impl GrokClient {
     fn create_batch(&self, name: &str) -> Result<GrokBatch, ProcessorError> {
         let body = serde_json::json!({ "name": name });
         let response = self
@@ -325,9 +355,11 @@ impl GrokClient {
         system_prompt: &str,
         user_prompt: &str,
         schema: &serde_json::Value,
+        max_output_tokens: u32,
     ) -> serde_json::Value {
         serde_json::json!({
             "model": model,
+            "max_output_tokens": max_output_tokens,
             "messages": [
                 { "role": "system", "content": system_prompt },
                 { "role": "user", "content": user_prompt }
@@ -341,6 +373,57 @@ impl GrokClient {
                 }
             }
         })
+    }
+}
+
+impl ArtifactProcessor for GrokArtifactProcessor {
+    fn process(
+        &self,
+        input: &ArtifactProcessorInput,
+    ) -> Result<ArtifactProcessorOutput, ProcessorError> {
+        super::validate_input(input)?;
+        let prompt = super::build_conversation_user_prompt(input)?;
+        match self.process_once(input, &prompt, self.max_output_tokens) {
+            Ok(output) => Ok(output),
+            Err(error) if super::should_retry_with_repair(&error) => {
+                let repair_prompt = super::build_repair_prompt(&prompt, &error);
+                self.process_once(input, &repair_prompt, self.repair_max_output_tokens)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl GrokArtifactProcessor {
+    fn process_once(
+        &self,
+        input: &ArtifactProcessorInput,
+        user_prompt: &str,
+        max_output_tokens: u32,
+    ) -> Result<ArtifactProcessorOutput, ProcessorError> {
+        let inference_result = self.client.complete_json_with_max_output_tokens(
+            &self.model,
+            GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+            user_prompt,
+            &structured_output_schema_wrapper(),
+            max_output_tokens,
+        )?;
+        let parsed: super::ModelArtifactOutput = serde_json::from_str(&inference_result.output_text)
+            .map_err(|source| ProcessorError::ParseModelJson {
+                source,
+                body_preview: super::preview(&inference_result.output_text),
+            })?;
+        let parsed = parsed.resolve_evidence_aliases(input);
+        parsed
+            .validate_against(input)
+            .map_err(|err| super::attach_output_preview(err, &inference_result.output_text))?;
+        Ok(parsed.into_processor_output(
+            self.model.clone(),
+            inference_result.usage,
+            "grok_enrichment",
+            "grok",
+            GROK_PROMPT_VERSION,
+        ))
     }
 }
 
@@ -381,6 +464,7 @@ impl ExtractionBatchSubmitter for GrokExtractionSubmitter {
                 GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
                 &super::build_conversation_user_prompt(input)?,
                 &super::structured_output_schema(),
+                self.client.max_output_tokens,
             ))
         })?;
         self.client.add_batch_requests(&batch.id, &requests)?;
@@ -460,6 +544,7 @@ impl PreprocessBatchSubmitter for GrokPreprocessSubmitter {
                 PREPROCESS_PHASE_ONE_SYSTEM_PROMPT,
                 &super::build_preprocess_phase_one_user_prompt(input)?,
                 &super::preprocess_phase_one_schema(),
+                self.client.max_output_tokens,
             ))
         })?;
         self.client.add_batch_requests(&batch.id, &requests)?;
@@ -533,6 +618,7 @@ impl PreprocessBatchSubmitter for GrokPreprocessSubmitter {
                 PREPROCESS_PHASE_TWO_SYSTEM_PROMPT,
                 &super::build_preprocess_phase_two_user_prompt(input, spans)?,
                 &super::preprocess_output_schema(),
+                self.client.max_output_tokens,
             ))
         })?;
         self.client.add_batch_requests(&batch.id, &requests)?;
@@ -701,6 +787,7 @@ impl ReconciliationBatchSubmitter for GrokReconciliationSubmitter {
                 RECONCILIATION_SYSTEM_PROMPT,
                 &super::build_reconciliation_prompt(input)?,
                 &super::reconciliation_output_schema(),
+                self.client.max_output_tokens,
             ))
         })?;
         self.client.add_batch_requests(&batch.id, &requests)?;

@@ -194,6 +194,7 @@ fn run_model(
         api_key: base_config.api_key.clone(),
         base_url: base_config.base_url.clone(),
         max_output_tokens: base_config.max_output_tokens,
+        repair_max_output_tokens: base_config.repair_max_output_tokens,
         reasoning_effort_override: base_config.reasoning_effort_override,
         standard_model: model.to_string(),
         quality_model: Some(model.to_string()),
