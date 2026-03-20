@@ -4,6 +4,7 @@ pub mod config;
 pub mod db;
 pub mod domain;
 pub mod enrichment_worker;
+pub mod embeddings;
 pub mod error;
 pub mod extraction_chunking;
 pub mod http;

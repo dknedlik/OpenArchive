@@ -694,6 +694,11 @@ impl EnrichmentJobLifecycleStore for PostgresEnrichmentJobStore {
         let mut client = postgres_db::connect(&self.config)?;
         job::reconcile_stale_running_batches(&mut client, stage_name)
     }
+
+    fn reconcile_stale_running_jobs(&self, stage_name: &str) -> StorageResult<usize> {
+        let mut client = postgres_db::connect(&self.config)?;
+        job::reconcile_stale_running_jobs(&mut client, stage_name)
+    }
 }
 
 impl DerivedMetadataWriteStore for PostgresDerivedMetadataStore {

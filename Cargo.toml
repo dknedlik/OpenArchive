@@ -21,6 +21,7 @@ thiserror = "2.0"
 tiny_http = "0.12"
 ctrlc = "3.4"
 url = "2.5"
+fastembed = "5.13"
 
 [dev-dependencies]
 mockall = "0.12"

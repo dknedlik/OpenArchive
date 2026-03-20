@@ -16,7 +16,8 @@ use super::{
     PreprocessBatchSubmitter, PreprocessPhaseOneSpanResolved, PreprocessProcessor, ProcessorError,
     ReconciliationBatchSubmitter, ReconciliationProcessor, GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, GROK_PROMPT_VERSION,
     PREPROCESS_PHASE_ONE_SYSTEM_PROMPT, PREPROCESS_PHASE_TWO_SYSTEM_PROMPT,
-    PREPROCESS_PROMPT_VERSION, RECONCILIATION_SYSTEM_PROMPT, structured_output_schema_wrapper,
+    PREPROCESS_PROMPT_VERSION, RECONCILIATION_SYSTEM_PROMPT, structured_output_schema_with_allowed_refs,
+    structured_output_schema_wrapper,
 };
 
 pub struct GrokProcessorFactory {
@@ -405,7 +406,7 @@ impl GrokArtifactProcessor {
             &self.model,
             GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
             user_prompt,
-            &structured_output_schema_wrapper(),
+            &structured_output_schema_wrapper(input),
             max_output_tokens,
         )?;
         let parsed: super::ModelArtifactOutput = serde_json::from_str(&inference_result.output_text)
@@ -414,8 +415,8 @@ impl GrokArtifactProcessor {
                 body_preview: super::preview(&inference_result.output_text),
             })?;
         let parsed = parsed.resolve_evidence_aliases(input);
-        parsed
-            .validate_against(input)
+        let parsed = parsed
+            .validate_and_salvage(input)
             .map_err(|err| super::attach_output_preview(err, &inference_result.output_text))?;
         Ok(parsed.into_processor_output(
             self.model.clone(),
@@ -463,7 +464,14 @@ impl ExtractionBatchSubmitter for GrokExtractionSubmitter {
                 &self.model,
                 GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
                 &super::build_conversation_user_prompt(input)?,
-                &super::structured_output_schema(),
+                &structured_output_schema_with_allowed_refs(
+                    &input
+                        .segments
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| format!("evidence_ref_{}", index + 1))
+                        .collect::<Vec<_>>(),
+                ),
                 self.client.max_output_tokens,
             ))
         })?;
@@ -508,7 +516,9 @@ impl ExtractionBatchSubmitter for GrokExtractionSubmitter {
                     body_preview: super::preview(&result.output_text),
                 })?;
             let parsed = parsed.resolve_evidence_aliases(input);
-            parsed.validate_against(input)?;
+            let parsed = parsed
+                .validate_and_salvage(input)
+                .map_err(|err| super::attach_output_preview(err, &result.output_text))?;
             Ok(parsed.into_processor_output(
                 self.model.clone(),
                 result.usage,
@@ -857,7 +867,7 @@ where
     let mut requests = Vec::with_capacity(inputs.len());
     for input in inputs {
         requests.push(GrokBatchRequestEnvelope {
-            batch_request_id: input.batch_custom_id().to_string(),
+            batch_request_id: input.batch_custom_id(),
             batch_request: GrokBatchRequestBody {
                 chat_get_completion: build(input)?,
             },
@@ -878,7 +888,16 @@ where
 {
     let mut by_id = std::collections::HashMap::new();
     for item in client.list_results(batch_id)? {
-        let parsed = if let Some(error) = item.error_message {
+        let parsed = if let Some(error) = item.error_message() {
+            if is_retryable_grok_batch_error(&error) {
+                return Err(ProcessorError::InferenceHttpStatus {
+                    status: 503,
+                    body_preview: format!(
+                        "Grok batch item {} retryable error: {}",
+                        item.batch_request_id, error
+                    ),
+                });
+            }
             return Err(ProcessorError::Message {
                 message: format!(
                     "Grok batch item {} failed: {}",
@@ -888,10 +907,12 @@ where
         } else {
             let response_value =
                 item.chat_completion_response()
-                    .ok_or_else(|| ProcessorError::Message {
-                        message: format!(
-                            "Grok batch item {} missing response",
-                            item.batch_request_id
+                    .ok_or_else(|| ProcessorError::InferenceHttpStatus {
+                        status: 503,
+                        body_preview: format!(
+                            "Grok batch item {} missing response payload: {}",
+                            item.batch_request_id,
+                            super::preview(&item.debug_snapshot())
                         ),
                     })?;
             GrokBatchParsedResult {
@@ -903,12 +924,10 @@ where
     }
     let mut outputs = Vec::with_capacity(inputs.len());
     for input in inputs {
-        let item =
-            by_id
-                .remove(input.batch_custom_id())
-                .ok_or_else(|| ProcessorError::Message {
-                    message: format!("Grok batch missing result for {}", input.batch_custom_id()),
-                })?;
+        let custom_id = input.batch_custom_id();
+        let item = by_id.remove(&custom_id).ok_or_else(|| ProcessorError::Message {
+            message: format!("Grok batch missing result for {}", custom_id),
+        })?;
         outputs.push(parse(item, input));
     }
     Ok(outputs)
@@ -945,25 +964,33 @@ fn extract_grok_usage(value: &serde_json::Value) -> Option<InferenceUsage> {
         .and_then(InferenceUsage::from_openrouter_usage)
 }
 
+fn is_retryable_grok_batch_error(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("temporarily unavailable")
+        || lowered.contains("at capacity")
+        || lowered.contains("try again later")
+        || lowered.contains("service unavailable")
+}
+
 trait GrokBatchInput {
-    fn batch_custom_id(&self) -> &str;
+    fn batch_custom_id(&self) -> String;
 }
 
 impl GrokBatchInput for super::ArtifactProcessorInput {
-    fn batch_custom_id(&self) -> &str {
-        &self.artifact_id
+    fn batch_custom_id(&self) -> String {
+        super::artifact_processor_batch_custom_id(self)
     }
 }
 
 impl GrokBatchInput for super::PreprocessProcessorInput {
-    fn batch_custom_id(&self) -> &str {
-        &self.artifact_id
+    fn batch_custom_id(&self) -> String {
+        self.artifact_id.clone()
     }
 }
 
 impl GrokBatchInput for super::ReconciliationProcessorInput {
-    fn batch_custom_id(&self) -> &str {
-        &self.artifact_id
+    fn batch_custom_id(&self) -> String {
+        self.artifact_id.clone()
     }
 }
 
@@ -1029,7 +1056,7 @@ struct GrokBatchResultsPage {
     next_page_token: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct GrokBatchResultItem {
     batch_request_id: String,
     #[serde(default)]
@@ -1041,24 +1068,116 @@ struct GrokBatchResultItem {
 }
 
 impl GrokBatchResultItem {
+    fn error_message(&self) -> Option<String> {
+        self.error_message
+            .clone()
+            .or_else(|| {
+                self.response
+                    .as_ref()
+                    .and_then(extract_grok_batch_error_message)
+            })
+            .or_else(|| {
+                self.batch_result
+                    .as_ref()
+                    .and_then(GrokBatchResultEnvelope::error_message)
+            })
+    }
+
     fn chat_completion_response(&self) -> Option<&serde_json::Value> {
         self.response.as_ref().or_else(|| {
             self.batch_result
                 .as_ref()
                 .and_then(|result| result.response.as_ref())
-                .and_then(|response| response.chat_get_completion.as_ref())
+                .and_then(|response| response.get("chat_get_completion"))
         })
+    }
+
+    fn debug_snapshot(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| self.batch_request_id.clone())
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct GrokBatchResultEnvelope {
     #[serde(default)]
-    response: Option<GrokBatchResponseEnvelope>,
+    response: Option<serde_json::Value>,
+    #[serde(default)]
+    error: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
-struct GrokBatchResponseEnvelope {
-    #[serde(default)]
-    chat_get_completion: Option<serde_json::Value>,
+impl GrokBatchResultEnvelope {
+    fn error_message(&self) -> Option<String> {
+        self.error
+            .as_ref()
+            .and_then(extract_grok_batch_error_message)
+            .or_else(|| {
+                self.response
+                    .as_ref()
+                    .and_then(extract_grok_batch_error_message)
+            })
+    }
+}
+
+fn extract_grok_batch_error_message(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("error")
+        .and_then(|error| {
+            error.as_str().map(|s| s.to_string()).or_else(|| {
+                error
+                    .get("message")
+                    .and_then(|message| message.as_str())
+                    .map(|s| s.to_string())
+            })
+        })
+        .or_else(|| {
+            value
+                .get("message")
+                .and_then(|message| message.as_str())
+                .map(|s| s.to_string())
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grok_batch_result_item_reads_nested_chat_completion_response() {
+        let item: GrokBatchResultItem = serde_json::from_value(serde_json::json!({
+            "batch_request_id": "artifact-1",
+            "batch_result": {
+                "response": {
+                    "chat_get_completion": {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "{\"summary\":{}}"
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        }))
+        .expect("item should deserialize");
+
+        assert!(item.chat_completion_response().is_some());
+        assert_eq!(item.error_message(), None);
+    }
+
+    #[test]
+    fn grok_batch_result_item_extracts_retryable_error_from_response_payload() {
+        let item: GrokBatchResultItem = serde_json::from_value(serde_json::json!({
+            "batch_request_id": "artifact-1",
+            "batch_result": {
+                "response": {
+                    "error": "Service temporarily unavailable. The model is at capacity and currently cannot serve this request. Please try again later."
+                }
+            }
+        }))
+        .expect("item should deserialize");
+
+        let error = item.error_message().expect("error should be extracted");
+        assert!(is_retryable_grok_batch_error(&error));
+    }
 }

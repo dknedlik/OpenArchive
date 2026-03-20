@@ -18,6 +18,21 @@ fn map_pg_err(connection_string: &str, source: postgres::Error) -> StorageError 
     })
 }
 
+#[cfg(test)]
+fn escape_like_query(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars().flat_map(char::to_lowercase) {
+        match ch {
+            '%' | '_' | '\\' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 pub fn search_candidates(
     client: &mut Client,
     connection_string: &str,

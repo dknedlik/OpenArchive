@@ -656,6 +656,43 @@ pub fn reconcile_stale_running_batches(
         .map_err(map_pg_storage_err)
 }
 
+pub fn reconcile_stale_running_jobs(
+    client: &mut postgres::Client,
+    stage_name: &str,
+) -> StorageResult<usize> {
+    client
+        .execute(
+            "UPDATE oa_enrichment_job j
+             SET job_status = 'retryable',
+                 available_at = NOW(),
+                 claimed_by = NULL,
+                 claimed_at = NULL,
+                 last_error_message = COALESCE(
+                     j.last_error_message,
+                     'Recovered stale running job after poller restart'
+                 )
+             WHERE j.job_status = 'running'
+               AND j.claimed_by LIKE ('enrichment:%:' || $1 || ':%')
+               AND j.job_type = CASE $1
+                     WHEN 'preprocess' THEN 'artifact_preprocess'
+                     WHEN 'extract' THEN 'artifact_extract'
+                     WHEN 'reconcile' THEN 'artifact_reconcile'
+                     ELSE j.job_type
+                 END
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM oa_enrichment_batch_job bj
+                     JOIN oa_enrichment_batch b
+                       ON b.provider_batch_id = bj.provider_batch_id
+                    WHERE bj.job_id = j.job_id
+                      AND b.batch_status = 'running'
+               )",
+            &[&stage_name],
+        )
+        .map(|rows| rows as usize)
+        .map_err(map_pg_storage_err)
+}
+
 fn insert_batch_row(
     client: &mut postgres::Client,
     batch: &NewEnrichmentBatch,

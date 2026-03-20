@@ -12,7 +12,9 @@ pub struct AppConfig {
     pub relational_store: RelationalStoreConfig,
     pub object_store: ObjectStoreConfig,
     pub inference: InferenceConfig,
+    pub reconcile_inference: Option<InferenceConfig>,
     pub inference_mode: InferenceExecutionMode,
+    pub embeddings: EmbeddingConfig,
 }
 
 impl AppConfig {
@@ -22,8 +24,51 @@ impl AppConfig {
             relational_store: RelationalStoreConfig::from_env()?,
             object_store: ObjectStoreConfig::from_env()?,
             inference: InferenceConfig::from_env()?,
+            reconcile_inference: InferenceConfig::from_optional_env("OA_RECONCILE_INFERENCE_PROVIDER")?,
             inference_mode: InferenceExecutionMode::from_env()?,
+            embeddings: EmbeddingConfig::from_env()?,
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingConfig {
+    pub enabled: bool,
+    pub model: LocalEmbeddingModel,
+    pub cache_dir: Option<PathBuf>,
+}
+
+impl EmbeddingConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        Ok(Self {
+            enabled: env::var("OA_LOCAL_EMBEDDINGS_ENABLED")
+                .ok()
+                .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+                .unwrap_or(true),
+            model: LocalEmbeddingModel::from_env()?,
+            cache_dir: optional_trimmed_env("OA_LOCAL_EMBEDDINGS_CACHE_DIR").map(PathBuf::from),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalEmbeddingModel {
+    BgeSmallEnV15,
+}
+
+impl LocalEmbeddingModel {
+    pub fn from_env() -> ConfigResult<Self> {
+        let value = env::var("OA_LOCAL_EMBEDDINGS_MODEL")
+            .unwrap_or_else(|_| "bge-small-en-v1.5".to_string());
+        match value.as_str() {
+            "bge-small-en-v1.5" | "BAAI/bge-small-en-v1.5" => Ok(Self::BgeSmallEnV15),
+            _ => Err(ConfigError::InvalidEmbeddingConfig {
+                message: format!(
+                    "unsupported OA_LOCAL_EMBEDDINGS_MODEL {:?}; expected bge-small-en-v1.5",
+                    value
+                ),
+            }),
+        }
     }
 }
 
@@ -192,7 +237,22 @@ pub enum InferenceConfig {
 
 impl InferenceConfig {
     pub fn from_env() -> ConfigResult<Self> {
-        let provider = env::var("OA_INFERENCE_PROVIDER").unwrap_or_else(|_| "stub".to_string());
+        Self::from_provider("OA_INFERENCE_PROVIDER", "stub")
+    }
+
+    pub fn from_optional_env(key: &'static str) -> ConfigResult<Option<Self>> {
+        let Some(provider) = optional_trimmed_env(key) else {
+            return Ok(None);
+        };
+        Ok(Some(Self::from_named_provider(key, provider)?))
+    }
+
+    fn from_provider(key: &'static str, default_provider: &str) -> ConfigResult<Self> {
+        let provider = env::var(key).unwrap_or_else(|_| default_provider.to_string());
+        Self::from_named_provider(key, provider)
+    }
+
+    fn from_named_provider(key: &'static str, provider: String) -> ConfigResult<Self> {
         match provider.as_str() {
             "stub" => Ok(Self::Stub),
             "openai" => Ok(Self::OpenAi(OpenAiConfig::from_env()?)),
@@ -200,7 +260,7 @@ impl InferenceConfig {
             "anthropic" => Ok(Self::Anthropic(AnthropicConfig::from_env()?)),
             "grok" => Ok(Self::Grok(GrokConfig::from_env()?)),
             _ => Err(ConfigError::InvalidEnumEnv {
-                key: "OA_INFERENCE_PROVIDER",
+                key,
                 value: provider,
                 expected: "stub, openai, gemini, anthropic, grok",
             }),
@@ -666,6 +726,7 @@ mod tests {
             "OA_S3_KEY_PREFIX",
             "OA_S3_URL_STYLE",
             "OA_INFERENCE_PROVIDER",
+            "OA_RECONCILE_INFERENCE_PROVIDER",
             "OA_INFERENCE_MODE",
             "OA_OPENAI_API_KEY",
             "OA_OPENAI_BASE_URL",
@@ -733,6 +794,7 @@ mod tests {
         ));
         assert!(matches!(config.object_store, ObjectStoreConfig::LocalFs(_)));
         assert_eq!(config.inference, InferenceConfig::Stub);
+        assert_eq!(config.reconcile_inference, None);
         assert_eq!(config.inference_mode, InferenceExecutionMode::Batch);
     }
 
@@ -960,5 +1022,30 @@ mod tests {
         assert_eq!(config.repair_max_output_tokens, 8000);
         assert_eq!(config.standard_model, "grok-4-fast-reasoning");
         assert_eq!(config.quality_model, None);
+    }
+
+    #[test]
+    fn reconcile_inference_provider_loads_when_configured() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
+        std::env::set_var("OA_INFERENCE_PROVIDER", "grok");
+        std::env::set_var("OA_GROK_API_KEY", "test-key");
+        std::env::set_var("OA_GROK_STANDARD_MODEL", "grok-4-fast");
+        std::env::set_var("OA_RECONCILE_INFERENCE_PROVIDER", "gemini");
+        std::env::set_var("OA_GEMINI_API_KEY", "gemini-key");
+        std::env::set_var("OA_GEMINI_STANDARD_MODEL", "gemini-2.5-flash-lite");
+
+        let config = AppConfig::from_env().expect("config should load reconcile override");
+
+        assert!(matches!(config.inference, InferenceConfig::Grok(_)));
+        let Some(InferenceConfig::Gemini(reconcile)) = config.reconcile_inference else {
+            panic!("expected gemini reconcile override");
+        };
+        assert_eq!(reconcile.api_key, "gemini-key");
+        assert_eq!(reconcile.standard_model, "gemini-2.5-flash-lite");
     }
 }

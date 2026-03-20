@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::app::ArchiveApplication;
 use crate::config::{AppConfig, InferenceConfig, ObjectStoreConfig, RelationalStoreConfig};
+use crate::embeddings::{FastembedTextEmbedder, TextEmbedder};
 use crate::error::{ConfigError, ConfigResult};
 use crate::object_store::{LocalFsObjectStore, ObjectStore, S3CompatibleObjectStore};
 use crate::processor::{
@@ -33,6 +34,123 @@ pub struct ServiceBundle {
     pub processor_factory: Arc<dyn ArtifactProcessorFactory>,
 }
 
+struct SplitStageProcessorFactory {
+    primary: Arc<dyn ArtifactProcessorFactory>,
+    reconcile: Arc<dyn ArtifactProcessorFactory>,
+}
+
+impl ArtifactProcessorFactory for SplitStageProcessorFactory {
+    fn build_preprocess_processor(
+        &self,
+        tier: crate::storage::EnrichmentTier,
+    ) -> Result<Box<dyn crate::processor::PreprocessProcessor>, crate::processor::ProcessorError>
+    {
+        self.primary.build_preprocess_processor(tier)
+    }
+
+    fn build(
+        &self,
+        tier: crate::storage::EnrichmentTier,
+    ) -> Result<Box<dyn crate::processor::ArtifactProcessor>, crate::processor::ProcessorError>
+    {
+        self.primary.build(tier)
+    }
+
+    fn build_reconciliation_processor(
+        &self,
+        tier: crate::storage::EnrichmentTier,
+    ) -> Result<
+        Box<dyn crate::processor::ReconciliationProcessor>,
+        crate::processor::ProcessorError,
+    > {
+        self.reconcile.build_reconciliation_processor(tier)
+    }
+
+    fn build_batch_processor(
+        &self,
+        tier: crate::storage::EnrichmentTier,
+    ) -> Result<
+        Option<Box<dyn crate::processor::ArtifactBatchProcessor>>,
+        crate::processor::ProcessorError,
+    > {
+        self.primary.build_batch_processor(tier)
+    }
+
+    fn build_preprocess_batch_processor(
+        &self,
+        tier: crate::storage::EnrichmentTier,
+    ) -> Result<
+        Option<Box<dyn crate::processor::PreprocessBatchProcessor>>,
+        crate::processor::ProcessorError,
+    > {
+        self.primary.build_preprocess_batch_processor(tier)
+    }
+
+    fn build_reconciliation_batch_processor(
+        &self,
+        tier: crate::storage::EnrichmentTier,
+    ) -> Result<
+        Option<Box<dyn crate::processor::ReconciliationBatchProcessor>>,
+        crate::processor::ProcessorError,
+    > {
+        self.reconcile.build_reconciliation_batch_processor(tier)
+    }
+
+    fn build_extraction_submitter(
+        &self,
+        tier: crate::storage::EnrichmentTier,
+    ) -> Result<
+        Option<Box<dyn crate::processor::ExtractionBatchSubmitter>>,
+        crate::processor::ProcessorError,
+    > {
+        self.primary.build_extraction_submitter(tier)
+    }
+
+    fn build_preprocess_submitter(
+        &self,
+        tier: crate::storage::EnrichmentTier,
+    ) -> Result<
+        Option<Box<dyn crate::processor::PreprocessBatchSubmitter>>,
+        crate::processor::ProcessorError,
+    > {
+        self.primary.build_preprocess_submitter(tier)
+    }
+
+    fn build_reconciliation_submitter(
+        &self,
+        tier: crate::storage::EnrichmentTier,
+    ) -> Result<
+        Option<Box<dyn crate::processor::ReconciliationBatchSubmitter>>,
+        crate::processor::ProcessorError,
+    > {
+        self.reconcile.build_reconciliation_submitter(tier)
+    }
+}
+
+fn build_processor_factory(
+    inference: &InferenceConfig,
+) -> ConfigResult<Arc<dyn ArtifactProcessorFactory>> {
+    match inference {
+        InferenceConfig::Stub => Ok(Arc::new(StubProcessorFactory)),
+        InferenceConfig::OpenAi(openai) => Ok(Arc::new(
+            OpenAiProcessorFactory::new(openai.clone())
+                .map_err(|message| ConfigError::InvalidInferenceConfig { message })?,
+        )),
+        InferenceConfig::Gemini(gemini) => Ok(Arc::new(
+            GeminiProcessorFactory::new(gemini.clone())
+                .map_err(|message| ConfigError::InvalidInferenceConfig { message })?,
+        )),
+        InferenceConfig::Anthropic(anthropic) => Ok(Arc::new(
+            AnthropicProcessorFactory::new(anthropic.clone())
+                .map_err(|message| ConfigError::InvalidInferenceConfig { message })?,
+        )),
+        InferenceConfig::Grok(grok) => Ok(Arc::new(
+            GrokProcessorFactory::new(grok.clone())
+                .map_err(|message| ConfigError::InvalidInferenceConfig { message })?,
+        )),
+    }
+}
+
 pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
     let object_store: Arc<dyn ObjectStore + Send + Sync> = match &config.object_store {
         ObjectStoreConfig::LocalFs(local_fs) => {
@@ -49,6 +167,11 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
 
     match &config.relational_store {
         RelationalStoreConfig::Postgres(pg_config) => {
+            let embedder: Option<Arc<dyn TextEmbedder>> = if config.embeddings.enabled {
+                Some(Arc::new(FastembedTextEmbedder::new(&config.embeddings)))
+            } else {
+                None
+            };
             let import_store: Arc<dyn ImportWriteStore + Send + Sync> =
                 Arc::new(PostgresImportWriteStore::new(pg_config.clone()));
             let read_store: Arc<dyn ArtifactReadStore + Send + Sync> =
@@ -64,25 +187,16 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
             let artifact_detail_store: Arc<
                 dyn crate::storage::ArtifactDetailReadStore + Send + Sync,
             > = mvp_retrieval_store_impl.clone();
-            let processor_factory: Arc<dyn ArtifactProcessorFactory> = match &config.inference {
-                InferenceConfig::Stub => Arc::new(StubProcessorFactory),
-                InferenceConfig::OpenAi(openai) => Arc::new(
-                    OpenAiProcessorFactory::new(openai.clone())
-                        .map_err(|message| ConfigError::InvalidInferenceConfig { message })?,
-                ),
-                InferenceConfig::Gemini(gemini) => Arc::new(
-                    GeminiProcessorFactory::new(gemini.clone())
-                        .map_err(|message| ConfigError::InvalidInferenceConfig { message })?,
-                ),
-                InferenceConfig::Anthropic(anthropic) => Arc::new(
-                    AnthropicProcessorFactory::new(anthropic.clone())
-                        .map_err(|message| ConfigError::InvalidInferenceConfig { message })?,
-                ),
-                InferenceConfig::Grok(grok) => Arc::new(
-                    GrokProcessorFactory::new(grok.clone())
-                        .map_err(|message| ConfigError::InvalidInferenceConfig { message })?,
-                ),
-            };
+            let primary_factory = build_processor_factory(&config.inference)?;
+            let processor_factory: Arc<dyn ArtifactProcessorFactory> =
+                if let Some(reconcile_inference) = &config.reconcile_inference {
+                    Arc::new(SplitStageProcessorFactory {
+                        primary: Arc::clone(&primary_factory),
+                        reconcile: build_processor_factory(reconcile_inference)?,
+                    })
+                } else {
+                    primary_factory
+                };
             let context_pack_store: Arc<
                 dyn crate::storage::ArtifactContextPackReadStore + Send + Sync,
             > = mvp_retrieval_store_impl.clone();
@@ -92,6 +206,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 Some(search_read_store),
                 Some(artifact_detail_store),
                 Some(context_pack_store),
+                embedder,
                 Arc::clone(&object_store),
             ));
             Ok(ServiceBundle {
@@ -106,37 +221,34 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
             })
         }
         RelationalStoreConfig::Oracle(db_config) => {
+            let embedder: Option<Arc<dyn TextEmbedder>> = if config.embeddings.enabled {
+                Some(Arc::new(FastembedTextEmbedder::new(&config.embeddings)))
+            } else {
+                None
+            };
             let import_store: Arc<dyn ImportWriteStore + Send + Sync> =
                 Arc::new(OracleImportWriteStore::new(db_config.clone()));
             let read_store: Arc<dyn ArtifactReadStore + Send + Sync> =
                 Arc::new(OracleArtifactReadStore::new(db_config.clone()));
             let retrieval_store: Arc<dyn ArchiveRetrievalStore> =
                 Arc::new(OracleArchiveRetrievalStore::new(db_config.clone()));
-            let processor_factory: Arc<dyn ArtifactProcessorFactory> = match &config.inference {
-                InferenceConfig::Stub => Arc::new(StubProcessorFactory),
-                InferenceConfig::OpenAi(openai) => Arc::new(
-                    OpenAiProcessorFactory::new(openai.clone())
-                        .map_err(|message| ConfigError::InvalidInferenceConfig { message })?,
-                ),
-                InferenceConfig::Gemini(gemini) => Arc::new(
-                    GeminiProcessorFactory::new(gemini.clone())
-                        .map_err(|message| ConfigError::InvalidInferenceConfig { message })?,
-                ),
-                InferenceConfig::Anthropic(anthropic) => Arc::new(
-                    AnthropicProcessorFactory::new(anthropic.clone())
-                        .map_err(|message| ConfigError::InvalidInferenceConfig { message })?,
-                ),
-                InferenceConfig::Grok(grok) => Arc::new(
-                    GrokProcessorFactory::new(grok.clone())
-                        .map_err(|message| ConfigError::InvalidInferenceConfig { message })?,
-                ),
-            };
+            let primary_factory = build_processor_factory(&config.inference)?;
+            let processor_factory: Arc<dyn ArtifactProcessorFactory> =
+                if let Some(reconcile_inference) = &config.reconcile_inference {
+                    Arc::new(SplitStageProcessorFactory {
+                        primary: Arc::clone(&primary_factory),
+                        reconcile: build_processor_factory(reconcile_inference)?,
+                    })
+                } else {
+                    primary_factory
+                };
             let app = Arc::new(ArchiveApplication::new(
                 Arc::clone(&import_store),
                 Arc::clone(&read_store),
                 None,
                 None,
                 None,
+                embedder,
                 Arc::clone(&object_store),
             ));
             Ok(ServiceBundle {

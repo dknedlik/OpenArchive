@@ -148,4 +148,8 @@ pub trait EnrichmentJobLifecycleStore: Sync + Send {
 
     /// Close persisted running batches whose linked jobs are no longer running.
     fn reconcile_stale_running_batches(&self, stage_name: &str) -> StorageResult<usize>;
+
+    /// Requeue stale running jobs for a batch-polled stage when the owning
+    /// provider batch is no longer running.
+    fn reconcile_stale_running_jobs(&self, stage_name: &str) -> StorageResult<usize>;
 }

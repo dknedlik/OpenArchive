@@ -18,6 +18,10 @@ use std::time::Duration;
 use log::{debug, error, info, warn};
 
 use crate::config::ExtractionChunkingConfig;
+use crate::enrichment_worker::{
+    build_extract_chunk_inputs, build_extraction_result as worker_build_extraction_result,
+    merge_chunk_outputs as worker_merge_chunk_outputs,
+};
 use crate::extraction_chunking::build_preprocess_coverage_windows;
 use crate::processor::{
     ArtifactProcessorInput, BatchHandle, BatchPollResult, ExtractionBatchSubmitter,
@@ -57,8 +61,7 @@ enum InFlightContext {
         phase_one_data: Box<dyn std::any::Any>,
     },
     Extract {
-        inputs: Vec<ArtifactProcessorInput>,
-        payloads: Vec<ArtifactExtractPayload>,
+        groups: Vec<ExtractPreparedJob>,
     },
     Reconcile {
         inputs: Vec<ReconciliationProcessorInput>,
@@ -67,6 +70,13 @@ enum InFlightContext {
         retrieval_result_sets: Vec<RetrievalResultSet>,
         loaded_artifacts: Vec<LoadedArtifactForEnrichment>,
     },
+}
+
+#[derive(Clone)]
+struct ExtractPreparedJob {
+    parent_input: ArtifactProcessorInput,
+    payload: ArtifactExtractPayload,
+    chunk_inputs: Vec<ArtifactProcessorInput>,
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +204,13 @@ pub fn stage_poller_loop(
     );
 
     let mut in_flight: HashMap<String, InFlightBatch> = HashMap::new();
+    if let Err(err) = job_store.reconcile_stale_running_jobs(stage.stage_name()) {
+        error!(
+            "[{}] failed to reconcile stale running jobs at startup: {}",
+            stage.stage_name(),
+            err
+        );
+    }
     if let Err(err) = job_store.reconcile_stale_running_batches(stage.stage_name()) {
         error!(
             "[{}] failed to reconcile stale running batches at startup: {}",
@@ -245,6 +262,13 @@ pub fn stage_poller_loop(
             break;
         }
 
+        if let Err(err) = job_store.reconcile_stale_running_jobs(stage.stage_name()) {
+            error!(
+                "[{}] failed to reconcile stale running jobs: {}",
+                stage.stage_name(),
+                err
+            );
+        }
         if let Err(err) = job_store.reconcile_stale_running_batches(stage.stage_name()) {
             error!(
                 "[{}] failed to reconcile stale running batches: {}",
@@ -1071,6 +1095,7 @@ pub struct ExtractStage {
     tier: EnrichmentTier,
     batch_size: usize,
     max_concurrent: usize,
+    chunking: ExtractionChunkingConfig,
 }
 
 impl ExtractStage {
@@ -1079,13 +1104,45 @@ impl ExtractStage {
         tier: EnrichmentTier,
         batch_size: usize,
         max_concurrent: usize,
+        chunking: ExtractionChunkingConfig,
     ) -> Self {
         Self {
             submitter,
             tier,
             batch_size,
             max_concurrent,
+            chunking,
         }
+    }
+
+    fn prepare_job(
+        &self,
+        job: &ClaimedJob,
+        read_store: &dyn ArtifactReadStore,
+    ) -> Result<(ArtifactProcessorInput, ArtifactExtractPayload), String> {
+        let payload = ArtifactExtractPayload::from_json(&job.payload_json)
+            .map_err(|err| format!("Failed to parse extract payload JSON: {err}"))?;
+        let source_type = SourceType::from_str(&payload.source_type).ok_or_else(|| {
+            format!(
+                "Invalid source_type in extract payload: {}",
+                payload.source_type
+            )
+        })?;
+        let loaded = read_store
+            .load_artifact_for_enrichment(&job.artifact_id)
+            .map_err(|err| format!("Failed to load artifact for extraction: {err}"))?
+            .ok_or_else(|| format!("Artifact {} not found for extraction", job.artifact_id))?;
+        Ok((
+            ArtifactProcessorInput {
+                artifact_id: loaded.artifact.artifact_id.clone(),
+                import_id: payload.import_id.clone(),
+                source_type,
+                title: loaded.artifact.title.clone(),
+                participants: loaded.participants,
+                segments: loaded.segments,
+            },
+            payload,
+        ))
     }
 }
 
@@ -1121,68 +1178,60 @@ impl StageBehavior for ExtractStage {
         worker_id: &str,
     ) -> Result<InFlightBatch, ()> {
         let mut valid_jobs = Vec::new();
-        let mut inputs = Vec::new();
-        let mut payloads = Vec::new();
+        let mut groups = Vec::new();
+        let mut submitted_chunk_count = 0usize;
+        let provider_limit = self.submitter.max_batch_size();
 
         for job in jobs {
-            let payload = match ArtifactExtractPayload::from_json(&job.payload_json) {
-                Ok(p) => p,
-                Err(err) => {
-                    poller_fail_job(
-                        job_store,
-                        worker_id,
-                        &job.job_id,
-                        "Failed to parse extract payload JSON",
-                        err,
-                    );
+            let (parent_input, payload) = match self.prepare_job(&job, read_store) {
+                Ok(prepared) => prepared,
+                Err(message) => {
+                    poller_fail_job_message(job_store, worker_id, &job.job_id, message);
                     continue;
                 }
             };
-            let Some(source_type) = SourceType::from_str(&payload.source_type) else {
+            let chunk_inputs = build_extract_chunk_inputs(&parent_input, &payload, &self.chunking);
+            if chunk_inputs.is_empty() {
                 poller_fail_job_message(
                     job_store,
                     worker_id,
                     &job.job_id,
-                    format!(
-                        "Invalid source_type in extract payload: {}",
-                        payload.source_type
-                    ),
+                    format!("Artifact {} produced no extraction chunks", job.artifact_id),
                 );
                 continue;
-            };
+            }
 
-            let loaded = match read_store.load_artifact_for_enrichment(&job.artifact_id) {
-                Ok(Some(l)) => l,
-                Ok(None) => {
+            if submitted_chunk_count + chunk_inputs.len() > provider_limit {
+                if submitted_chunk_count == 0 {
                     poller_fail_job_message(
                         job_store,
                         worker_id,
                         &job.job_id,
-                        format!("Artifact {} not found for extraction", job.artifact_id),
+                        format!(
+                            "Artifact {} expands to {} extract chunks, exceeding provider batch limit {}",
+                            job.artifact_id,
+                            chunk_inputs.len(),
+                            provider_limit
+                        ),
                     );
-                    continue;
-                }
-                Err(err) => {
-                    poller_fail_job(
+                } else {
+                    poller_mark_retryable(
                         job_store,
                         worker_id,
                         &job.job_id,
-                        "Failed to load artifact for extraction",
-                        err,
+                        "Deferred extract job because chunk-expanded batch reached provider limit",
+                        1,
                     );
-                    continue;
                 }
-            };
-            let input = ArtifactProcessorInput {
-                artifact_id: loaded.artifact.artifact_id.clone(),
-                import_id: payload.import_id.clone(),
-                source_type,
-                title: loaded.artifact.title.clone(),
-                participants: loaded.participants,
-                segments: loaded.segments,
-            };
-            inputs.push(input);
-            payloads.push(payload);
+                continue;
+            }
+
+            submitted_chunk_count += chunk_inputs.len();
+            groups.push(ExtractPreparedJob {
+                parent_input,
+                payload,
+                chunk_inputs,
+            });
             valid_jobs.push(job);
         }
 
@@ -1207,12 +1256,17 @@ impl StageBehavior for ExtractStage {
             return Err(());
         }
 
-        match self.submitter.prepare_and_submit(&inputs) {
+        let flat_inputs: Vec<_> = groups
+            .iter()
+            .flat_map(|group| group.chunk_inputs.iter().cloned())
+            .collect();
+
+        match self.submitter.prepare_and_submit(&flat_inputs) {
             Ok(handle) => Ok(InFlightBatch {
                 handle,
                 owner_worker_id: worker_id.to_string(),
                 jobs: valid_jobs,
-                context: InFlightContext::Extract { inputs, payloads },
+                context: InFlightContext::Extract { groups },
             }),
             Err(err) => {
                 if matches!(err, ProcessorError::InferenceHttpStatus { status: 429, .. }) {
@@ -1239,75 +1293,102 @@ impl StageBehavior for ExtractStage {
         _derived_store: &dyn DerivedMetadataWriteStore,
         worker_id: &str,
     ) -> Result<Option<InFlightBatch>, ()> {
-        let (inputs, payloads) = match batch.context {
-            InFlightContext::Extract { inputs, payloads } => (inputs, payloads),
+        let groups = match batch.context {
+            InFlightContext::Extract { groups } => groups,
             _ => {
                 error!("[extract] process_completed called with wrong context variant");
                 return Err(());
             }
         };
 
-        let results = self.submitter.parse_results(data, &inputs);
+        let flat_inputs: Vec<_> = groups
+            .iter()
+            .flat_map(|group| group.chunk_inputs.iter().cloned())
+            .collect();
+        let mut results = self.submitter.parse_results(data, &flat_inputs).into_iter();
 
-        for ((job, (input, payload)), result) in batch
-            .jobs
-            .into_iter()
-            .zip(inputs.into_iter().zip(payloads.into_iter()))
-            .zip(results.into_iter())
-        {
-            match result {
-                Ok(output) => {
-                    let extraction_result = build_extraction_result(
-                        &job,
-                        &input,
-                        &output,
-                        payload.conversation_windows,
-                    );
-                    if let Err(err) = state_store.save_extraction_result(&extraction_result) {
-                        poller_fail_job(
-                            job_store,
-                            worker_id,
-                            &job.job_id,
-                            "Failed to persist extraction result",
-                            err,
-                        );
-                        continue;
-                    }
-                    let retrieve_job = NewEnrichmentJob {
-                        job_id: new_id("job"),
-                        artifact_id: job.artifact_id.clone(),
-                        job_type: JobType::ArtifactRetrieveContext,
-                        enrichment_tier: job.enrichment_tier,
-                        spawned_by_job_id: Some(job.job_id.clone()),
-                        job_status: crate::storage::JobStatus::Pending,
-                        max_attempts: 3,
-                        priority_no: 100,
-                        required_capabilities: vec!["archive_retrieval".to_string()],
-                        payload_json: ArtifactRetrieveContextPayload::new_v1(
-                            &job.artifact_id,
-                            &payload.import_id,
-                            input.source_type,
-                            &extraction_result.extraction_result_id,
-                        )
-                        .to_json(),
-                    };
-                    if let Err(err) = job_store.enqueue_jobs(&[retrieve_job]) {
-                        poller_fail_job(
-                            job_store,
-                            worker_id,
-                            &job.job_id,
-                            "Failed to enqueue retrieval-context job",
-                            err,
-                        );
-                        continue;
-                    }
-                    if let Err(msg) = poller_complete_job(job_store, worker_id, &job.job_id) {
-                        error!("[extract] {}", msg);
+        for (job, group) in batch.jobs.into_iter().zip(groups.into_iter()) {
+            let mut chunk_outputs = Vec::with_capacity(group.chunk_inputs.len());
+            let mut chunk_error = None;
+            for _ in &group.chunk_inputs {
+                let Some(result) = results.next() else {
+                    chunk_error = Some(ProcessorError::Message {
+                        message: format!(
+                            "Missing chunk result for artifact {} in extract batch",
+                            job.artifact_id
+                        ),
+                    });
+                    break;
+                };
+                match result {
+                    Ok(output) => chunk_outputs.push(output),
+                    Err(err) => {
+                        chunk_error = Some(err);
+                        break;
                     }
                 }
-                Err(err) => {
-                    poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
-                }
+            }
+
+            if let Some(err) = chunk_error {
+                poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
+                continue;
+            }
+
+            let output = if chunk_outputs.len() == 1 {
+                chunk_outputs
+                    .into_iter()
+                    .next()
+                    .expect("single chunk output should exist")
+            } else {
+                worker_merge_chunk_outputs(&group.parent_input, &chunk_outputs)
+            };
+
+            let extraction_result = worker_build_extraction_result(
+                &job,
+                &group.parent_input,
+                &output,
+                group.payload.conversation_windows,
+            );
+            if let Err(err) = state_store.save_extraction_result(&extraction_result) {
+                poller_fail_job(
+                    job_store,
+                    worker_id,
+                    &job.job_id,
+                    "Failed to persist extraction result",
+                    err,
+                );
+                continue;
+            }
+            let retrieve_job = NewEnrichmentJob {
+                job_id: new_id("job"),
+                artifact_id: job.artifact_id.clone(),
+                job_type: JobType::ArtifactRetrieveContext,
+                enrichment_tier: job.enrichment_tier,
+                spawned_by_job_id: Some(job.job_id.clone()),
+                job_status: crate::storage::JobStatus::Pending,
+                max_attempts: 3,
+                priority_no: 100,
+                required_capabilities: vec!["archive_retrieval".to_string()],
+                payload_json: ArtifactRetrieveContextPayload::new_v1(
+                    &job.artifact_id,
+                    &group.payload.import_id,
+                    group.parent_input.source_type,
+                    &extraction_result.extraction_result_id,
+                )
+                .to_json(),
+            };
+            if let Err(err) = job_store.enqueue_jobs(&[retrieve_job]) {
+                poller_fail_job(
+                    job_store,
+                    worker_id,
+                    &job.job_id,
+                    "Failed to enqueue retrieval-context job",
+                    err,
+                );
+                continue;
+            }
+            if let Err(msg) = poller_complete_job(job_store, worker_id, &job.job_id) {
+                error!("[extract] {}", msg);
             }
         }
         Ok(None)
@@ -1329,68 +1410,33 @@ impl StageBehavior for ExtractStage {
         job_store: &dyn EnrichmentJobLifecycleStore,
         worker_id: &str,
     ) -> Result<InFlightBatch, ()> {
-        let mut inputs = Vec::new();
-        let mut payloads = Vec::new();
+        let mut groups = Vec::new();
         for job in &persisted.jobs {
-            let payload = match ArtifactExtractPayload::from_json(&job.payload_json) {
-                Ok(p) => p,
-                Err(err) => {
-                    poller_fail_job(
-                        job_store,
-                        worker_id,
-                        &job.job_id,
-                        "Failed to parse extract payload JSON during recovery",
-                        err,
-                    );
+            let (parent_input, payload) = match self.prepare_job(job, read_store) {
+                Ok(prepared) => prepared,
+                Err(message) => {
+                    poller_fail_job_message(job_store, worker_id, &job.job_id, message);
                     return Err(());
                 }
             };
-            let Some(source_type) = SourceType::from_str(&payload.source_type) else {
+            let chunk_inputs = build_extract_chunk_inputs(&parent_input, &payload, &self.chunking);
+            if chunk_inputs.is_empty() {
                 poller_fail_job_message(
                     job_store,
                     worker_id,
                     &job.job_id,
                     format!(
-                        "Invalid source_type in extract recovery payload: {}",
-                        payload.source_type
+                        "Artifact {} produced no extraction chunks during recovery",
+                        job.artifact_id
                     ),
                 );
                 return Err(());
-            };
-            let loaded = match read_store.load_artifact_for_enrichment(&job.artifact_id) {
-                Ok(Some(l)) => l,
-                Ok(None) => {
-                    poller_fail_job_message(
-                        job_store,
-                        worker_id,
-                        &job.job_id,
-                        format!(
-                            "Artifact {} not found for extraction recovery",
-                            job.artifact_id
-                        ),
-                    );
-                    return Err(());
-                }
-                Err(err) => {
-                    poller_fail_job(
-                        job_store,
-                        worker_id,
-                        &job.job_id,
-                        "Failed to load artifact for extraction recovery",
-                        err,
-                    );
-                    return Err(());
-                }
-            };
-            inputs.push(ArtifactProcessorInput {
-                artifact_id: loaded.artifact.artifact_id.clone(),
-                import_id: payload.import_id.clone(),
-                source_type,
-                title: loaded.artifact.title.clone(),
-                participants: loaded.participants,
-                segments: loaded.segments,
+            }
+            groups.push(ExtractPreparedJob {
+                parent_input,
+                payload,
+                chunk_inputs,
             });
-            payloads.push(payload);
         }
 
         Ok(InFlightBatch {
@@ -1401,7 +1447,7 @@ impl StageBehavior for ExtractStage {
             },
             owner_worker_id: persisted.owner_worker_id,
             jobs: persisted.jobs,
-            context: InFlightContext::Extract { inputs, payloads },
+            context: InFlightContext::Extract { groups },
         })
     }
 }
@@ -1936,16 +1982,15 @@ impl StageBehavior for ReconcileStage {
 
 use crate::domain::SourceTimestamp;
 use crate::processor::{
-    ArtifactProcessorOutput, MemoryOutput, ReconciliationDecisionOutput, RelationshipOutput,
-    SummaryOutput, memory_candidate_key_from_fields,
+    MemoryOutput, ReconciliationDecisionOutput, RelationshipOutput, SummaryOutput,
+    memory_candidate_key_from_fields,
 };
 use crate::storage::{
-    CandidateEntity, CandidateRelationship, ClassificationObjectJson, ConversationWindowRef,
-    DerivationRunStatus, DerivationRunType, DerivedObjectPayload, EvidenceRole,
-    ExtractedClassification, ExtractedMemory, InputScopeType, MemoryObjectJson, NewDerivationRun,
-    NewDerivedObject, NewEvidenceLink, ObjectStatus, OriginKind, RelationshipObjectJson,
-    RetrievalIntent, ScopeType, SummaryObjectJson, SupportStrength, WriteDerivationAttempt,
-    WriteDerivedObject,
+    CandidateRelationship, ClassificationObjectJson, DerivationRunStatus, DerivationRunType,
+    DerivedObjectPayload, EvidenceRole, ExtractedMemory, InputScopeType, MemoryObjectJson,
+    NewDerivationRun, NewDerivedObject, NewEvidenceLink, ObjectStatus, OriginKind,
+    RelationshipObjectJson, ScopeType, SummaryObjectJson, SupportStrength,
+    WriteDerivationAttempt, WriteDerivedObject,
 };
 use rand::random;
 use std::collections::HashSet;
@@ -2115,84 +2160,6 @@ fn complete_reconcile_without_candidates(
         return Err(());
     }
     Ok(())
-}
-
-fn build_extraction_result(
-    claimed_job: &ClaimedJob,
-    input: &ArtifactProcessorInput,
-    output: &ArtifactProcessorOutput,
-    _windows: Vec<ConversationWindowRef>,
-) -> ArtifactExtractionResult {
-    ArtifactExtractionResult {
-        extraction_result_id: new_id("extract"),
-        artifact_id: input.artifact_id.clone(),
-        job_id: claimed_job.job_id.clone(),
-        pipeline_name: output.pipeline_name.clone(),
-        pipeline_version: output.pipeline_version.clone(),
-        summary_title: output.summary.title.clone(),
-        summary_body_text: output.summary.body_text.clone(),
-        summary_evidence_segment_ids: output.summary.evidence_segment_ids.clone(),
-        classifications: output
-            .classifications
-            .iter()
-            .map(|c| ExtractedClassification {
-                title: c.title.clone(),
-                body_text: c.body_text.clone(),
-                classification_type: c.classification_type.clone(),
-                classification_value: c.classification_value.clone(),
-                evidence_segment_ids: c.evidence_segment_ids.clone(),
-            })
-            .collect(),
-        memories: output
-            .memories
-            .iter()
-            .map(|m| ExtractedMemory {
-                candidate_key: m.candidate_key.clone(),
-                title: m.title.clone(),
-                body_text: m.body_text.clone(),
-                memory_type: m.memory_type.clone(),
-                memory_scope: m.memory_scope,
-                memory_scope_value: m.memory_scope_value.clone(),
-                evidence_segment_ids: m.evidence_segment_ids.clone(),
-            })
-            .collect(),
-        entities: output
-            .entities
-            .iter()
-            .map(|e| CandidateEntity {
-                entity_key: e.entity_key.clone(),
-                display_name: e.display_name.clone(),
-                entity_type: e.entity_type.clone(),
-                evidence_segment_ids: e.evidence_segment_ids.clone(),
-            })
-            .collect(),
-        relationships: output
-            .relationships
-            .iter()
-            .map(|r| CandidateRelationship {
-                relationship_type: r.relationship_type.clone(),
-                subject_key: r.subject_key.clone(),
-                object_key: r.object_key.clone(),
-                title: r.title.clone(),
-                body_text: r.body_text.clone(),
-                confidence_label: r.confidence_label.clone(),
-                evidence_segment_ids: r.evidence_segment_ids.clone(),
-            })
-            .collect(),
-        retrieval_intents: output
-            .retrieval_intents
-            .iter()
-            .map(|i| RetrievalIntent {
-                intent_id: new_id("intent"),
-                question: i.question.clone(),
-                query_text: i.query_text.clone(),
-                intent_type: i.intent_type.clone(),
-                evidence_segment_ids: i.evidence_segment_ids.clone(),
-            })
-            .collect(),
-        status: "completed".to_string(),
-        error_message: None,
-    }
 }
 
 fn build_reconciliation_input(

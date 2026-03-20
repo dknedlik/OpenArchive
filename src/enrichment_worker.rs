@@ -12,7 +12,7 @@ use crate::processor::{
 };
 use crate::rate_limiter::RateLimiter;
 use crate::shutdown::ShutdownToken;
-use crate::stage_poller::{stage_poller_loop, PreprocessStage, ReconcileStage};
+use crate::stage_poller::{stage_poller_loop, ExtractStage, PreprocessStage, ReconcileStage};
 use crate::storage::JobType;
 use crate::storage::{
     ArchiveRetrievalStore, ArtifactExtractPayload, ArtifactExtractionResult,
@@ -1025,25 +1025,10 @@ fn process_extract_job(
             )
         })?;
 
-    let output = if !payload.topic_threads.is_empty() {
+    let chunk_inputs = build_extract_chunk_inputs(&processor_input, &payload, chunking);
+    let output = if chunk_inputs.len() > 1 {
         let mut chunk_outputs = Vec::new();
-        for chunk_input in build_topic_thread_inputs(
-            &processor_input,
-            &payload.topic_threads,
-            &payload.conversation_windows,
-            chunking,
-        ) {
-            let chunk_output = processor.process(&chunk_input).map_err(|err| {
-                handle_processor_error(job_store, worker_id, &claimed_job.job_id, err)
-            })?;
-            chunk_outputs.push(chunk_output);
-        }
-        merge_chunk_outputs(&processor_input, &chunk_outputs)
-    } else if payload.conversation_windows.len() > 1 {
-        let mut chunk_outputs = Vec::new();
-        for chunk_input in
-            build_chunk_inputs(&processor_input, &payload.conversation_windows, chunking)
-        {
+        for chunk_input in chunk_inputs {
             let chunk_output = processor.process(&chunk_input).map_err(|err| {
                 handle_processor_error(job_store, worker_id, &claimed_job.job_id, err)
             })?;
@@ -1051,8 +1036,12 @@ fn process_extract_job(
         }
         merge_chunk_outputs(&processor_input, &chunk_outputs)
     } else {
+        let chunk_input = chunk_inputs
+            .into_iter()
+            .next()
+            .expect("build_extract_chunk_inputs must return at least one chunk");
         processor
-            .process(&processor_input)
+            .process(&chunk_input)
             .map_err(|err| handle_processor_error(job_store, worker_id, &claimed_job.job_id, err))?
     };
     let output = maybe_gap_fill_extraction_output(
@@ -1423,7 +1412,7 @@ fn process_reconcile_job(
     Ok(())
 }
 
-fn build_extraction_result(
+pub(crate) fn build_extraction_result(
     claimed_job: &ClaimedJob,
     input: &ArtifactProcessorInput,
     output: &ArtifactProcessorOutput,
@@ -1501,7 +1490,7 @@ fn build_extraction_result(
     }
 }
 
-fn merge_chunk_outputs(
+pub(crate) fn merge_chunk_outputs(
     input: &ArtifactProcessorInput,
     outputs: &[ArtifactProcessorOutput],
 ) -> ArtifactProcessorOutput {
@@ -1726,6 +1715,25 @@ fn maybe_gap_fill_extraction_output(
     }
 
     Ok(merged_output)
+}
+
+pub(crate) fn build_extract_chunk_inputs(
+    processor_input: &ArtifactProcessorInput,
+    payload: &ArtifactExtractPayload,
+    chunking: &ExtractionChunkingConfig,
+) -> Vec<ArtifactProcessorInput> {
+    if !payload.topic_threads.is_empty() {
+        build_topic_thread_inputs(
+            processor_input,
+            &payload.topic_threads,
+            &payload.conversation_windows,
+            chunking,
+        )
+    } else if payload.conversation_windows.len() > 1 {
+        build_chunk_inputs(processor_input, &payload.conversation_windows, chunking)
+    } else {
+        vec![processor_input.clone()]
+    }
 }
 
 fn build_reconciliation_input(
@@ -2356,15 +2364,12 @@ pub fn start_enrichment_workers_with_factory(
 /// Spawns:
 /// - batch mode:
 ///   - preprocess poller threads
+///   - extract poller threads
 ///   - reconcile poller threads
-///   - direct extract worker threads
 /// - direct mode:
 ///   - direct preprocess/extract/reconcile worker threads
 /// - both modes:
 ///   - retrieve-context worker threads
-///
-/// Extraction currently runs through the direct worker path so shaped extract
-/// payloads always honor the shared chunking policy.
 pub fn start_enrichment_pipeline(
     config: &EnrichmentPipelineConfig,
     execution_mode: InferenceExecutionMode,
@@ -2406,19 +2411,18 @@ pub fn start_enrichment_pipeline(
                 poll_interval,
                 shutdown.clone(),
             )?);
-            handles.extend(spawn_direct_stage_workers(
+            handles.extend(spawn_extract_batch_workers(
                 pid,
-                "extract",
-                JobType::ArtifactExtract,
                 config.extract_workers,
+                config.extract.batch_size,
+                config.extract.max_concurrent_batches,
                 Arc::clone(&job_store),
                 Arc::clone(&read_store),
-                Arc::clone(&retrieval_store),
                 Arc::clone(&state_store),
                 Arc::clone(&derived_store),
                 Arc::clone(&processor_factory),
+                Arc::clone(&rate_limiter),
                 Arc::clone(&chunking),
-                Arc::clone(&coverage_policy),
                 poll_interval,
                 shutdown.clone(),
             )?);
@@ -2539,6 +2543,14 @@ fn validate_batch_execution_support(
     {
         return Err(anyhow::anyhow!(
             "batch execution mode requires preprocess batch submitter support"
+        ));
+    }
+    if processor_factory
+        .build_extraction_submitter(EnrichmentTier::Standard)?
+        .is_none()
+    {
+        return Err(anyhow::anyhow!(
+            "batch execution mode requires extraction batch submitter support"
         ));
     }
     if processor_factory
@@ -2669,6 +2681,67 @@ fn spawn_reconcile_batch_workers(
                     );
                 })
                 .map_err(|e| anyhow::anyhow!("Failed to spawn reconcile poller: {}", e))
+        })
+        .collect()
+}
+
+fn spawn_extract_batch_workers(
+    pid: u32,
+    worker_count: usize,
+    batch_size: usize,
+    max_concurrent: usize,
+    job_store: Arc<dyn EnrichmentJobLifecycleStore>,
+    read_store: Arc<dyn ArtifactReadStore>,
+    state_store: Arc<dyn EnrichmentStateStore>,
+    derived_store: Arc<dyn DerivedMetadataWriteStore>,
+    processor_factory: Arc<dyn ArtifactProcessorFactory>,
+    rate_limiter: Arc<RateLimiter>,
+    chunking: Arc<ExtractionChunkingConfig>,
+    poll_interval: Duration,
+    shutdown: ShutdownToken,
+) -> Result<Vec<thread::JoinHandle<()>>> {
+    (0..worker_count)
+        .map(|i| {
+            let worker_id = format!("enrichment:{}:extract:{}", pid, i);
+            let job_store = Arc::clone(&job_store);
+            let read_store = Arc::clone(&read_store);
+            let state_store = Arc::clone(&state_store);
+            let derived_store = Arc::clone(&derived_store);
+            let processor_factory = Arc::clone(&processor_factory);
+            let rate_limiter = Arc::clone(&rate_limiter);
+            let chunking = Arc::clone(&chunking);
+            let shutdown = shutdown.clone();
+            thread::Builder::new()
+                .name(format!("extract-poller-{}", i))
+                .spawn(move || {
+                    let submitter = processor_factory
+                        .build_extraction_submitter(crate::storage::EnrichmentTier::Standard)
+                        .ok()
+                        .flatten();
+                    let Some(submitter) = submitter else {
+                        info!("No extract batch submitter available; extract poller exiting");
+                        return;
+                    };
+                    let stage = ExtractStage::new(
+                        submitter,
+                        crate::storage::EnrichmentTier::Standard,
+                        batch_size,
+                        max_concurrent,
+                        chunking.as_ref().clone(),
+                    );
+                    stage_poller_loop(
+                        &stage,
+                        worker_id,
+                        job_store.as_ref(),
+                        read_store.as_ref(),
+                        state_store.as_ref(),
+                        derived_store.as_ref(),
+                        &rate_limiter,
+                        poll_interval,
+                        shutdown,
+                    );
+                })
+                .map_err(|e| anyhow::anyhow!("Failed to spawn extract poller: {}", e))
         })
         .collect()
 }

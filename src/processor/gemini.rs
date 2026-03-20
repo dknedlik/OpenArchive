@@ -15,7 +15,7 @@ use super::{
     build_conversation_user_prompt, build_preprocess_phase_one_user_prompt,
     build_preprocess_phase_two_user_prompt, build_reconciliation_prompt, preprocess_output_schema,
     preprocess_phase_one_schema, reconciliation_output_schema, should_shape_conversation_input,
-    structured_output_schema, structured_output_schema_wrapper, ArtifactBatchProcessor,
+    structured_output_schema_with_allowed_refs, structured_output_schema_wrapper, ArtifactBatchProcessor,
     ArtifactProcessor, ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
     BatchHandle, BatchPollResult, ExtractionBatchSubmitter, HostedPreprocessProcessor,
     HostedReconciliationProcessor, InferenceClient, InferenceResult, InferenceUsage,
@@ -270,7 +270,7 @@ impl GeminiArtifactProcessor {
             &self.model,
             GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
             user_prompt,
-            &structured_output_schema_wrapper(),
+            &structured_output_schema_wrapper(input),
             max_output_tokens,
         )?;
         let parsed: super::ModelArtifactOutput =
@@ -281,8 +281,8 @@ impl GeminiArtifactProcessor {
                 }
             })?;
         let parsed = parsed.resolve_evidence_aliases(input);
-        parsed
-            .validate_against(input)
+        let parsed = parsed
+            .validate_and_salvage(input)
             .map_err(|err| super::attach_output_preview(err, &inference_result.output_text))?;
         Ok(parsed.into_processor_output(
             self.model.clone(),
@@ -327,7 +327,14 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
                     key: input.artifact_id.clone(),
                     system_prompt: GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT.to_string(),
                     user_prompt,
-                    response_json_schema: structured_output_schema(),
+                    response_json_schema: structured_output_schema_with_allowed_refs(
+                        &input
+                            .segments
+                            .iter()
+                            .enumerate()
+                            .map(|(index, _)| format!("evidence_ref_{}", index + 1))
+                            .collect::<Vec<_>>(),
+                    ),
                     max_output_tokens: None,
                 }),
                 Err(err) => {
@@ -395,7 +402,9 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
                             message: format!("Gemini batch returned unknown key {}", result.key),
                         })?;
                     let parsed = parsed.resolve_evidence_aliases(input);
-                    parsed.validate_against(input)?;
+                    let parsed = parsed
+                        .validate_and_salvage(input)
+                        .map_err(|err| super::attach_output_preview(err, &result.output_text))?;
                     Ok(parsed.into_processor_output(
                         self.model.clone(),
                         result.usage,
@@ -745,10 +754,17 @@ impl ExtractionBatchSubmitter for GeminiExtractionSubmitter {
         for input in inputs {
             let user_prompt = build_conversation_user_prompt(input)?;
             requests.push(GeminiBatchEnrichmentRequest {
-                key: input.artifact_id.clone(),
+                key: super::artifact_processor_batch_custom_id(input),
                 system_prompt: GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT.to_string(),
                 user_prompt,
-                response_json_schema: structured_output_schema(),
+                response_json_schema: structured_output_schema_with_allowed_refs(
+                    &input
+                        .segments
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| format!("evidence_ref_{}", index + 1))
+                        .collect::<Vec<_>>(),
+                ),
                 max_output_tokens: None,
             });
         }
@@ -828,22 +844,27 @@ impl ExtractionBatchSubmitter for GeminiExtractionSubmitter {
             }
         };
 
-        results
-            .into_iter()
-            .map(|result| {
+        let mut by_key = HashMap::new();
+        for result in results {
+            by_key.insert(result.key.clone(), result);
+        }
+
+        inputs
+            .iter()
+            .map(|input| {
+                let key = super::artifact_processor_batch_custom_id(input);
+                let result = by_key.remove(&key).ok_or_else(|| ProcessorError::Message {
+                    message: format!("Gemini batch returned no result for key {}", key),
+                })?;
                 let parsed: super::ModelArtifactOutput = serde_json::from_str(&result.output_text)
                     .map_err(|source| ProcessorError::ParseModelJson {
                         source,
                         body_preview: super::preview(&result.output_text),
                     })?;
-                let input = inputs
-                    .iter()
-                    .find(|input| input.artifact_id == result.key)
-                    .ok_or_else(|| ProcessorError::Message {
-                        message: format!("Gemini batch returned unknown key {}", result.key),
-                    })?;
                 let parsed = parsed.resolve_evidence_aliases(input);
-                parsed.validate_against(input)?;
+                let parsed = parsed
+                    .validate_and_salvage(input)
+                    .map_err(|err| super::attach_output_preview(err, &result.output_text))?;
                 Ok(parsed.into_processor_output(
                     self.model.clone(),
                     result.usage,

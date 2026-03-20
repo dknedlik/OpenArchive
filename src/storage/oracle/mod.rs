@@ -426,6 +426,10 @@ impl EnrichmentJobLifecycleStore for OracleEnrichmentJobStore {
     fn reconcile_stale_running_batches(&self, _stage_name: &str) -> StorageResult<usize> {
         Ok(0)
     }
+
+    fn reconcile_stale_running_jobs(&self, _stage_name: &str) -> StorageResult<usize> {
+        Ok(0)
+    }
 }
 
 pub struct OracleDerivedMetadataStore {

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use reqwest::blocking::{multipart, Client};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
@@ -32,6 +33,35 @@ pub struct ArtifactProcessorInput {
     pub title: Option<String>,
     pub participants: Vec<LoadedParticipant>,
     pub segments: Vec<LoadedSegment>,
+}
+
+pub(crate) fn artifact_processor_batch_custom_id(input: &ArtifactProcessorInput) -> String {
+    let mut hasher = Sha256::new();
+    if let Some(title) = &input.title {
+        hasher.update(title.as_bytes());
+    }
+    for segment in &input.segments {
+        hasher.update(segment.segment_id.as_bytes());
+        hasher.update([0]);
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    let first_sequence_no = input
+        .segments
+        .first()
+        .map(|segment| segment.sequence_no)
+        .unwrap_or_default();
+    let last_sequence_no = input
+        .segments
+        .last()
+        .map(|segment| segment.sequence_no)
+        .unwrap_or_default();
+    format!(
+        "{}:extract:{}-{}:{}",
+        input.artifact_id,
+        first_sequence_no,
+        last_sequence_no,
+        &digest[..12]
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -593,7 +623,7 @@ pub trait ReconciliationBatchSubmitter {
 trait EnrichmentStrategy: Send + Sync {
     fn prompt_version(&self) -> &'static str;
     fn system_prompt(&self) -> &'static str;
-    fn extraction_schema(&self) -> serde_json::Value;
+    fn extraction_schema(&self, input: &ArtifactProcessorInput) -> serde_json::Value;
     fn process(
         &self,
         processor: &HostedArtifactProcessor,
@@ -678,7 +708,7 @@ impl PreprocessProcessor for HostedPreprocessProcessor {
     ) -> Result<PreprocessProcessorOutput, ProcessorError> {
         validate_preprocess_input(input)?;
         let (phase_one_resolved, phase_one_usage) =
-            run_preprocess_phase_one_with_repair(self.client.as_ref(), &self.model, input)?;
+            run_preprocess_phase_one_chunked_with_repair(self.client.as_ref(), &self.model, input)?;
         let mut output = run_preprocess_phase_two_with_repair(
             self.client.as_ref(),
             &self.model,
@@ -696,6 +726,102 @@ impl PreprocessProcessor for HostedPreprocessProcessor {
     }
 }
 
+const PREPROCESS_PHASE_ONE_CHUNK_SEGMENTS: usize = 40;
+const PREPROCESS_PHASE_ONE_CHUNK_MAX_CHARS: usize = 25_000;
+
+fn run_preprocess_phase_one_chunked_with_repair(
+    client: &dyn InferenceClient,
+    model: &str,
+    input: &PreprocessProcessorInput,
+) -> Result<(Vec<PreprocessPhaseOneSpanResolved>, Option<InferenceUsage>), ProcessorError> {
+    if !should_chunk_preprocess_phase_one(input) {
+        return run_preprocess_phase_one_with_repair(client, model, input);
+    }
+
+    let mut combined_spans = Vec::new();
+    let mut combined_usage: Option<InferenceUsage> = None;
+    for (chunk_index, chunk_input) in split_preprocess_input(
+        input,
+        PREPROCESS_PHASE_ONE_CHUNK_SEGMENTS,
+        PREPROCESS_PHASE_ONE_CHUNK_MAX_CHARS,
+    )
+    .into_iter()
+    .enumerate()
+    {
+        let (mut chunk_spans, chunk_usage) =
+            run_preprocess_phase_one_with_repair(client, model, &chunk_input)?;
+        for span in &mut chunk_spans {
+            span.span_id = format!("chunk_{}_{}", chunk_index + 1, span.span_id);
+        }
+        combined_spans.extend(chunk_spans);
+        combined_usage = combine_inference_usage(combined_usage, chunk_usage);
+    }
+
+    combined_spans.sort_by_key(|span| span.start_sequence_no);
+    Ok((
+        fill_preprocess_phase_one_gaps(combined_spans, input),
+        combined_usage,
+    ))
+}
+
+fn should_chunk_preprocess_phase_one(input: &PreprocessProcessorInput) -> bool {
+    let char_count: usize = input
+        .segments
+        .iter()
+        .map(|segment| segment.text_content.len())
+        .sum();
+    input.segments.len() > PREPROCESS_PHASE_ONE_CHUNK_SEGMENTS
+        || char_count > PREPROCESS_PHASE_ONE_CHUNK_MAX_CHARS
+}
+
+fn split_preprocess_input(
+    input: &PreprocessProcessorInput,
+    max_segments: usize,
+    max_chars: usize,
+) -> Vec<PreprocessProcessorInput> {
+    if input.segments.is_empty() {
+        return Vec::new();
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    let effective_max_segments = max_segments.max(1);
+
+    while start < input.segments.len() {
+        let mut end = start;
+        let mut char_count = 0usize;
+        while end < input.segments.len() && (end - start) < effective_max_segments {
+            let next_chars = input.segments[end].text_content.len();
+            if end > start && char_count + next_chars > max_chars {
+                break;
+            }
+            char_count += next_chars;
+            end += 1;
+        }
+        if end == start {
+            end += 1;
+        }
+
+        let first_sequence_no = input.segments[start].sequence_no;
+        let last_sequence_no = input.segments[end - 1].sequence_no;
+        chunks.push(PreprocessProcessorInput {
+            artifact_id: input.artifact_id.clone(),
+            import_id: input.import_id.clone(),
+            source_type: input.source_type,
+            title: Some(match &input.title {
+                Some(title) => format!("{title} [preprocess {first_sequence_no}-{last_sequence_no}]"),
+                None => format!("preprocess {first_sequence_no}-{last_sequence_no}"),
+            }),
+            participants: input.participants.clone(),
+            segments: input.segments[start..end].to_vec(),
+        });
+
+        start = end;
+    }
+
+    chunks
+}
+
 fn run_preprocess_phase_one_once(
     client: &dyn InferenceClient,
     model: &str,
@@ -706,7 +832,7 @@ fn run_preprocess_phase_one_once(
         model,
         PREPROCESS_PHASE_ONE_SYSTEM_PROMPT,
         user_prompt,
-        &preprocess_phase_one_schema_wrapper(),
+        &preprocess_phase_one_schema_wrapper(input),
     )?;
     let phase_one_parsed: ModelPreprocessPhaseOneOutput =
         serde_json::from_str(&phase_one_result.output_text).map_err(|source| {
@@ -750,7 +876,7 @@ fn run_preprocess_phase_two_once(
         model,
         PREPROCESS_PHASE_TWO_SYSTEM_PROMPT,
         user_prompt,
-        &preprocess_output_schema_wrapper(),
+        &preprocess_output_schema_wrapper(phase_one_resolved),
     )?;
     let phase_two_parsed: ModelPreprocessOutput =
         serde_json::from_str(&phase_two_result.output_text).map_err(|source| {
@@ -833,7 +959,7 @@ impl HostedArtifactProcessor {
             &self.model,
             self.strategy.system_prompt(),
             user_prompt,
-            &self.strategy.extraction_schema(),
+            &self.strategy.extraction_schema(input),
         )?;
         let parsed: ModelArtifactOutput = serde_json::from_str(&inference_result.output_text)
             .map_err(|source| ProcessorError::ParseModelJson {
@@ -841,8 +967,9 @@ impl HostedArtifactProcessor {
                 body_preview: preview(&inference_result.output_text),
             })?;
         let parsed = parsed.resolve_evidence_aliases(input);
-
-        parsed.validate_against(input)?;
+        let parsed = parsed
+            .validate_and_salvage(input)
+            .map_err(|err| attach_output_preview(err, &inference_result.output_text))?;
         Ok(parsed.into_processor_output(
             self.model.clone(),
             inference_result.usage,
@@ -895,7 +1022,7 @@ impl ReconciliationProcessor for HostedReconciliationProcessor {
 struct ConversationEnrichmentStrategy {
     prompt_version: &'static str,
     system_prompt: &'static str,
-    extraction_schema: fn() -> serde_json::Value,
+    extraction_schema: fn(&ArtifactProcessorInput) -> serde_json::Value,
 }
 
 impl ConversationEnrichmentStrategy {
@@ -918,8 +1045,8 @@ impl EnrichmentStrategy for ConversationEnrichmentStrategy {
         self.system_prompt
     }
 
-    fn extraction_schema(&self) -> serde_json::Value {
-        (self.extraction_schema)()
+    fn extraction_schema(&self, input: &ArtifactProcessorInput) -> serde_json::Value {
+        (self.extraction_schema)(input)
     }
 
     fn process(
@@ -1115,6 +1242,7 @@ impl OpenAiClient {
 
         let client = Client::builder()
             .default_headers(default_headers)
+            .timeout(Duration::from_secs(180))
             .build()
             .map_err(|source| ProcessorError::BuildHttpClient { source })?;
 
@@ -1615,7 +1743,7 @@ impl OpenAiArtifactProcessor {
             &self.model,
             OPENAI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
             user_prompt,
-            &structured_output_schema_wrapper(),
+            &structured_output_schema_wrapper(input),
             max_output_tokens,
         )?;
         let parsed: ModelArtifactOutput =
@@ -1626,8 +1754,8 @@ impl OpenAiArtifactProcessor {
                 }
             })?;
         let parsed = parsed.resolve_evidence_aliases(input);
-        parsed
-            .validate_against(input)
+        let parsed = parsed
+            .validate_and_salvage(input)
             .map_err(|err| attach_output_preview(err, &inference_result.output_text))?;
         Ok(parsed.into_processor_output(
             self.model.clone(),
@@ -1673,14 +1801,14 @@ impl ExtractionBatchSubmitter for OpenAiExtractionSubmitter {
         for input in inputs {
             let user_prompt = build_conversation_user_prompt(input)?;
             requests.push(OpenAiBatchRequest {
-                custom_id: input.artifact_id.clone(),
+                custom_id: input.batch_custom_id(),
                 method: "POST".to_string(),
                 url: "/v1/responses".to_string(),
                 body: self.client.build_responses_request(
                     &self.model,
                     OPENAI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
                     &user_prompt,
-                    &openai_structured_output_schema(),
+                    &openai_structured_output_schema(input),
                 ),
             });
         }
@@ -1747,7 +1875,9 @@ impl ExtractionBatchSubmitter for OpenAiExtractionSubmitter {
                         body_preview: preview(&result.output_text),
                     })?;
                 let parsed = parsed.resolve_evidence_aliases(input);
-                parsed.validate_against(input)?;
+                let parsed = parsed
+                    .validate_and_salvage(input)
+                    .map_err(|err| attach_output_preview(err, &result.output_text))?;
                 Ok(parsed.into_processor_output(
                     self.model.clone(),
                     result.usage,
@@ -2117,24 +2247,24 @@ impl ReconciliationBatchSubmitter for OpenAiReconciliationSubmitter {
 }
 
 trait OpenAiBatchInput {
-    fn batch_custom_id(&self) -> &str;
+    fn batch_custom_id(&self) -> String;
 }
 
 impl OpenAiBatchInput for ArtifactProcessorInput {
-    fn batch_custom_id(&self) -> &str {
-        &self.artifact_id
+    fn batch_custom_id(&self) -> String {
+        artifact_processor_batch_custom_id(self)
     }
 }
 
 impl OpenAiBatchInput for PreprocessProcessorInput {
-    fn batch_custom_id(&self) -> &str {
-        &self.artifact_id
+    fn batch_custom_id(&self) -> String {
+        self.artifact_id.clone()
     }
 }
 
 impl OpenAiBatchInput for ReconciliationProcessorInput {
-    fn batch_custom_id(&self) -> &str {
-        &self.artifact_id
+    fn batch_custom_id(&self) -> String {
+        self.artifact_id.clone()
     }
 }
 
@@ -2240,13 +2370,11 @@ where
 
     let mut outputs = Vec::with_capacity(inputs.len());
     for input in inputs {
+        let custom_id = input.batch_custom_id();
         let result = parsed_by_id
-            .remove(input.batch_custom_id())
+            .remove(&custom_id)
             .ok_or_else(|| ProcessorError::Message {
-                message: format!(
-                    "OpenAI batch missing result for {}",
-                    input.batch_custom_id()
-                ),
+                message: format!("OpenAI batch missing result for {}", custom_id),
             })?;
         outputs.push(parse(result, input));
     }
@@ -2586,6 +2714,8 @@ impl ModelArtifactOutput {
         }
 
         for memory in &mut self.memories {
+            memory.memory_type =
+                canonicalize_memory_type(&memory.memory_type, &memory.title, &memory.body_text);
             for segment_id in &mut memory.evidence_segment_ids {
                 if let Some(actual) = alias_map.get(segment_id.as_str()) {
                     *segment_id = actual.clone();
@@ -2594,6 +2724,7 @@ impl ModelArtifactOutput {
         }
 
         for entity in &mut self.entities {
+            entity.entity_type = canonicalize_entity_type(&entity.entity_type);
             for segment_id in &mut entity.evidence_segment_ids {
                 if let Some(actual) = alias_map.get(segment_id.as_str()) {
                     *segment_id = actual.clone();
@@ -2620,7 +2751,7 @@ impl ModelArtifactOutput {
         self
     }
 
-    fn validate_against(&self, input: &ArtifactProcessorInput) -> Result<(), ProcessorError> {
+    fn validate_and_salvage(mut self, input: &ArtifactProcessorInput) -> Result<Self, ProcessorError> {
         let valid_segment_ids: HashSet<&str> = input
             .segments
             .iter()
@@ -2645,11 +2776,8 @@ impl ModelArtifactOutput {
             });
         }
 
-        for (index, classification) in self.classifications.iter().enumerate() {
-            validate_text_field(
-                &format!("classifications[{index}].title"),
-                &classification.title,
-            )?;
+        self.classifications = retain_valid_items(self.classifications, |index, classification| {
+            validate_text_field(&format!("classifications[{index}].title"), &classification.title)?;
             validate_text_field(
                 &format!("classifications[{index}].body_text"),
                 &classification.body_text,
@@ -2672,8 +2800,8 @@ impl ModelArtifactOutput {
                 &format!("classifications[{index}].evidence_segment_ids"),
                 &classification.evidence_segment_ids,
                 &valid_segment_ids,
-            )?;
-        }
+            )
+        });
 
         if self.memories.len() > MAX_MEMORIES {
             return Err(ProcessorError::InvalidModelOutput {
@@ -2685,7 +2813,7 @@ impl ModelArtifactOutput {
             });
         }
 
-        for (index, memory) in self.memories.iter().enumerate() {
+        self.memories = retain_valid_items(self.memories, |index, memory| {
             validate_text_field(&format!("memories[{index}].title"), &memory.title)?;
             validate_text_field(&format!("memories[{index}].body_text"), &memory.body_text)?;
             match memory.memory_type.as_str() {
@@ -2715,10 +2843,10 @@ impl ModelArtifactOutput {
                 &format!("memories[{index}].evidence_segment_ids"),
                 &memory.evidence_segment_ids,
                 &valid_segment_ids,
-            )?;
-        }
+            )
+        });
 
-        for (index, entity) in self.entities.iter().enumerate() {
+        self.entities = retain_valid_items(self.entities, |index, entity| {
             validate_text_field(&format!("entities[{index}].entity_key"), &entity.entity_key)?;
             validate_text_field(
                 &format!("entities[{index}].display_name"),
@@ -2732,10 +2860,10 @@ impl ModelArtifactOutput {
                 &format!("entities[{index}].evidence_segment_ids"),
                 &entity.evidence_segment_ids,
                 &valid_segment_ids,
-            )?;
-        }
+            )
+        });
 
-        for (index, relationship) in self.relationships.iter().enumerate() {
+        self.relationships = retain_valid_items(self.relationships, |index, relationship| {
             validate_text_field(
                 &format!("relationships[{index}].relationship_type"),
                 &relationship.relationship_type,
@@ -2764,8 +2892,8 @@ impl ModelArtifactOutput {
                 &format!("relationships[{index}].evidence_segment_ids"),
                 &relationship.evidence_segment_ids,
                 &valid_segment_ids,
-            )?;
-        }
+            )
+        });
 
         if self.retrieval_intents.len() > MAX_RETRIEVAL_INTENTS {
             return Err(ProcessorError::InvalidModelOutput {
@@ -2777,7 +2905,7 @@ impl ModelArtifactOutput {
             });
         }
 
-        for (index, intent) in self.retrieval_intents.iter().enumerate() {
+        self.retrieval_intents = retain_valid_items(self.retrieval_intents, |index, intent| {
             validate_text_field(
                 &format!("retrieval_intents[{index}].question"),
                 &intent.question,
@@ -2794,8 +2922,8 @@ impl ModelArtifactOutput {
                 &format!("retrieval_intents[{index}].evidence_segment_ids"),
                 &intent.evidence_segment_ids,
                 &valid_segment_ids,
-            )?;
-        }
+            )
+        });
 
         if !(1..=10).contains(&self.importance_score) {
             return Err(ProcessorError::InvalidModelOutput {
@@ -2827,7 +2955,7 @@ impl ModelArtifactOutput {
             });
         }
 
-        Ok(())
+        Ok(self)
     }
 
     fn into_processor_output(
@@ -2867,8 +2995,10 @@ impl ModelArtifactOutput {
                 .map(|memory| {
                     let title = normalize_optional_text(memory.title);
                     let body_text = memory.body_text.trim().to_string();
+                    let memory_type =
+                        canonicalize_memory_type(&memory.memory_type, title.as_deref().unwrap_or_default(), &body_text);
                     let candidate_key = memory_candidate_key_from_fields(
-                        &memory.memory_type,
+                        &memory_type,
                         memory.memory_scope,
                         &memory.memory_scope_value,
                         title.as_deref(),
@@ -2878,7 +3008,7 @@ impl ModelArtifactOutput {
                         candidate_key,
                         title,
                         body_text,
-                        memory_type: memory.memory_type,
+                        memory_type,
                         memory_scope: memory.memory_scope,
                         memory_scope_value: memory.memory_scope_value,
                         evidence_segment_ids: memory.evidence_segment_ids,
@@ -2891,7 +3021,7 @@ impl ModelArtifactOutput {
                 .map(|entity| EntityOutput {
                     entity_key: entity.entity_key,
                     display_name: entity.display_name,
-                    entity_type: entity.entity_type,
+                    entity_type: canonicalize_entity_type(&entity.entity_type),
                     evidence_segment_ids: entity.evidence_segment_ids,
                 })
                 .collect(),
@@ -3139,6 +3269,104 @@ fn text_overlap_score(left: &str, right: &str) -> f32 {
     overlap / smaller
 }
 
+fn canonicalize_memory_type(raw: &str, title: &str, body_text: &str) -> String {
+    let raw = normalize_candidate_key_text(raw);
+    let title = normalize_candidate_key_text(title);
+    let body = normalize_candidate_key_text(body_text);
+    let combined = format!("{title} {body}");
+
+    if matches!(raw.as_str(), "identity fact" | "identity_fact") {
+        return "identity_fact".to_string();
+    }
+    if matches!(raw.as_str(), "preference" | "preferences") {
+        return "preference".to_string();
+    }
+    if matches!(raw.as_str(), "ongoing task" | "ongoing_task" | "ongoing state" | "ongoing_state")
+    {
+        return "ongoing_task".to_string();
+    }
+
+    if combined.contains("user weigh")
+        || combined.contains("body weight")
+        || combined.contains("user age")
+        || combined.contains("cholesterol")
+        || combined.contains("ldl")
+        || combined.contains("apob")
+        || combined.contains("lp a")
+        || combined.contains("egfr")
+        || combined.contains("lab result")
+    {
+        return "identity_fact".to_string();
+    }
+
+    if combined.contains("prefer")
+        || combined.contains("avoid")
+        || combined.contains("likes ")
+        || combined.contains("dislike")
+        || combined.contains("favorite")
+        || combined.contains("prefers ")
+    {
+        return "preference".to_string();
+    }
+
+    if combined.contains("protocol")
+        || combined.contains("plan")
+        || combined.contains("schedule")
+        || combined.contains("rotation")
+        || combined.contains("transition")
+        || combined.contains("trial")
+        || combined.contains("current ")
+        || combined.contains("currently ")
+        || combined.contains("taking ")
+        || combined.contains("supply")
+        || combined.contains("dose")
+        || combined.contains("dosing")
+        || combined.contains("arriv")
+        || combined.contains("week")
+        || combined.contains("daily ")
+    {
+        return "ongoing_task".to_string();
+    }
+
+    if combined.contains("program")
+        || combined.contains("system")
+        || combined.contains("workflow")
+        || combined.contains("architecture")
+        || combined.contains("clean engine")
+        || combined.contains("project")
+    {
+        return "project_fact".to_string();
+    }
+
+    match raw.as_str() {
+        "project fact" | "project_fact" => "ongoing_task".to_string(),
+        "reference" => "ongoing_task".to_string(),
+        "" => "ongoing_task".to_string(),
+        other if other.contains("preference") => "preference".to_string(),
+        other if other.contains("identity") => "identity_fact".to_string(),
+        other if other.contains("ongoing") => "ongoing_task".to_string(),
+        _ => "ongoing_task".to_string(),
+    }
+}
+
+fn canonicalize_entity_type(raw: &str) -> String {
+    let raw = normalize_candidate_key_text(raw);
+    match raw.as_str() {
+        "brand" | "organization brand" => "brand".to_string(),
+        "organization" | "company" | "retailer" | "store" => "organization".to_string(),
+        "food product" | "food product or source" | "food source" | "product or ingredient" => {
+            "food_product".to_string()
+        }
+        "supplement form" | "supplement" => "supplement_form".to_string(),
+        "laboratory marker" | "biomarker" => "biomarker".to_string(),
+        "exercise program" | "training type" | "exercise type" => "training_type".to_string(),
+        "medication" | "medication or brand name mention" => "medication".to_string(),
+        "quality standard" => "quality_standard".to_string(),
+        "" => "entity".to_string(),
+        _ => raw.replace(' ', "_"),
+    }
+}
+
 fn prefer_richer_optional_text(current: Option<String>, incoming: Option<String>) -> Option<String> {
     match (current, incoming) {
         (Some(current), Some(incoming)) => {
@@ -3199,6 +3427,22 @@ impl ModelPreprocessOutput {
                     false,
                 ) {
                     span.end_evidence_ref = actual;
+                }
+                let start_sequence_no = input
+                    .segments
+                    .iter()
+                    .find(|segment| segment.segment_id == span.start_evidence_ref)
+                    .map(|segment| segment.sequence_no);
+                let end_sequence_no = input
+                    .segments
+                    .iter()
+                    .find(|segment| segment.segment_id == span.end_evidence_ref)
+                    .map(|segment| segment.sequence_no);
+                if matches!(
+                    (start_sequence_no, end_sequence_no),
+                    (Some(start), Some(end)) if start > end
+                ) {
+                    std::mem::swap(&mut span.start_evidence_ref, &mut span.end_evidence_ref);
                 }
             }
         }
@@ -3390,11 +3634,11 @@ impl ModelPreprocessPhaseOneOutput {
                     ),
                 });
             };
-            if start > end {
-                return Err(ProcessorError::InvalidModelOutput {
-                    detail: format!("topic_spans[{index}] start must be <= end"),
-                });
-            }
+            let (start_ref, end_ref, start, end) = if start > end {
+                (end_ref, start_ref, *end, *start)
+            } else {
+                (start_ref, end_ref, *start, *end)
+            };
             resolved.push(PreprocessPhaseOneSpanResolved {
                 span_id: span.span_id,
                 label: span.label,
@@ -3403,11 +3647,11 @@ impl ModelPreprocessPhaseOneOutput {
                 confidence_label: span.confidence_label,
                 start_evidence_ref: start_ref,
                 end_evidence_ref: end_ref,
-                start_sequence_no: *start,
-                end_sequence_no: *end,
-                start_excerpt: excerpt_for_sequence(input, *start),
-                middle_excerpt: excerpt_for_sequence(input, *start + ((*end - *start) / 2)),
-                end_excerpt: excerpt_for_sequence(input, *end),
+                start_sequence_no: start,
+                end_sequence_no: end,
+                start_excerpt: excerpt_for_sequence(input, start),
+                middle_excerpt: excerpt_for_sequence(input, start + ((end - start) / 2)),
+                end_excerpt: excerpt_for_sequence(input, end),
             });
         }
         resolved.sort_by_key(|span| span.start_sequence_no);
@@ -3563,6 +3807,17 @@ fn validate_evidence_ids(
     }
 
     Ok(())
+}
+
+fn retain_valid_items<T>(
+    items: Vec<T>,
+    mut validate: impl FnMut(usize, &T) -> Result<(), ProcessorError>,
+) -> Vec<T> {
+    items
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, item)| validate(index, &item).ok().map(|_| item))
+        .collect()
 }
 
 fn normalize_optional_text(value: String) -> Option<String> {
@@ -3752,7 +4007,10 @@ pub(crate) fn build_conversation_user_prompt(
          - relationships: include explicit supported links between emitted entities or durable facts\n\
          - retrieval_intents: ask archive-only follow-up questions when duplicate detection, prior-state matching, or contradiction checks matter\n\
          - importance: be conservative\n\
-         - evidence_segment_ids must use only the evidence_ref values shown in segments (for example s1, s2)\n\
+         - evidence_segment_ids must use only the evidence_ref values shown in segments\n\
+         - allowed evidence_ref values for this artifact: {allowed_refs_json}\n\
+         - copy evidence_ref values exactly as shown, for example evidence_ref_1 and evidence_ref_2\n\
+         - never invent, abbreviate, transform, or combine evidence refs\n\
          - cite every segment that directly supports each derived object, not just the primary one\n\
          - memory_scope_value must be {artifact_id}\n\
          ",
@@ -3760,6 +4018,8 @@ pub(crate) fn build_conversation_user_prompt(
         source_type = input.source_type.as_str(),
         title = input.title.as_deref().unwrap_or(""),
         segments_json = segments_json,
+        allowed_refs_json = serde_json::to_string(&allowed_artifact_evidence_refs(input))
+            .map_err(|source| ProcessorError::SerializePrompt { source })?,
     ))
 }
 
@@ -3983,6 +4243,24 @@ fn preview(value: &str) -> String {
     value.chars().take(240).collect()
 }
 
+fn allowed_artifact_evidence_refs(input: &ArtifactProcessorInput) -> Vec<String> {
+    input
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(index, _)| segment_alias(index))
+        .collect()
+}
+
+fn allowed_preprocess_evidence_refs(input: &PreprocessProcessorInput) -> Vec<String> {
+    input
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(index, _)| segment_alias(index))
+        .collect()
+}
+
 fn build_segment_alias_map(
     input: &ArtifactProcessorInput,
 ) -> std::collections::HashMap<String, String> {
@@ -4107,34 +4385,51 @@ Previous output problem: {}\n",
     )
 }
 
-pub(crate) fn structured_output_schema_wrapper() -> serde_json::Value {
+pub(crate) fn structured_output_schema_wrapper(
+    input: &ArtifactProcessorInput,
+) -> serde_json::Value {
     json!({
         "type": "json_schema",
         "name": "openarchive_artifact_enrichment",
         "strict": true,
-        "schema": structured_output_schema()
+        "schema": structured_output_schema_with_allowed_refs(&allowed_artifact_evidence_refs(input))
     })
 }
 
-pub(crate) fn preprocess_output_schema_wrapper() -> serde_json::Value {
+pub(crate) fn preprocess_output_schema_wrapper(
+    phase_one_resolved: &[PreprocessPhaseOneSpanResolved],
+) -> serde_json::Value {
     json!({
         "type": "json_schema",
         "name": "openarchive_preprocess_segmentation",
         "strict": true,
-        "schema": preprocess_output_schema()
+        "schema": preprocess_output_schema_with_allowed_refs(phase_one_resolved)
     })
 }
 
-pub(crate) fn preprocess_phase_one_schema_wrapper() -> serde_json::Value {
+pub(crate) fn preprocess_phase_one_schema_wrapper(
+    input: &PreprocessProcessorInput,
+) -> serde_json::Value {
     json!({
         "type": "json_schema",
         "name": "openarchive_preprocess_phase_one",
         "strict": true,
-        "schema": preprocess_phase_one_schema()
+        "schema": preprocess_phase_one_schema_with_allowed_refs(&allowed_preprocess_evidence_refs(input))
     })
 }
 
 pub(crate) fn preprocess_phase_one_schema() -> serde_json::Value {
+    preprocess_phase_one_schema_with_allowed_refs(&[])
+}
+
+pub(crate) fn preprocess_phase_one_schema_with_allowed_refs(
+    allowed_refs: &[String],
+) -> serde_json::Value {
+    let evidence_id_item = if allowed_refs.is_empty() {
+        json!({ "type": "string", "minLength": 1 })
+    } else {
+        json!({ "type": "string", "enum": allowed_refs })
+    };
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -4152,8 +4447,8 @@ pub(crate) fn preprocess_phase_one_schema() -> serde_json::Value {
                         "summary": { "type": "string", "minLength": 1 },
                         "focus_key": { "type": "string", "minLength": 1 },
                         "confidence_label": { "type": "string", "enum": ["low", "medium", "high"] },
-                        "start_evidence_ref": { "type": "string", "minLength": 1 },
-                        "end_evidence_ref": { "type": "string", "minLength": 1 }
+                        "start_evidence_ref": evidence_id_item.clone(),
+                        "end_evidence_ref": evidence_id_item
                     }
                 }
             }
@@ -4162,6 +4457,26 @@ pub(crate) fn preprocess_phase_one_schema() -> serde_json::Value {
 }
 
 pub(crate) fn preprocess_output_schema() -> serde_json::Value {
+    preprocess_output_schema_with_allowed_refs(&[])
+}
+
+pub(crate) fn preprocess_output_schema_with_allowed_refs(
+    phase_one_resolved: &[PreprocessPhaseOneSpanResolved],
+) -> serde_json::Value {
+    let allowed_refs: Vec<String> = phase_one_resolved
+        .iter()
+        .flat_map(|span| {
+            [
+                span.start_evidence_ref.clone(),
+                span.end_evidence_ref.clone(),
+            ]
+        })
+        .collect();
+    let evidence_id_item = if allowed_refs.is_empty() {
+        json!({ "type": "string", "minLength": 1 })
+    } else {
+        json!({ "type": "string", "enum": allowed_refs })
+    };
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -4189,8 +4504,8 @@ pub(crate) fn preprocess_output_schema() -> serde_json::Value {
                                 "additionalProperties": false,
                                 "required": ["start_evidence_ref", "end_evidence_ref"],
                                 "properties": {
-                                    "start_evidence_ref": { "type": "string", "minLength": 1 },
-                                    "end_evidence_ref": { "type": "string", "minLength": 1 }
+                                    "start_evidence_ref": evidence_id_item.clone(),
+                                    "end_evidence_ref": evidence_id_item.clone()
                                 }
                             }
                         }
@@ -4204,6 +4519,17 @@ pub(crate) fn preprocess_output_schema() -> serde_json::Value {
 }
 
 pub fn structured_output_schema() -> serde_json::Value {
+    structured_output_schema_with_allowed_refs(&[])
+}
+
+pub(crate) fn structured_output_schema_with_allowed_refs(
+    allowed_refs: &[String],
+) -> serde_json::Value {
+    let evidence_id_item = if allowed_refs.is_empty() {
+        json!({ "type": "string", "minLength": 1 })
+    } else {
+        json!({ "type": "string", "enum": allowed_refs })
+    };
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -4229,7 +4555,7 @@ pub fn structured_output_schema() -> serde_json::Value {
                     "evidence_segment_ids": {
                         "type": "array",
                         "minItems": 1,
-                        "items": { "type": "string", "minLength": 1 }
+                        "items": evidence_id_item.clone()
                     }
                 }
             },
@@ -4257,7 +4583,7 @@ pub fn structured_output_schema() -> serde_json::Value {
                         "evidence_segment_ids": {
                             "type": "array",
                             "minItems": 1,
-                            "items": { "type": "string", "minLength": 1 }
+                            "items": evidence_id_item.clone()
                         }
                     }
                 }
@@ -4297,7 +4623,7 @@ pub fn structured_output_schema() -> serde_json::Value {
                         "evidence_segment_ids": {
                             "type": "array",
                             "minItems": 1,
-                            "items": { "type": "string", "minLength": 1 }
+                            "items": evidence_id_item.clone()
                         }
                     }
                 }
@@ -4315,7 +4641,7 @@ pub fn structured_output_schema() -> serde_json::Value {
                         "evidence_segment_ids": {
                             "type": "array",
                             "minItems": 1,
-                            "items": { "type": "string", "minLength": 1 }
+                            "items": evidence_id_item.clone()
                         }
                     }
                 }
@@ -4344,7 +4670,7 @@ pub fn structured_output_schema() -> serde_json::Value {
                         "evidence_segment_ids": {
                             "type": "array",
                             "minItems": 1,
-                            "items": { "type": "string", "minLength": 1 }
+                            "items": evidence_id_item.clone()
                         }
                     }
                 }
@@ -4366,7 +4692,7 @@ pub fn structured_output_schema() -> serde_json::Value {
                         "evidence_segment_ids": {
                             "type": "array",
                             "minItems": 1,
-                            "items": { "type": "string", "minLength": 1 }
+                            "items": evidence_id_item
                         }
                     }
                 }
@@ -4382,8 +4708,8 @@ pub fn structured_output_schema() -> serde_json::Value {
     })
 }
 
-pub(crate) fn openai_structured_output_schema() -> serde_json::Value {
-    let mut schema = structured_output_schema();
+pub(crate) fn openai_structured_output_schema(input: &ArtifactProcessorInput) -> serde_json::Value {
+    let mut schema = structured_output_schema_with_allowed_refs(&allowed_artifact_evidence_refs(input));
     if let Some(memories) = schema
         .get_mut("properties")
         .and_then(serde_json::Value::as_object_mut)
@@ -4468,10 +4794,10 @@ pub(crate) fn reconciliation_output_schema() -> serde_json::Value {
     })
 }
 
-const OPENAI_PROMPT_VERSION: &str = "openai-strict-v2";
-pub(crate) const ANTHROPIC_PROMPT_VERSION: &str = "anthropic-strict-v1";
-pub(crate) const GEMINI_PROMPT_VERSION: &str = "gemini-strict-v6";
-pub(crate) const GROK_PROMPT_VERSION: &str = "grok-strict-v2";
+const OPENAI_PROMPT_VERSION: &str = "openai-strict-v3";
+pub(crate) const ANTHROPIC_PROMPT_VERSION: &str = "anthropic-strict-v2";
+pub(crate) const GEMINI_PROMPT_VERSION: &str = "gemini-strict-v7";
+pub(crate) const GROK_PROMPT_VERSION: &str = "grok-strict-v3";
 const PREPROCESS_PROMPT_VERSION: &str = "preprocess-v3";
 pub(crate) const PREPROCESS_PHASE_ONE_SYSTEM_PROMPT: &str = "You are OpenArchive's local segmentation engine. Return ONLY valid JSON.\n\nRules:\n1. Partition the conversation into contiguous topic_spans.\n2. Every segment must be covered exactly once.\n3. Keep spans local and contiguous. Do not merge non-contiguous returns in this phase.\n4. Split when the active question, decision, troubleshooting target, work item, or named subject changes in a meaningful way.\n5. Do not create tiny spans for brief clarifications unless the thread actually changes.\n6. Labels must be short and specific.\n7. Summaries must be one short sentence.\n8. focus_key must be a short phrase naming the concrete thread target, such as the specific question, workflow, entity, or decision under discussion.\n9. start_evidence_ref and end_evidence_ref must be copied exactly from the provided evidence_ref strings.\n10. Never invent, transform, expand, or combine ids.\n11. Never output values like segment-*, seg-*, span-*, artifact ids, or sequence numbers in evidence ref fields.\n12. Output valid JSON only.";
 pub(crate) const PREPROCESS_PHASE_TWO_SYSTEM_PROMPT: &str = "You are OpenArchive's thread consolidation engine. Return ONLY valid JSON.\n\nRules:\n1. Merge local spans into durable topic_threads.\n2. Revisited topics should reuse one thread with multiple spans.\n3. Do not merge spans on broad domain overlap alone.\n4. Only merge when the later span clearly resumes the same specific thread of work, question, workflow, or investigation.\n5. Treat focus_key as a strong identity signal; different focus_key values usually imply different threads unless the excerpts show a clear return to the same exact thread.\n6. Prefer separate threads when unsure.\n7. In topic_threads.spans, start_evidence_ref and end_evidence_ref must be copied exactly from the provided spans.\n8. Never output span_id in evidence ref fields.\n9. Never invent, transform, expand, or combine ids.\n10. Never output values like segment-*, seg-*, span-*, artifact ids, or sequence numbers in evidence ref fields.\n11. Summaries must be one short sentence.\n12. Output valid JSON only.";
@@ -4883,7 +5209,7 @@ mod tests {
     }
 
     #[test]
-    fn openai_processor_rejects_artifact_memory_scope_mismatch() {
+    fn openai_processor_drops_invalid_objects_without_rejecting_artifact() {
         let client = Arc::new(FixedInferenceClient {
             response: serde_json::json!({
                 "summary": {
@@ -4898,6 +5224,14 @@ mod tests {
                         "memory_scope": "artifact",
                         "memory_scope_value": "artifact-1-truncated",
                         "title": "Preferred HashBooks Logo Symbol",
+                        "body_text": "The original hash-in-book symbol should remain the preferred logo mark.",
+                        "evidence_segment_ids": ["seg-1"]
+                    },
+                    {
+                        "memory_type": "preference",
+                        "memory_scope": "artifact",
+                        "memory_scope_value": "artifact-1",
+                        "title": "Prefer original logo symbol",
                         "body_text": "The original hash-in-book symbol should remain the preferred logo mark.",
                         "evidence_segment_ids": ["seg-1"]
                     }
@@ -4916,9 +5250,21 @@ mod tests {
             .build(EnrichmentTier::Standard)
             .expect("processor should build");
 
-        let err = processor
+        let output = processor
             .process(&sample_input())
-            .expect_err("processor should fail");
-        assert!(matches!(err, ProcessorError::InvalidModelOutput { .. }));
+            .expect("processor should salvage valid objects");
+        assert_eq!(output.summary.body_text, "The artifact prefers the original hash-in-book symbol.");
+        assert_eq!(output.memories.len(), 1);
+        assert_eq!(output.memories[0].memory_scope_value, "artifact-1");
+    }
+
+    #[test]
+    fn conversation_prompt_lists_exact_allowed_evidence_refs() {
+        let prompt = build_conversation_user_prompt(&sample_input()).expect("prompt should build");
+
+        assert!(prompt.contains("allowed evidence_ref values for this artifact"));
+        assert!(prompt.contains("evidence_ref_1"));
+        assert!(prompt.contains("evidence_ref_2"));
+        assert!(!prompt.contains("for example s1, s2"));
     }
 }

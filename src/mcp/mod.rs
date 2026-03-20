@@ -347,7 +347,7 @@ mod tests {
         let artifact_detail = Some(ArtifactDetailService::new(Arc::new(
             MockArtifactDetailStore,
         )));
-        let context_pack = Some(ContextPackService::new(Arc::new(MockContextPackStore)));
+        let context_pack = Some(ContextPackService::new(Arc::new(MockContextPackStore), None));
         ArchiveApplication {
             artifacts: crate::app::artifacts::ArtifactQueryService::new(Arc::new(
                 MockArtifactReadStore,

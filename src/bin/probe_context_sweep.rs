@@ -4,7 +4,8 @@ use std::time::Instant;
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
 use open_archive::config::{
-    AnthropicConfig, GeminiConfig, GrokConfig, OpenAiConfig, PostgresConfig,
+    AnthropicConfig, EnrichmentPipelineConfig, GeminiConfig, GrokConfig, OpenAiConfig,
+    PostgresConfig,
 };
 use open_archive::processor::{
     AnthropicProcessorFactory, ArtifactProcessorFactory, ArtifactProcessorInput,
@@ -41,10 +42,10 @@ struct Args {
     #[arg(long = "budget")]
     budgets: Vec<u32>,
 
-    #[arg(long = "window-segments", default_value_t = 40)]
+    #[arg(long = "window-segments", default_value_t = 20)]
     window_segments: usize,
 
-    #[arg(long = "window-overlap", default_value_t = 8)]
+    #[arg(long = "window-overlap", default_value_t = 4)]
     window_overlap: usize,
 
     #[arg(long = "max-chars")]
@@ -146,6 +147,11 @@ struct ModeRun {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let pipeline_config = EnrichmentPipelineConfig::from_env()
+        .context("failed to load enrichment pipeline config from env")?;
+    let effective_max_chars = args
+        .max_chars
+        .unwrap_or(pipeline_config.chunking.max_chars_per_chunk);
     let postgres = PostgresConfig::from_env().context("failed to load Postgres config from env")?;
     let read_store = PostgresArtifactReadStore::new(postgres);
 
@@ -191,9 +197,7 @@ fn main() -> Result<()> {
         "Chunk limits: max_segments={} overlap={}{}",
         args.window_segments,
         args.window_overlap,
-        args.max_chars
-            .map(|value| format!(" max_chars={value}"))
-            .unwrap_or_default()
+        format!(" max_chars={effective_max_chars}")
     );
     println!();
 
@@ -315,6 +319,12 @@ fn run_mode(
     extract_input: &ArtifactProcessorInput,
     preprocess_input: &PreprocessProcessorInput,
 ) -> Result<ModeRun> {
+    let pipeline_config = EnrichmentPipelineConfig::from_env()
+        .context("failed to load enrichment pipeline config from env")?;
+    let effective_max_chars = Some(
+        args.max_chars
+            .unwrap_or(pipeline_config.chunking.max_chars_per_chunk),
+    );
     let tier = args.tier.as_enrichment_tier();
     let extract_factory = build_factory(provider, budget)?;
     let processor = extract_factory
@@ -339,7 +349,7 @@ fn run_mode(
                 "window",
                 args.window_segments,
                 args.window_overlap,
-                args.max_chars,
+                effective_max_chars,
             );
             run_chunked(chunks, processor.as_ref(), None)
         }
@@ -366,7 +376,7 @@ fn run_mode(
                 base_chunks,
                 args.window_segments,
                 args.window_overlap,
-                args.max_chars,
+                effective_max_chars,
             );
             run_chunked(
                 chunks,

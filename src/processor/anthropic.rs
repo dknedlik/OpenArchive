@@ -16,6 +16,7 @@ use super::{
     ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, ANTHROPIC_PROMPT_VERSION,
     PREPROCESS_PHASE_ONE_SYSTEM_PROMPT, PREPROCESS_PHASE_TWO_SYSTEM_PROMPT,
     PREPROCESS_PROMPT_VERSION, RECONCILIATION_SYSTEM_PROMPT,
+    structured_output_schema_with_allowed_refs,
 };
 
 pub struct AnthropicProcessorFactory {
@@ -360,7 +361,14 @@ impl ExtractionBatchSubmitter for AnthropicExtractionSubmitter {
             Ok((
                 ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
                 super::build_conversation_user_prompt(input)?,
-                super::structured_output_schema(),
+                structured_output_schema_with_allowed_refs(
+                    &input
+                        .segments
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| format!("evidence_ref_{}", index + 1))
+                        .collect::<Vec<_>>(),
+                ),
             ))
         })?;
         let batch = self.client.create_message_batch(&requests)?;
@@ -406,7 +414,9 @@ impl ExtractionBatchSubmitter for AnthropicExtractionSubmitter {
                     body_preview: super::preview(&result.output_text),
                 })?;
             let parsed = parsed.resolve_evidence_aliases(input);
-            parsed.validate_against(input)?;
+            let parsed = parsed
+                .validate_and_salvage(input)
+                .map_err(|err| super::attach_output_preview(err, &result.output_text))?;
             Ok(parsed.into_processor_output(
                 self.model.clone(),
                 result.usage,
@@ -739,7 +749,7 @@ where
     for input in inputs {
         let (system_prompt, user_prompt, schema) = build(input)?;
         requests.push(AnthropicBatchRequestOwned {
-            custom_id: input.batch_custom_id().to_string(),
+            custom_id: input.batch_custom_id(),
             params: AnthropicMessagesRequestOwned {
                 model: model.to_string(),
                 max_tokens: 4096,
@@ -837,39 +847,34 @@ where
     }
     let mut outputs = Vec::with_capacity(inputs.len());
     for input in inputs {
-        let item =
-            by_id
-                .remove(input.batch_custom_id())
-                .ok_or_else(|| ProcessorError::Message {
-                    message: format!(
-                        "Anthropic batch missing result for {}",
-                        input.batch_custom_id()
-                    ),
-                })?;
+        let custom_id = input.batch_custom_id();
+        let item = by_id.remove(&custom_id).ok_or_else(|| ProcessorError::Message {
+            message: format!("Anthropic batch missing result for {}", custom_id),
+        })?;
         outputs.push(parse(item, input));
     }
     Ok(outputs)
 }
 
 trait AnthropicBatchInput {
-    fn batch_custom_id(&self) -> &str;
+    fn batch_custom_id(&self) -> String;
 }
 
 impl AnthropicBatchInput for super::ArtifactProcessorInput {
-    fn batch_custom_id(&self) -> &str {
-        &self.artifact_id
+    fn batch_custom_id(&self) -> String {
+        super::artifact_processor_batch_custom_id(self)
     }
 }
 
 impl AnthropicBatchInput for super::PreprocessProcessorInput {
-    fn batch_custom_id(&self) -> &str {
-        &self.artifact_id
+    fn batch_custom_id(&self) -> String {
+        self.artifact_id.clone()
     }
 }
 
 impl AnthropicBatchInput for super::ReconciliationProcessorInput {
-    fn batch_custom_id(&self) -> &str {
-        &self.artifact_id
+    fn batch_custom_id(&self) -> String {
+        self.artifact_id.clone()
     }
 }
 
