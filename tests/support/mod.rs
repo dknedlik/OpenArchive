@@ -3,7 +3,7 @@
 use open_archive::config::PostgresConfig;
 use open_archive::object_store::StoredObject;
 use open_archive::storage::{
-    ArtifactClass, ArtifactIngestResult, ArtifactPreprocessPayload, ArtifactStatus,
+    ArtifactClass, ArtifactExtractPayload, ArtifactIngestResult, ArtifactStatus,
     ClassificationObjectJson, DerivationRunStatus, DerivationRunType, DerivedMetadataWriteStore,
     DerivedObjectPayload, EnrichmentJobLifecycleStore, EnrichmentStatus, EvidenceRole,
     ImportStatus, ImportWriteStore, InputScopeType, JobStatus, JobType, MemoryObjectJson,
@@ -83,7 +83,7 @@ pub fn make_test_import_fixture_with_max_attempts(
     let conv_hash = sha256_hex(&format!("conv-hash-{suffix}"));
 
     let enrichment_payload =
-        ArtifactPreprocessPayload::new_v1(&artifact_id, &import_id, SourceType::ChatGptExport);
+        ArtifactExtractPayload::new_v1(&artifact_id, &import_id, SourceType::ChatGptExport, Vec::new(), Vec::new());
 
     let write_set = WriteImportSet {
         payload_object: NewImportObjectRef {
@@ -202,7 +202,7 @@ pub fn make_test_import_fixture_with_max_attempts(
             job: NewEnrichmentJob {
                 job_id: job_id.clone(),
                 artifact_id: artifact_id.clone(),
-                job_type: JobType::ArtifactPreprocess,
+                job_type: JobType::ArtifactExtract,
                 enrichment_tier: open_archive::storage::EnrichmentTier::Standard,
                 spawned_by_job_id: None,
                 job_status: JobStatus::Pending,
@@ -752,7 +752,7 @@ pub fn contract_claim_complete_happy_path<H: ProviderHarness>(harness: &H) {
 
     assert_eq!(claimed.job_id, expected_job_id);
     assert_eq!(claimed.artifact_id, expected_artifact_id);
-    assert_eq!(claimed.job_type, JobType::ArtifactPreprocess);
+    assert_eq!(claimed.job_type, JobType::ArtifactExtract);
     assert_eq!(claimed.attempt_count, 1);
     assert_eq!(claimed.max_attempts, 3);
     assert!(!claimed.payload_json.is_empty());
@@ -974,10 +974,10 @@ pub fn contract_payload_matches_documented_schema<H: ProviderHarness>(harness: &
         .expect("claim_next_job should succeed")
         .expect("should claim the pending job");
 
-    let payload = ArtifactPreprocessPayload::from_json(&claimed.payload_json)
+    let payload = ArtifactExtractPayload::from_json(&claimed.payload_json)
         .expect("payload_json should deserialize");
     let expected =
-        ArtifactPreprocessPayload::new_v1(&artifact_id, &import_id, SourceType::ChatGptExport);
+        ArtifactExtractPayload::new_v1(&artifact_id, &import_id, SourceType::ChatGptExport, Vec::new(), Vec::new());
 
     assert_eq!(payload, expected);
     assert_eq!(payload.schema_version, "1");

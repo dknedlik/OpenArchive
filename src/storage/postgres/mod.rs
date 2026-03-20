@@ -653,6 +653,17 @@ impl EnrichmentJobLifecycleStore for PostgresEnrichmentJobStore {
         )
     }
 
+    fn reschedule_running_job(
+        &self,
+        worker_id: &str,
+        job_id: &str,
+        message: &str,
+        retry_after_seconds: i64,
+    ) -> StorageResult<()> {
+        let mut client = postgres_db::connect(&self.config)?;
+        job::reschedule_running_job(&mut client, worker_id, job_id, message, retry_after_seconds)
+    }
+
     fn record_batch_submission(
         &self,
         batch: &NewEnrichmentBatch,

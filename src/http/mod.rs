@@ -137,7 +137,6 @@ impl From<OpenArchiveError> for HttpError {
             OpenArchiveError::Migrations(err) => Self::Internal(err.to_string()),
             OpenArchiveError::ObjectStore(err) => Self::Internal(err.to_string()),
             OpenArchiveError::Storage(err) => Self::Internal(err.to_string()),
-            OpenArchiveError::Embedding(err) => Self::Internal(err.to_string()),
             OpenArchiveError::Invariant(err) => Self::Internal(err),
         }
     }
@@ -417,7 +416,6 @@ mod tests {
         Arc::new(ArchiveApplication::new(
             import_store,
             read_store,
-            None,
             None,
             None,
             None,

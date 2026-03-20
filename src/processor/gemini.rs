@@ -12,18 +12,14 @@ use crate::config::GeminiConfig;
 use crate::storage::types::EnrichmentTier;
 
 use super::{
-    build_conversation_user_prompt, build_preprocess_phase_one_user_prompt,
-    build_preprocess_phase_two_user_prompt, build_reconciliation_prompt, preprocess_output_schema,
-    preprocess_phase_one_schema, reconciliation_output_schema, should_shape_conversation_input,
-    structured_output_schema_with_allowed_refs, structured_output_schema_wrapper, ArtifactBatchProcessor,
-    ArtifactProcessor, ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
-    BatchHandle, BatchPollResult, ExtractionBatchSubmitter, HostedPreprocessProcessor,
-    HostedReconciliationProcessor, InferenceClient, InferenceResult, InferenceUsage,
-    ModelPreprocessPhaseOneOutput, PreprocessBatchProcessor, PreprocessBatchSubmitter,
-    PreprocessPhaseOneSpanResolved, PreprocessProcessor, PreprocessProcessorInput, ProcessorError,
-    ReconciliationBatchProcessor, ReconciliationBatchSubmitter, ReconciliationProcessor,
-    ReconciliationProcessorInput, GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
-    PREPROCESS_PROMPT_VERSION, RECONCILIATION_SYSTEM_PROMPT,
+    build_conversation_user_prompt, build_reconciliation_prompt, reconciliation_output_schema,
+    should_shape_conversation_input, structured_output_schema_with_allowed_refs,
+    structured_output_schema_wrapper, ArtifactBatchProcessor, ArtifactProcessor,
+    ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput, BatchHandle,
+    BatchPollResult, ExtractionBatchSubmitter, HostedReconciliationProcessor, InferenceClient,
+    InferenceResult, InferenceUsage, ProcessorError, ReconciliationBatchProcessor,
+    ReconciliationBatchSubmitter, ReconciliationProcessor, ReconciliationProcessorInput,
+    GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, RECONCILIATION_SYSTEM_PROMPT,
 };
 
 pub struct GeminiProcessorFactory {
@@ -63,24 +59,6 @@ impl GeminiProcessorFactory {
 }
 
 impl ArtifactProcessorFactory for GeminiProcessorFactory {
-    fn build_preprocess_processor(
-        &self,
-        tier: EnrichmentTier,
-    ) -> Result<Box<dyn PreprocessProcessor>, ProcessorError> {
-        let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
-        };
-        let client: Arc<dyn InferenceClient> = self.client.clone();
-        Ok(Box::new(HostedPreprocessProcessor {
-            client,
-            model,
-            pipeline_name: "gemini_preprocess",
-            provider_name: "gemini",
-            prompt_version: PREPROCESS_PROMPT_VERSION,
-        }))
-    }
-
     fn build(&self, tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError> {
         let model = match tier {
             EnrichmentTier::Standard => self.standard_model.clone(),
@@ -145,23 +123,6 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
         })))
     }
 
-    fn build_preprocess_batch_processor(
-        &self,
-        tier: EnrichmentTier,
-    ) -> Result<Option<Box<dyn PreprocessBatchProcessor>>, ProcessorError> {
-        let Some(batch_client) = &self.batch_client else {
-            return Ok(None);
-        };
-        let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
-        };
-        Ok(Some(Box::new(GeminiPreprocessBatchProcessor {
-            client: Arc::clone(batch_client),
-            model,
-        })))
-    }
-
     fn build_extraction_submitter(
         &self,
         tier: EnrichmentTier,
@@ -174,25 +135,6 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
             EnrichmentTier::Quality => self.quality_model.clone(),
         };
         Ok(Some(Box::new(GeminiExtractionSubmitter {
-            client: Arc::clone(batch_client),
-            model,
-        })))
-    }
-
-    fn build_preprocess_submitter(
-        &self,
-        tier: EnrichmentTier,
-    ) -> Result<Option<Box<dyn PreprocessBatchSubmitter>>, ProcessorError> {
-        let Some(batch_client) = &self.batch_client else {
-            return Ok(None);
-        };
-        let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
-        };
-        let direct_client: Arc<dyn InferenceClient> = self.client.clone();
-        Ok(Some(Box::new(GeminiPreprocessSubmitter {
-            direct_client,
             client: Arc::clone(batch_client),
             model,
         })))
@@ -227,14 +169,6 @@ struct GeminiArtifactProcessor {
     max_output_tokens: u32,
     repair_max_output_tokens: u32,
 }
-
-struct GeminiPreprocessBatchProcessor {
-    client: Arc<GeminiBatchClient>,
-    model: String,
-}
-
-const GEMINI_PREPROCESS_MAX_BATCH_JOBS: usize = 1;
-const GEMINI_PREPROCESS_PHASE_TWO_BATCH_JOBS: usize = 1;
 
 struct GeminiReconciliationBatchProcessor {
     client: Arc<GeminiBatchClient>,
@@ -429,169 +363,6 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
     }
 }
 
-impl PreprocessBatchProcessor for GeminiPreprocessBatchProcessor {
-    fn max_batch_jobs(&self) -> usize {
-        self.client
-            .max_batch_jobs
-            .min(GEMINI_PREPROCESS_MAX_BATCH_JOBS)
-    }
-
-    fn max_batch_bytes(&self) -> usize {
-        self.client.batch_max_bytes
-    }
-
-    fn estimate_size_bytes(
-        &self,
-        input: &PreprocessProcessorInput,
-    ) -> Result<usize, ProcessorError> {
-        let user_prompt = build_preprocess_phase_one_user_prompt(input)?;
-        Ok(super::PREPROCESS_PHASE_ONE_SYSTEM_PROMPT.len() + user_prompt.len())
-    }
-
-    fn process_batch(
-        &self,
-        inputs: &[PreprocessProcessorInput],
-    ) -> Vec<Result<super::PreprocessProcessorOutput, ProcessorError>> {
-        if inputs.is_empty() {
-            return Vec::new();
-        }
-
-        let result: Result<Vec<super::PreprocessProcessorOutput>, ProcessorError> = (|| {
-            let mut phase_one_requests = Vec::with_capacity(inputs.len());
-            for input in inputs {
-                let user_prompt = build_preprocess_phase_one_user_prompt(input)?;
-                phase_one_requests.push(GeminiBatchEnrichmentRequest {
-                    key: input.artifact_id.clone(),
-                    system_prompt: super::PREPROCESS_PHASE_ONE_SYSTEM_PROMPT.to_string(),
-                    user_prompt,
-                    response_json_schema: preprocess_phase_one_schema(),
-                    max_output_tokens: None,
-                });
-            }
-
-            let job = self.client.submit_inline_batch(
-                &self.model,
-                Some("openarchive-preprocess-phase-one"),
-                &phase_one_requests,
-            )?;
-            let completed = self.client.wait_for_batch(&job.name)?;
-            let results = completed
-                .inline_results()
-                .map_err(|err| ProcessorError::Message {
-                    message: err.to_string(),
-                })?;
-
-            let mut phase_one_usage = std::collections::HashMap::new();
-            let mut phase_one_resolved =
-                std::collections::HashMap::<String, Vec<PreprocessPhaseOneSpanResolved>>::new();
-            for result in results {
-                let parsed: ModelPreprocessPhaseOneOutput =
-                    serde_json::from_str(&result.output_text).map_err(|source| {
-                        ProcessorError::ParseModelJson {
-                            source,
-                            body_preview: super::preview(&result.output_text),
-                        }
-                    })?;
-                let input = inputs
-                    .iter()
-                    .find(|input| input.artifact_id == result.key)
-                    .ok_or_else(|| ProcessorError::Message {
-                        message: format!("Gemini batch returned unknown key {}", result.key),
-                    })?;
-                let resolved = parsed.resolve_and_validate(input)?;
-                phase_one_usage.insert(result.key.clone(), result.usage);
-                phase_one_resolved.insert(result.key, resolved);
-            }
-
-            let mut phase_two_requests = Vec::with_capacity(inputs.len());
-            for input in inputs {
-                let spans = phase_one_resolved.get(&input.artifact_id).ok_or_else(|| {
-                    ProcessorError::Message {
-                        message: format!("missing phase-one spans for {}", input.artifact_id),
-                    }
-                })?;
-                let user_prompt = build_preprocess_phase_two_user_prompt(input, spans)?;
-                phase_two_requests.push(GeminiBatchEnrichmentRequest {
-                    key: input.artifact_id.clone(),
-                    system_prompt: super::PREPROCESS_PHASE_TWO_SYSTEM_PROMPT.to_string(),
-                    user_prompt,
-                    response_json_schema: preprocess_output_schema(),
-                    max_output_tokens: None,
-                });
-            }
-
-            let mut all_results = Vec::new();
-            for chunk in phase_two_requests.chunks(GEMINI_PREPROCESS_PHASE_TWO_BATCH_JOBS) {
-                let job = self.client.submit_inline_batch(
-                    &self.model,
-                    Some("openarchive-preprocess-phase-two"),
-                    chunk,
-                )?;
-                let completed = self.client.wait_for_batch(&job.name)?;
-                let results =
-                    completed
-                        .inline_results()
-                        .map_err(|err| ProcessorError::Message {
-                            message: err.to_string(),
-                        })?;
-                all_results.extend(results);
-            }
-
-            all_results
-                .into_iter()
-                .map(|result| {
-                    let parsed: super::ModelPreprocessOutput =
-                        serde_json::from_str(&result.output_text).map_err(|source| {
-                            ProcessorError::ParseModelJson {
-                                source,
-                                body_preview: super::preview(&result.output_text),
-                            }
-                        })?;
-                    let input = inputs
-                        .iter()
-                        .find(|input| input.artifact_id == result.key)
-                        .ok_or_else(|| ProcessorError::Message {
-                            message: format!("Gemini batch returned unknown key {}", result.key),
-                        })?;
-                    let spans = phase_one_resolved.get(&result.key).ok_or_else(|| {
-                        ProcessorError::Message {
-                            message: format!(
-                                "missing phase-one spans for phase-two result {}",
-                                result.key
-                            ),
-                        }
-                    })?;
-                    let parsed = parsed.resolve_segment_aliases(input, spans);
-                    parsed.validate_against(input)?;
-                    Ok(parsed.into_processor_output(
-                        input,
-                        self.model.clone(),
-                        super::combine_inference_usage(
-                            phase_one_usage.remove(&result.key).unwrap_or(None),
-                            result.usage,
-                        ),
-                        "gemini_preprocess",
-                        "gemini",
-                        PREPROCESS_PROMPT_VERSION,
-                    ))
-                })
-                .collect()
-        })();
-
-        match result {
-            Ok(outputs) => outputs.into_iter().map(Ok).collect(),
-            Err(err) => inputs
-                .iter()
-                .map(|_| {
-                    Err(ProcessorError::Message {
-                        message: err.to_string(),
-                    })
-                })
-                .collect(),
-        }
-    }
-}
-
 impl ReconciliationBatchProcessor for GeminiReconciliationBatchProcessor {
     fn max_batch_jobs(&self) -> usize {
         self.client.max_batch_jobs
@@ -719,22 +490,9 @@ struct GeminiExtractionSubmitter {
     model: String,
 }
 
-struct GeminiPreprocessSubmitter {
-    direct_client: Arc<dyn InferenceClient>,
-    client: Arc<GeminiBatchClient>,
-    model: String,
-}
-
 struct GeminiReconciliationSubmitter {
     client: Arc<GeminiBatchClient>,
     model: String,
-}
-
-/// Opaque phase-one data carried between preprocess phases.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct GeminiPhaseOneData {
-    resolved: HashMap<String, Vec<PreprocessPhaseOneSpanResolved>>,
-    usage: HashMap<String, Option<InferenceUsage>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -874,327 +632,6 @@ impl ExtractionBatchSubmitter for GeminiExtractionSubmitter {
                 ))
             })
             .collect()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// PreprocessBatchSubmitter
-// ---------------------------------------------------------------------------
-
-impl PreprocessBatchSubmitter for GeminiPreprocessSubmitter {
-    fn max_batch_size(&self) -> usize {
-        self.client
-            .max_batch_jobs
-            .min(GEMINI_PREPROCESS_MAX_BATCH_JOBS)
-    }
-
-    fn submit_phase_one(
-        &self,
-        inputs: &[PreprocessProcessorInput],
-    ) -> Result<BatchHandle, ProcessorError> {
-        let mut requests = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            let user_prompt = build_preprocess_phase_one_user_prompt(input)?;
-            requests.push(GeminiBatchEnrichmentRequest {
-                key: input.artifact_id.clone(),
-                system_prompt: super::PREPROCESS_PHASE_ONE_SYSTEM_PROMPT.to_string(),
-                user_prompt,
-                response_json_schema: preprocess_phase_one_schema(),
-                max_output_tokens: None,
-            });
-        }
-
-        let job = self.client.submit_inline_batch(
-            &self.model,
-            Some("openarchive-preprocess-phase-one"),
-            &requests,
-        )?;
-
-        Ok(BatchHandle {
-            batch_id: job.name,
-            provider: "gemini".to_string(),
-            submitted_at: Instant::now(),
-        })
-    }
-
-    fn poll_batch(&self, handle: &BatchHandle) -> Result<BatchPollResult, ProcessorError> {
-        let job = self.client.get_batch(&handle.batch_id)?;
-        let state = job.state.as_deref().unwrap_or_default();
-
-        if matches!(
-            state,
-            "JOB_STATE_SUCCEEDED" | "SUCCEEDED" | "BATCH_STATE_SUCCEEDED"
-        ) {
-            return Ok(BatchPollResult::Succeeded(Box::new(job)));
-        }
-        if matches!(
-            state,
-            "JOB_STATE_FAILED"
-                | "FAILED"
-                | "JOB_STATE_CANCELLED"
-                | "CANCELLED"
-                | "BATCH_STATE_FAILED"
-                | "BATCH_STATE_CANCELLED"
-        ) {
-            return Ok(BatchPollResult::Failed(format!(
-                "Gemini batch {} finished in terminal state {state}",
-                handle.batch_id
-            )));
-        }
-        Ok(BatchPollResult::Pending)
-    }
-
-    fn parse_phase_one(
-        &self,
-        completed: Box<dyn std::any::Any>,
-        inputs: &[PreprocessProcessorInput],
-    ) -> Result<Box<dyn std::any::Any>, ProcessorError> {
-        let job = completed
-            .downcast::<GeminiBatchJob>()
-            .map_err(|_| ProcessorError::Message {
-                message: "failed to downcast phase-one batch result to GeminiBatchJob".to_string(),
-            })?;
-
-        let results = job.inline_results()?;
-
-        let mut resolved_map = HashMap::new();
-        let mut usage_map = HashMap::new();
-
-        for result in results {
-            let parsed: ModelPreprocessPhaseOneOutput = serde_json::from_str(&result.output_text)
-                .map_err(|source| {
-                ProcessorError::ParseModelJson {
-                    source,
-                    body_preview: super::preview(&result.output_text),
-                }
-            })?;
-            let input = inputs
-                .iter()
-                .find(|input| input.artifact_id == result.key)
-                .ok_or_else(|| ProcessorError::Message {
-                    message: format!("Gemini batch returned unknown key {}", result.key),
-                })?;
-            let resolved = parsed.resolve_and_validate(input)?;
-            usage_map.insert(result.key.clone(), result.usage);
-            resolved_map.insert(result.key, resolved);
-        }
-
-        Ok(Box::new(GeminiPhaseOneData {
-            resolved: resolved_map,
-            usage: usage_map,
-        }))
-    }
-
-    fn submit_phase_two(
-        &self,
-        inputs: &[PreprocessProcessorInput],
-        phase_one_data: &dyn std::any::Any,
-    ) -> Result<BatchHandle, ProcessorError> {
-        let data = phase_one_data
-            .downcast_ref::<GeminiPhaseOneData>()
-            .ok_or_else(|| ProcessorError::Message {
-                message: "failed to downcast phase_one_data to GeminiPhaseOneData".to_string(),
-            })?;
-
-        let mut requests = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            let spans =
-                data.resolved
-                    .get(&input.artifact_id)
-                    .ok_or_else(|| ProcessorError::Message {
-                        message: format!("missing phase-one spans for {}", input.artifact_id),
-                    })?;
-            let user_prompt = build_preprocess_phase_two_user_prompt(input, spans)?;
-            requests.push(GeminiBatchEnrichmentRequest {
-                key: input.artifact_id.clone(),
-                system_prompt: super::PREPROCESS_PHASE_TWO_SYSTEM_PROMPT.to_string(),
-                user_prompt,
-                response_json_schema: preprocess_output_schema(),
-                max_output_tokens: None,
-            });
-        }
-
-        let job = self.client.submit_inline_batch(
-            &self.model,
-            Some("openarchive-preprocess-phase-two"),
-            &requests,
-        )?;
-
-        Ok(BatchHandle {
-            batch_id: job.name,
-            provider: "gemini".to_string(),
-            submitted_at: Instant::now(),
-        })
-    }
-
-    fn serialize_phase_one_data(
-        &self,
-        phase_one_data: &dyn std::any::Any,
-    ) -> Result<String, ProcessorError> {
-        let data = phase_one_data
-            .downcast_ref::<GeminiPhaseOneData>()
-            .ok_or_else(|| ProcessorError::Message {
-                message: "failed to downcast phase_one_data to GeminiPhaseOneData".to_string(),
-            })?;
-        serde_json::to_string(data).map_err(|source| ProcessorError::Message {
-            message: format!("failed to serialize Gemini preprocess phase-one data: {source}"),
-        })
-    }
-
-    fn deserialize_phase_one_data(
-        &self,
-        serialized: &str,
-    ) -> Result<Box<dyn std::any::Any>, ProcessorError> {
-        let data: GeminiPhaseOneData =
-            serde_json::from_str(serialized).map_err(|source| ProcessorError::ParseModelJson {
-                source,
-                body_preview: super::preview(serialized),
-            })?;
-        Ok(Box::new(data))
-    }
-
-    fn parse_phase_two(
-        &self,
-        completed: Box<dyn std::any::Any>,
-        inputs: &[PreprocessProcessorInput],
-        phase_one_data: &dyn std::any::Any,
-    ) -> Vec<Result<super::PreprocessProcessorOutput, ProcessorError>> {
-        let job = match completed.downcast::<GeminiBatchJob>() {
-            Ok(job) => *job,
-            Err(_) => {
-                return inputs
-                    .iter()
-                    .map(|_| {
-                        Err(ProcessorError::Message {
-                            message: "failed to downcast phase-two batch result to GeminiBatchJob"
-                                .to_string(),
-                        })
-                    })
-                    .collect();
-            }
-        };
-
-        let data = match phase_one_data.downcast_ref::<GeminiPhaseOneData>() {
-            Some(data) => data,
-            None => {
-                return inputs
-                    .iter()
-                    .map(|_| {
-                        Err(ProcessorError::Message {
-                            message: "failed to downcast phase_one_data to GeminiPhaseOneData"
-                                .to_string(),
-                        })
-                    })
-                    .collect();
-            }
-        };
-
-        let results = match job.inline_results() {
-            Ok(results) => results,
-            Err(err) => {
-                let message = err.to_string();
-                return inputs
-                    .iter()
-                    .map(|_| {
-                        Err(ProcessorError::Message {
-                            message: message.clone(),
-                        })
-                    })
-                    .collect();
-            }
-        };
-
-        results
-            .into_iter()
-            .map(|result| {
-                let parsed: super::ModelPreprocessOutput =
-                    serde_json::from_str(&result.output_text).map_err(|source| {
-                        ProcessorError::ParseModelJson {
-                            source,
-                            body_preview: super::preview(&result.output_text),
-                        }
-                    })?;
-                let input = inputs
-                    .iter()
-                    .find(|input| input.artifact_id == result.key)
-                    .ok_or_else(|| ProcessorError::Message {
-                        message: format!("Gemini batch returned unknown key {}", result.key),
-                    })?;
-                let spans =
-                    data.resolved
-                        .get(&result.key)
-                        .ok_or_else(|| ProcessorError::Message {
-                            message: format!(
-                                "missing phase-one spans for phase-two result {}",
-                                result.key
-                            ),
-                        })?;
-                let parsed = parsed.resolve_segment_aliases(input, spans);
-                parsed.validate_against(input)?;
-
-                let phase_one_usage = data.usage.get(&result.key).cloned().unwrap_or(None);
-
-                Ok(parsed.into_processor_output(
-                    input,
-                    self.model.clone(),
-                    super::combine_inference_usage(phase_one_usage, result.usage),
-                    "gemini_preprocess",
-                    "gemini",
-                    PREPROCESS_PROMPT_VERSION,
-                ))
-            })
-            .collect()
-    }
-
-    fn repair_phase_one_batch(
-        &self,
-        inputs: &[PreprocessProcessorInput],
-        _error: &ProcessorError,
-    ) -> Result<Box<dyn std::any::Any>, ProcessorError> {
-        let mut resolved = HashMap::new();
-        let mut usage = HashMap::new();
-        for input in inputs {
-            let (spans, item_usage) = super::run_preprocess_phase_one_with_repair(
-                self.direct_client.as_ref(),
-                &self.model,
-                input,
-            )?;
-            resolved.insert(input.artifact_id.clone(), spans);
-            usage.insert(input.artifact_id.clone(), item_usage);
-        }
-        Ok(Box::new(GeminiPhaseOneData { resolved, usage }))
-    }
-
-    fn repair_phase_two(
-        &self,
-        input: &PreprocessProcessorInput,
-        phase_one_data: &dyn std::any::Any,
-        _error: &ProcessorError,
-    ) -> Result<super::PreprocessProcessorOutput, ProcessorError> {
-        let data = phase_one_data
-            .downcast_ref::<GeminiPhaseOneData>()
-            .ok_or_else(|| ProcessorError::Message {
-                message: "failed to downcast phase_one_data to GeminiPhaseOneData".to_string(),
-            })?;
-        let spans =
-            data.resolved
-                .get(&input.artifact_id)
-                .ok_or_else(|| ProcessorError::Message {
-                    message: format!("missing phase-one spans for {}", input.artifact_id),
-                })?;
-        let mut output = super::run_preprocess_phase_two_with_repair(
-            self.direct_client.as_ref(),
-            &self.model,
-            input,
-            spans,
-            "gemini_preprocess",
-            "gemini",
-        )?;
-        output.usage = super::combine_inference_usage(
-            data.usage.get(&input.artifact_id).cloned().unwrap_or(None),
-            output.usage,
-        );
-        Ok(output)
     }
 }
 

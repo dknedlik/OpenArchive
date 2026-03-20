@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, SecondsFormat, Utc};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct SourceTimestamp(String);
 
 impl SourceTimestamp {
@@ -25,7 +25,7 @@ impl From<DateTime<Utc>> for SourceTimestamp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ParticipantRole {
     User,
@@ -58,7 +58,8 @@ impl ParticipantRole {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VisibilityStatus {
     Visible,
     Hidden,

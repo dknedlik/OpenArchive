@@ -4,7 +4,7 @@ use crate::config::ExtractionChunkingConfig;
 use crate::processor::ArtifactProcessorInput;
 use crate::storage::{ConversationWindowRef, LoadedSegment, TopicThreadRef};
 
-pub(crate) fn build_preprocess_coverage_windows(
+pub(crate) fn build_coverage_windows(
     artifact_id: &str,
     segments: &[LoadedSegment],
     topic_threads: &[TopicThreadRef],

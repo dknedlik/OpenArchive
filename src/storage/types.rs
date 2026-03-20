@@ -16,7 +16,7 @@ use crate::object_store::StoredObject;
 // Enums
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceType {
     ChatGptExport,
@@ -197,7 +197,6 @@ impl SegmentType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobType {
-    ArtifactPreprocess,
     ArtifactExtract,
     ArtifactRetrieveContext,
     ArtifactReconcile,
@@ -206,7 +205,6 @@ pub enum JobType {
 impl JobType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            JobType::ArtifactPreprocess => "artifact_preprocess",
             JobType::ArtifactExtract => "artifact_extract",
             JobType::ArtifactRetrieveContext => "artifact_retrieve_context",
             JobType::ArtifactReconcile => "artifact_reconcile",
@@ -217,7 +215,6 @@ impl JobType {
 impl JobType {
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
-            "artifact_preprocess" => Some(Self::ArtifactPreprocess),
             "artifact_extract" => Some(Self::ArtifactExtract),
             "artifact_retrieve_context" => Some(Self::ArtifactRetrieveContext),
             "artifact_reconcile" => Some(Self::ArtifactReconcile),
@@ -793,7 +790,7 @@ pub struct NewEvidenceLink {
 // Job payload contract
 // ---------------------------------------------------------------------------
 
-/// Segment-scoped work unit created by preprocessing.
+/// Segment-scoped work unit for extraction chunking and coverage repair.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ConversationWindowRef {
     pub window_id: String,
@@ -815,34 +812,6 @@ pub struct TopicThreadRef {
     pub summary: String,
     pub confidence_label: String,
     pub spans: Vec<SegmentSpanRef>,
-}
-
-/// Documented contract for the `artifact_preprocess` job payload.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct ArtifactPreprocessPayload {
-    pub schema_version: String,
-    pub artifact_id: String,
-    pub import_id: String,
-    pub source_type: String,
-}
-
-impl ArtifactPreprocessPayload {
-    pub fn new_v1(artifact_id: &str, import_id: &str, source_type: SourceType) -> Self {
-        Self {
-            schema_version: "1".to_string(),
-            artifact_id: artifact_id.to_string(),
-            import_id: import_id.to_string(),
-            source_type: source_type.as_str().to_string(),
-        }
-    }
-
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).expect("ArtifactPreprocessPayload is always serializable")
-    }
-
-    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -997,7 +966,7 @@ pub struct ArtifactListItem {
 }
 
 /// Worker-facing artifact metadata assembled from canonical relational rows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct LoadedArtifactRecord {
     pub artifact_id: String,
     pub import_id: String,
@@ -1005,7 +974,7 @@ pub struct LoadedArtifactRecord {
     pub title: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct LoadedParticipant {
     pub participant_id: String,
     pub participant_role: ParticipantRole,
@@ -1013,7 +982,7 @@ pub struct LoadedParticipant {
     pub external_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct LoadedSegment {
     pub segment_id: String,
     pub participant_id: Option<String>,
@@ -1024,7 +993,7 @@ pub struct LoadedSegment {
     pub visibility_status: VisibilityStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct LoadedArtifactForEnrichment {
     pub artifact: LoadedArtifactRecord,
     pub participants: Vec<LoadedParticipant>,

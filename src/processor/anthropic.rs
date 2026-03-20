@@ -10,12 +10,11 @@ use crate::storage::types::EnrichmentTier;
 use super::{
     ArtifactProcessor, ArtifactProcessorFactory, BatchHandle, BatchPollResult,
     ConversationEnrichmentStrategy, ExtractionBatchSubmitter, HostedArtifactProcessor,
-    HostedPreprocessProcessor, HostedReconciliationProcessor, InferenceClient, InferenceResult,
-    InferenceUsage, PreprocessBatchSubmitter, PreprocessPhaseOneSpanResolved, PreprocessProcessor,
-    ProcessorError, ReconciliationBatchSubmitter, ReconciliationProcessor,
+    HostedReconciliationProcessor, InferenceClient, InferenceResult, InferenceUsage,
+    ProcessorError,
+    ReconciliationBatchSubmitter, ReconciliationProcessor,
     ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, ANTHROPIC_PROMPT_VERSION,
-    PREPROCESS_PHASE_ONE_SYSTEM_PROMPT, PREPROCESS_PHASE_TWO_SYSTEM_PROMPT,
-    PREPROCESS_PROMPT_VERSION, RECONCILIATION_SYSTEM_PROMPT,
+    RECONCILIATION_SYSTEM_PROMPT,
     structured_output_schema_with_allowed_refs,
 };
 
@@ -44,23 +43,6 @@ impl AnthropicProcessorFactory {
 }
 
 impl ArtifactProcessorFactory for AnthropicProcessorFactory {
-    fn build_preprocess_processor(
-        &self,
-        tier: EnrichmentTier,
-    ) -> Result<Box<dyn PreprocessProcessor>, ProcessorError> {
-        let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
-        };
-        Ok(Box::new(HostedPreprocessProcessor {
-            client: Arc::clone(&self.client),
-            model,
-            pipeline_name: "anthropic_preprocess",
-            provider_name: "anthropic",
-            prompt_version: PREPROCESS_PROMPT_VERSION,
-        }))
-    }
-
     fn build(&self, tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError> {
         let model = match tier {
             EnrichmentTier::Standard => self.standard_model.clone(),
@@ -108,23 +90,6 @@ impl ArtifactProcessorFactory for AnthropicProcessorFactory {
         })))
     }
 
-    fn build_preprocess_submitter(
-        &self,
-        tier: EnrichmentTier,
-    ) -> Result<Option<Box<dyn PreprocessBatchSubmitter>>, ProcessorError> {
-        let Some(client) = &self.batch_client else {
-            return Ok(None);
-        };
-        let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
-        };
-        Ok(Some(Box::new(AnthropicPreprocessSubmitter {
-            client: Arc::clone(client),
-            model,
-        })))
-    }
-
     fn build_reconciliation_submitter(
         &self,
         tier: EnrichmentTier,
@@ -166,6 +131,7 @@ impl AnthropicClient {
 
         let client = Client::builder()
             .default_headers(default_headers)
+            .timeout(std::time::Duration::from_secs(180))
             .build()
             .map_err(|source| ProcessorError::BuildHttpClient { source })?;
 
@@ -332,20 +298,9 @@ struct AnthropicExtractionSubmitter {
     model: String,
 }
 
-struct AnthropicPreprocessSubmitter {
-    client: Arc<AnthropicClient>,
-    model: String,
-}
-
 struct AnthropicReconciliationSubmitter {
     client: Arc<AnthropicClient>,
     model: String,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct AnthropicPhaseOneData {
-    resolved: std::collections::HashMap<String, Vec<PreprocessPhaseOneSpanResolved>>,
-    usage: std::collections::HashMap<String, Option<InferenceUsage>>,
 }
 
 impl ExtractionBatchSubmitter for AnthropicExtractionSubmitter {
@@ -407,7 +362,7 @@ impl ExtractionBatchSubmitter for AnthropicExtractionSubmitter {
                     .collect();
             }
         };
-        match parse_anthropic_batch_results(&self.client, &batch, inputs, |result, input| {
+        parse_anthropic_batch_results(&self.client, &batch, inputs, |result, input| {
             let parsed: super::ModelArtifactOutput = serde_json::from_str(&result.output_text)
                 .map_err(|source| ProcessorError::ParseModelJson {
                     source,
@@ -424,247 +379,7 @@ impl ExtractionBatchSubmitter for AnthropicExtractionSubmitter {
                 "anthropic",
                 ANTHROPIC_PROMPT_VERSION,
             ))
-        }) {
-            Ok(outputs) => outputs,
-            Err(err) => inputs.iter().map(|_| Err(message_error(&err))).collect(),
-        }
-    }
-}
-
-impl PreprocessBatchSubmitter for AnthropicPreprocessSubmitter {
-    fn max_batch_size(&self) -> usize {
-        100_000
-    }
-
-    fn submit_phase_one(
-        &self,
-        inputs: &[super::PreprocessProcessorInput],
-    ) -> Result<BatchHandle, ProcessorError> {
-        let requests = build_anthropic_batch_requests(inputs, &self.model, |input| {
-            Ok((
-                PREPROCESS_PHASE_ONE_SYSTEM_PROMPT,
-                super::build_preprocess_phase_one_user_prompt(input)?,
-                super::preprocess_phase_one_schema(),
-            ))
-        })?;
-        let batch = self.client.create_message_batch(&requests)?;
-        Ok(BatchHandle {
-            batch_id: batch.id,
-            provider: "anthropic".to_string(),
-            submitted_at: std::time::Instant::now(),
         })
-    }
-
-    fn poll_batch(&self, handle: &BatchHandle) -> Result<BatchPollResult, ProcessorError> {
-        AnthropicExtractionSubmitter {
-            client: Arc::clone(&self.client),
-            model: self.model.clone(),
-        }
-        .poll_batch(handle)
-    }
-
-    fn parse_phase_one(
-        &self,
-        completed: Box<dyn std::any::Any>,
-        inputs: &[super::PreprocessProcessorInput],
-    ) -> Result<Box<dyn std::any::Any>, ProcessorError> {
-        let batch =
-            completed
-                .downcast::<AnthropicMessageBatch>()
-                .map_err(|_| ProcessorError::Message {
-                    message: "failed to downcast Anthropic preprocess phase-one batch result"
-                        .to_string(),
-                })?;
-        let items =
-            parse_anthropic_batch_results(&self.client, &batch, inputs, |result, input| {
-                let parsed: super::ModelPreprocessPhaseOneOutput =
-                    serde_json::from_str(&result.output_text).map_err(|source| {
-                        ProcessorError::ParseModelJson {
-                            source,
-                            body_preview: super::preview(&result.output_text),
-                        }
-                    })?;
-                Ok((parsed.resolve_and_validate(input)?, result.usage))
-            })?;
-        let mut resolved = std::collections::HashMap::new();
-        let mut usage = std::collections::HashMap::new();
-        for (input, item) in inputs.iter().zip(items.into_iter()) {
-            let (spans, item_usage) = item?;
-            resolved.insert(input.artifact_id.clone(), spans);
-            usage.insert(input.artifact_id.clone(), item_usage);
-        }
-        Ok(Box::new(AnthropicPhaseOneData { resolved, usage }))
-    }
-
-    fn submit_phase_two(
-        &self,
-        inputs: &[super::PreprocessProcessorInput],
-        phase_one_data: &dyn std::any::Any,
-    ) -> Result<BatchHandle, ProcessorError> {
-        let data = phase_one_data
-            .downcast_ref::<AnthropicPhaseOneData>()
-            .ok_or_else(|| ProcessorError::Message {
-                message: "failed to downcast Anthropic preprocess phase-one data".to_string(),
-            })?;
-        let requests = build_anthropic_batch_requests(inputs, &self.model, |input| {
-            let spans =
-                data.resolved
-                    .get(&input.artifact_id)
-                    .ok_or_else(|| ProcessorError::Message {
-                        message: format!("missing phase-one spans for {}", input.artifact_id),
-                    })?;
-            Ok((
-                PREPROCESS_PHASE_TWO_SYSTEM_PROMPT,
-                super::build_preprocess_phase_two_user_prompt(input, spans)?,
-                super::preprocess_output_schema(),
-            ))
-        })?;
-        let batch = self.client.create_message_batch(&requests)?;
-        Ok(BatchHandle {
-            batch_id: batch.id,
-            provider: "anthropic".to_string(),
-            submitted_at: std::time::Instant::now(),
-        })
-    }
-
-    fn serialize_phase_one_data(
-        &self,
-        phase_one_data: &dyn std::any::Any,
-    ) -> Result<String, ProcessorError> {
-        let data = phase_one_data
-            .downcast_ref::<AnthropicPhaseOneData>()
-            .ok_or_else(|| ProcessorError::Message {
-                message: "failed to downcast Anthropic preprocess phase-one data".to_string(),
-            })?;
-        serde_json::to_string(data).map_err(|source| ProcessorError::Message {
-            message: format!("failed to serialize Anthropic preprocess phase-one data: {source}"),
-        })
-    }
-
-    fn deserialize_phase_one_data(
-        &self,
-        serialized: &str,
-    ) -> Result<Box<dyn std::any::Any>, ProcessorError> {
-        let data: AnthropicPhaseOneData =
-            serde_json::from_str(serialized).map_err(|source| ProcessorError::ParseModelJson {
-                source,
-                body_preview: super::preview(serialized),
-            })?;
-        Ok(Box::new(data))
-    }
-
-    fn parse_phase_two(
-        &self,
-        completed: Box<dyn std::any::Any>,
-        inputs: &[super::PreprocessProcessorInput],
-        phase_one_data: &dyn std::any::Any,
-    ) -> Vec<Result<super::PreprocessProcessorOutput, ProcessorError>> {
-        let batch = match completed.downcast::<AnthropicMessageBatch>() {
-            Ok(batch) => *batch,
-            Err(_) => {
-                return inputs
-                    .iter()
-                    .map(|_| {
-                        Err(ProcessorError::Message {
-                            message:
-                                "failed to downcast Anthropic preprocess phase-two batch result"
-                                    .to_string(),
-                        })
-                    })
-                    .collect();
-            }
-        };
-        let Some(data) = phase_one_data.downcast_ref::<AnthropicPhaseOneData>() else {
-            return inputs
-                .iter()
-                .map(|_| {
-                    Err(ProcessorError::Message {
-                        message: "failed to downcast Anthropic preprocess phase-one data"
-                            .to_string(),
-                    })
-                })
-                .collect();
-        };
-        match parse_anthropic_batch_results(&self.client, &batch, inputs, |result, input| {
-            let parsed: super::ModelPreprocessOutput = serde_json::from_str(&result.output_text)
-                .map_err(|source| ProcessorError::ParseModelJson {
-                    source,
-                    body_preview: super::preview(&result.output_text),
-                })?;
-            let spans =
-                data.resolved
-                    .get(&input.artifact_id)
-                    .ok_or_else(|| ProcessorError::Message {
-                        message: format!("missing phase-one spans for {}", input.artifact_id),
-                    })?;
-            let parsed = parsed.resolve_segment_aliases(input, spans);
-            parsed.validate_against(input)?;
-            Ok(parsed.into_processor_output(
-                input,
-                self.model.clone(),
-                super::combine_inference_usage(
-                    data.usage.get(&input.artifact_id).cloned().unwrap_or(None),
-                    result.usage,
-                ),
-                "anthropic_preprocess",
-                "anthropic",
-                PREPROCESS_PROMPT_VERSION,
-            ))
-        }) {
-            Ok(outputs) => outputs,
-            Err(err) => inputs.iter().map(|_| Err(message_error(&err))).collect(),
-        }
-    }
-
-    fn repair_phase_one_batch(
-        &self,
-        inputs: &[super::PreprocessProcessorInput],
-        _error: &ProcessorError,
-    ) -> Result<Box<dyn std::any::Any>, ProcessorError> {
-        let mut resolved = std::collections::HashMap::new();
-        let mut usage = std::collections::HashMap::new();
-        for input in inputs {
-            let (spans, item_usage) = super::run_preprocess_phase_one_with_repair(
-                self.client.as_ref(),
-                &self.model,
-                input,
-            )?;
-            resolved.insert(input.artifact_id.clone(), spans);
-            usage.insert(input.artifact_id.clone(), item_usage);
-        }
-        Ok(Box::new(AnthropicPhaseOneData { resolved, usage }))
-    }
-
-    fn repair_phase_two(
-        &self,
-        input: &super::PreprocessProcessorInput,
-        phase_one_data: &dyn std::any::Any,
-        _error: &ProcessorError,
-    ) -> Result<super::PreprocessProcessorOutput, ProcessorError> {
-        let data = phase_one_data
-            .downcast_ref::<AnthropicPhaseOneData>()
-            .ok_or_else(|| ProcessorError::Message {
-                message: "failed to downcast Anthropic preprocess phase-one data".to_string(),
-            })?;
-        let spans =
-            data.resolved
-                .get(&input.artifact_id)
-                .ok_or_else(|| ProcessorError::Message {
-                    message: format!("missing phase-one spans for {}", input.artifact_id),
-                })?;
-        let mut output = super::run_preprocess_phase_two_with_repair(
-            self.client.as_ref(),
-            &self.model,
-            input,
-            spans,
-            "anthropic_preprocess",
-            "anthropic",
-        )?;
-        output.usage = super::combine_inference_usage(
-            data.usage.get(&input.artifact_id).cloned().unwrap_or(None),
-            output.usage,
-        );
-        Ok(output)
     }
 }
 
@@ -719,7 +434,7 @@ impl ReconciliationBatchSubmitter for AnthropicReconciliationSubmitter {
                     .collect();
             }
         };
-        match parse_anthropic_batch_results(&self.client, &batch, inputs, |result, input| {
+        parse_anthropic_batch_results(&self.client, &batch, inputs, |result, input| {
             let parsed: super::ModelReconciliationOutput =
                 serde_json::from_str(&result.output_text).map_err(|source| {
                     ProcessorError::ParseModelJson {
@@ -729,10 +444,7 @@ impl ReconciliationBatchSubmitter for AnthropicReconciliationSubmitter {
                 })?;
             parsed.validate_against(input)?;
             Ok(parsed.into_outputs())
-        }) {
-            Ok(outputs) => outputs,
-            Err(err) => inputs.iter().map(|_| Err(message_error(&err))).collect(),
-        }
+        })
     }
 }
 
@@ -779,7 +491,7 @@ fn parse_anthropic_batch_results<I, O, F>(
     batch: &AnthropicMessageBatch,
     inputs: &[I],
     mut parse: F,
-) -> Result<Vec<Result<O, ProcessorError>>, ProcessorError>
+) -> Vec<Result<O, ProcessorError>>
 where
     I: AnthropicBatchInput,
     F: FnMut(AnthropicBatchParsedResult, &I) -> Result<O, ProcessorError>,
@@ -789,71 +501,82 @@ where
         .as_deref()
         .ok_or_else(|| ProcessorError::Message {
             message: format!("Anthropic batch {} missing results_url", batch.id),
-        })?;
-    let text = client.read_results_text(results_url)?;
+        });
+    let Some(results_url) = results_url.ok() else {
+        let err = ProcessorError::Message {
+            message: format!("Anthropic batch {} missing results_url", batch.id),
+        };
+        return inputs.iter().map(|_| Err(message_error(&err))).collect();
+    };
+    let text = match client.read_results_text(results_url) {
+        Ok(text) => text,
+        Err(err) => return inputs.iter().map(|_| Err(message_error(&err))).collect(),
+    };
     let mut by_id = std::collections::HashMap::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let item: AnthropicBatchResultLine = serde_json::from_str(line).map_err(|source| {
-            ProcessorError::ParseInferenceResponse {
+        let item: AnthropicBatchResultLine = match serde_json::from_str(line) {
+            Ok(item) => item,
+            Err(source) => {
+                let err = ProcessorError::ParseInferenceResponse {
                 source,
                 body_preview: super::preview(line),
+                };
+                return inputs.iter().map(|_| Err(message_error(&err))).collect();
             }
-        })?;
+        };
         let parsed = match item.result {
-            AnthropicBatchResultBody::Succeeded { message } => {
-                let tool_input = message
-                    .content
-                    .iter()
-                    .find_map(|block| match block {
-                        AnthropicContentBlock::ToolUse { name, input, .. }
-                            if name == "record_enrichment" =>
-                        {
-                            Some(input.clone())
-                        }
-                        _ => None,
-                    })
-                    .ok_or_else(|| ProcessorError::Message {
-                        message: format!(
-                            "Anthropic batch item {} returned no tool result",
-                            item.custom_id
-                        ),
-                    })?;
-                AnthropicBatchParsedResult {
-                    output_text: serde_json::to_string(&tool_input)
-                        .map_err(|source| ProcessorError::SerializePrompt { source })?,
-                    usage: message.usage.map(InferenceUsage::from_anthropic_usage),
-                }
-            }
-            AnthropicBatchResultBody::Errored { error } => {
-                return Err(ProcessorError::Message {
+            AnthropicBatchResultBody::Succeeded { message } => message
+                .content
+                .iter()
+                .find_map(|block| match block {
+                    AnthropicContentBlock::ToolUse { name, input, .. }
+                        if name == "record_enrichment" =>
+                    {
+                        Some(input.clone())
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| ProcessorError::Message {
                     message: format!(
-                        "Anthropic batch item {} failed: {}",
-                        item.custom_id, error.message
+                        "Anthropic batch item {} returned no tool result",
+                        item.custom_id
                     ),
-                });
-            }
-            AnthropicBatchResultBody::Canceled => {
-                return Err(ProcessorError::Message {
-                    message: format!("Anthropic batch item {} was canceled", item.custom_id),
-                });
-            }
-            AnthropicBatchResultBody::Expired => {
-                return Err(ProcessorError::Message {
-                    message: format!("Anthropic batch item {} expired", item.custom_id),
-                });
-            }
+                })
+                .and_then(|tool_input| {
+                    serde_json::to_string(&tool_input)
+                        .map(|output_text| AnthropicBatchParsedResult {
+                            output_text,
+                            usage: message.usage.map(InferenceUsage::from_anthropic_usage),
+                        })
+                        .map_err(|source| ProcessorError::SerializePrompt { source })
+                }),
+            AnthropicBatchResultBody::Errored { error } => Err(ProcessorError::Message {
+                message: format!(
+                    "Anthropic batch item {} failed: {}",
+                    item.custom_id, error.message
+                ),
+            }),
+            AnthropicBatchResultBody::Canceled => Err(ProcessorError::Message {
+                message: format!("Anthropic batch item {} was canceled", item.custom_id),
+            }),
+            AnthropicBatchResultBody::Expired => Err(ProcessorError::Message {
+                message: format!("Anthropic batch item {} expired", item.custom_id),
+            }),
         };
         by_id.insert(item.custom_id, parsed);
     }
     let mut outputs = Vec::with_capacity(inputs.len());
     for input in inputs {
         let custom_id = input.batch_custom_id();
-        let item = by_id.remove(&custom_id).ok_or_else(|| ProcessorError::Message {
-            message: format!("Anthropic batch missing result for {}", custom_id),
-        })?;
-        outputs.push(parse(item, input));
+        match by_id.remove(&custom_id) {
+            Some(Ok(item)) => outputs.push(parse(item, input)),
+            Some(Err(err)) => outputs.push(Err(err)),
+            None => outputs.push(Err(ProcessorError::Message {
+                message: format!("Anthropic batch missing result for {}", custom_id),
+            })),
+        }
     }
-    Ok(outputs)
+    outputs
 }
 
 trait AnthropicBatchInput {
@@ -863,12 +586,6 @@ trait AnthropicBatchInput {
 impl AnthropicBatchInput for super::ArtifactProcessorInput {
     fn batch_custom_id(&self) -> String {
         super::artifact_processor_batch_custom_id(self)
-    }
-}
-
-impl AnthropicBatchInput for super::PreprocessProcessorInput {
-    fn batch_custom_id(&self) -> String {
-        self.artifact_id.clone()
     }
 }
 

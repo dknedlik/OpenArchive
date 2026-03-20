@@ -31,9 +31,6 @@ pub enum OpenArchiveError {
     #[error(transparent)]
     Parser(#[from] ParserError),
 
-    #[error(transparent)]
-    Embedding(#[from] EmbeddingError),
-
     #[error("internal invariant violated: {0}")]
     Invariant(String),
 }
@@ -139,17 +136,6 @@ pub enum ConfigError {
     #[error("invalid inference configuration: {message}")]
     InvalidInferenceConfig { message: String },
 
-    #[error("invalid embedding configuration: {message}")]
-    InvalidEmbeddingConfig { message: String },
-}
-
-#[derive(Debug, Error)]
-pub enum EmbeddingError {
-    #[error("failed to initialize embedding model: {message}")]
-    Initialize { message: String },
-
-    #[error("failed to generate embeddings: {message}")]
-    Generate { message: String },
 }
 
 #[derive(Debug, Error)]

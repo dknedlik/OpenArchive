@@ -10,7 +10,7 @@ use crate::error::OpenArchiveError;
 use crate::object_store::{NewObject, ObjectStore, PutObjectResult};
 use crate::parser::{self, ParsedConversation, ParsedMessage};
 use crate::storage::{
-    ArtifactClass, ArtifactPreprocessPayload, ArtifactStatus, EnrichmentStatus, ImportStatus,
+    ArtifactClass, ArtifactExtractPayload, ArtifactStatus, EnrichmentStatus, ImportStatus,
     ImportWriteStore, JobStatus, JobType, NewArtifact, NewEnrichmentJob, NewImport,
     NewImportObjectRef, NewParticipant, NewSegment, PayloadFormat, SegmentType, SourceType,
     WriteArtifactSet, WriteImportSet,
@@ -316,17 +316,19 @@ fn build_artifact_set(
         job: NewEnrichmentJob {
             job_id: new_id("job"),
             artifact_id: artifact_id.clone(),
-            job_type: JobType::ArtifactPreprocess,
+            job_type: JobType::ArtifactExtract,
             enrichment_tier: crate::storage::EnrichmentTier::Standard,
             spawned_by_job_id: None,
             job_status: JobStatus::Pending,
             max_attempts: 3,
             priority_no: 100,
             required_capabilities: vec!["text".to_string()],
-            payload_json: ArtifactPreprocessPayload::new_v1(
+            payload_json: ArtifactExtractPayload::new_v1(
                 &artifact_id,
                 import_id,
                 spec.source_type,
+                Vec::new(),
+                Vec::new(),
             )
             .to_json(),
         },
@@ -606,17 +608,19 @@ mod tests {
             EnrichmentStatus::Pending
         );
 
-        // Verify job payload matches ArtifactPreprocessPayload v1 contract
+        // Verify job payload matches ArtifactExtractPayload v1 contract
         for artifact_set in &import_set.artifact_sets {
-            let payload = crate::storage::ArtifactPreprocessPayload::from_json(
+            let payload = crate::storage::ArtifactExtractPayload::from_json(
                 &artifact_set.job.payload_json,
             )
-            .expect("payload must deserialize to ArtifactPreprocessPayload");
+            .expect("payload must deserialize to ArtifactExtractPayload");
             assert_eq!(payload.schema_version, "1");
             assert_eq!(
                 payload.source_type,
                 super::SourceType::ChatGptExport.as_str()
             );
+            assert!(payload.conversation_windows.is_empty());
+            assert!(payload.topic_threads.is_empty());
         }
     }
 

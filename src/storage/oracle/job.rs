@@ -566,6 +566,49 @@ pub fn mark_job_retryable(
     Ok(RetryOutcome::Retried)
 }
 
+pub fn reschedule_running_job(
+    conn: &Connection,
+    worker_id: &str,
+    job_id: &str,
+    message: &str,
+    retry_after_seconds: i64,
+) -> StorageResult<()> {
+    lock_owned_running_job(conn, worker_id, job_id)?;
+    let artifact_id: String = conn
+        .query_row_as::<(String,)>(
+            "SELECT artifact_id FROM oa_enrichment_job WHERE job_id = :1",
+            &[&job_id],
+        )
+        .map_err(|source| StorageError::UpdateJobStatus {
+            job_id: job_id.to_string(),
+            source,
+        })?
+        .0;
+
+    let retryable = JobStatus::Retryable.as_str();
+    conn.execute(
+        "UPDATE oa_enrichment_job \
+         SET job_status = :1, \
+             last_error_message = :2, \
+             available_at = SYSTIMESTAMP + NUMTODSINTERVAL(:3, 'SECOND'), \
+             claimed_by = NULL, \
+             claimed_at = NULL \
+         WHERE job_id = :4 AND claimed_by = :5",
+        &[&retryable, &message, &retry_after_seconds, &job_id, &worker_id],
+    )
+    .map_err(|source| StorageError::UpdateJobStatus {
+        job_id: job_id.to_string(),
+        source,
+    })?;
+
+    recompute_artifact_enrichment_status(conn, &artifact_id)?;
+    conn.commit().map_err(|source| StorageError::Commit {
+        operation: "reschedule enrichment job",
+        source,
+    })?;
+    Ok(())
+}
+
 fn lock_owned_running_job(conn: &Connection, worker_id: &str, job_id: &str) -> StorageResult<()> {
     match conn.query_row_as::<(String,)>(
         "SELECT job_id FROM oa_enrichment_job \

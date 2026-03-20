@@ -14,7 +14,6 @@ pub struct AppConfig {
     pub inference: InferenceConfig,
     pub reconcile_inference: Option<InferenceConfig>,
     pub inference_mode: InferenceExecutionMode,
-    pub embeddings: EmbeddingConfig,
 }
 
 impl AppConfig {
@@ -26,49 +25,7 @@ impl AppConfig {
             inference: InferenceConfig::from_env()?,
             reconcile_inference: InferenceConfig::from_optional_env("OA_RECONCILE_INFERENCE_PROVIDER")?,
             inference_mode: InferenceExecutionMode::from_env()?,
-            embeddings: EmbeddingConfig::from_env()?,
         })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EmbeddingConfig {
-    pub enabled: bool,
-    pub model: LocalEmbeddingModel,
-    pub cache_dir: Option<PathBuf>,
-}
-
-impl EmbeddingConfig {
-    pub fn from_env() -> ConfigResult<Self> {
-        Ok(Self {
-            enabled: env::var("OA_LOCAL_EMBEDDINGS_ENABLED")
-                .ok()
-                .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-                .unwrap_or(true),
-            model: LocalEmbeddingModel::from_env()?,
-            cache_dir: optional_trimmed_env("OA_LOCAL_EMBEDDINGS_CACHE_DIR").map(PathBuf::from),
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalEmbeddingModel {
-    BgeSmallEnV15,
-}
-
-impl LocalEmbeddingModel {
-    pub fn from_env() -> ConfigResult<Self> {
-        let value = env::var("OA_LOCAL_EMBEDDINGS_MODEL")
-            .unwrap_or_else(|_| "bge-small-en-v1.5".to_string());
-        match value.as_str() {
-            "bge-small-en-v1.5" | "BAAI/bge-small-en-v1.5" => Ok(Self::BgeSmallEnV15),
-            _ => Err(ConfigError::InvalidEmbeddingConfig {
-                message: format!(
-                    "unsupported OA_LOCAL_EMBEDDINGS_MODEL {:?}; expected bge-small-en-v1.5",
-                    value
-                ),
-            }),
-        }
     }
 }
 
@@ -643,14 +600,11 @@ pub struct ExtractionChunkingConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnrichmentPipelineConfig {
     pub poll_interval: Duration,
-    pub preprocess_workers: usize,
-    pub preprocess: StageConfig,
     pub extract_workers: usize,
     pub extract: StageConfig,
     pub reconcile_workers: usize,
     pub reconcile: StageConfig,
     pub retrieve_context_workers: usize,
-    pub rate_limit_requests_per_minute: u32,
     pub chunking: ExtractionChunkingConfig,
     pub extract_min_coverage_percent: u8,
     pub extract_max_gap_fill_passes: usize,
@@ -662,13 +616,6 @@ impl EnrichmentPipelineConfig {
         Ok(Self {
             poll_interval: optional_duration_env_ms("OA_ENRICHMENT_POLL_INTERVAL_MS")?
                 .unwrap_or(Duration::from_millis(2000)),
-            preprocess_workers: positive_usize_env("OA_PREPROCESS_WORKERS")?
-                .unwrap_or(shared_worker_default),
-            preprocess: StageConfig {
-                batch_size: positive_usize_env("OA_PREPROCESS_BATCH_SIZE")?.unwrap_or(3),
-                max_concurrent_batches: positive_usize_env("OA_PREPROCESS_MAX_CONCURRENT")?
-                    .unwrap_or(2),
-            },
             extract_workers: positive_usize_env("OA_EXTRACT_WORKERS")?
                 .unwrap_or(shared_worker_default),
             extract: StageConfig {
@@ -685,7 +632,6 @@ impl EnrichmentPipelineConfig {
             },
             retrieve_context_workers: positive_usize_env("OA_RETRIEVE_CONTEXT_WORKERS")?
                 .unwrap_or(2),
-            rate_limit_requests_per_minute: positive_u32_env("OA_RATE_LIMIT_RPM")?.unwrap_or(60),
             chunking: ExtractionChunkingConfig {
                 max_segments_per_chunk: positive_usize_env("OA_EXTRACT_CHUNK_SEGMENTS")?
                     .unwrap_or(20),

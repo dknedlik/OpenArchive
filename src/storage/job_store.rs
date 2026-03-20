@@ -119,6 +119,19 @@ pub trait EnrichmentJobLifecycleStore: Sync + Send {
         retry_after_seconds: i64,
     ) -> StorageResult<RetryOutcome>;
 
+    /// Reschedule a currently running job without consuming another retry budget slot.
+    ///
+    /// This is used for local scheduler conditions like rate limiting before submit,
+    /// where the worker never actually attempted provider execution and should not
+    /// burn `max_attempts`.
+    fn reschedule_running_job(
+        &self,
+        worker_id: &str,
+        job_id: &str,
+        message: &str,
+        retry_after_seconds: i64,
+    ) -> StorageResult<()>;
+
     /// Persist a submitted provider batch and its claimed jobs.
     fn record_batch_submission(
         &self,

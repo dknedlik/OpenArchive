@@ -434,6 +434,59 @@ pub fn mark_job_retryable(
     Ok(RetryOutcome::Retried)
 }
 
+pub fn reschedule_running_job(
+    client: &mut postgres::Client,
+    worker_id: &str,
+    job_id: &str,
+    message: &str,
+    retry_after_seconds: i64,
+) -> StorageResult<()> {
+    client.batch_execute("BEGIN").map_err(map_pg_storage_err)?;
+
+    let row = client
+        .query_opt(
+            "SELECT artifact_id \
+             FROM oa_enrichment_job \
+             WHERE job_id = $1 AND job_status = 'running' AND claimed_by = $2 \
+             FOR UPDATE",
+            &[&job_id, &worker_id],
+        )
+        .map_err(map_pg_storage_err)?;
+    let Some(row) = row else {
+        client
+            .batch_execute("ROLLBACK")
+            .map_err(map_pg_storage_err)?;
+        return Err(crate::error::StorageError::JobNotClaimed {
+            job_id: job_id.to_string(),
+            worker_id: worker_id.to_string(),
+        });
+    };
+    let artifact_id: String = row.get(0);
+
+    client
+        .execute(
+            "UPDATE oa_enrichment_job \
+             SET job_status = $1, \
+                 last_error_message = $2, \
+                 available_at = NOW() + ($3 || ' seconds')::interval, \
+                 claimed_by = NULL, \
+                 claimed_at = NULL \
+             WHERE job_id = $4 AND claimed_by = $5",
+            &[
+                &JobStatus::Retryable.as_str(),
+                &message,
+                &retry_after_seconds.to_string(),
+                &job_id,
+                &worker_id,
+            ],
+        )
+        .map_err(map_pg_storage_err)?;
+
+    recompute_artifact_enrichment_status(client, &artifact_id)?;
+    client.batch_execute("COMMIT").map_err(map_pg_storage_err)?;
+    Ok(())
+}
+
 pub fn record_batch_submission(
     client: &mut postgres::Client,
     batch: &NewEnrichmentBatch,
@@ -674,7 +727,6 @@ pub fn reconcile_stale_running_jobs(
              WHERE j.job_status = 'running'
                AND j.claimed_by LIKE ('enrichment:%:' || $1 || ':%')
                AND j.job_type = CASE $1
-                     WHEN 'preprocess' THEN 'artifact_preprocess'
                      WHEN 'extract' THEN 'artifact_extract'
                      WHEN 'reconcile' THEN 'artifact_reconcile'
                      ELSE j.job_type
@@ -916,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_status_is_running_while_preprocess_is_active_without_outputs() {
+    fn artifact_status_is_running_while_work_is_active_without_outputs() {
         let snapshot = ArtifactEnrichmentSnapshot {
             running_jobs: 1,
             ..Default::default()

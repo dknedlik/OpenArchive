@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use crate::app::ArchiveApplication;
 use crate::config::{AppConfig, InferenceConfig, ObjectStoreConfig, RelationalStoreConfig};
-use crate::embeddings::{FastembedTextEmbedder, TextEmbedder};
 use crate::error::{ConfigError, ConfigResult};
 use crate::object_store::{LocalFsObjectStore, ObjectStore, S3CompatibleObjectStore};
 use crate::processor::{
@@ -40,14 +39,6 @@ struct SplitStageProcessorFactory {
 }
 
 impl ArtifactProcessorFactory for SplitStageProcessorFactory {
-    fn build_preprocess_processor(
-        &self,
-        tier: crate::storage::EnrichmentTier,
-    ) -> Result<Box<dyn crate::processor::PreprocessProcessor>, crate::processor::ProcessorError>
-    {
-        self.primary.build_preprocess_processor(tier)
-    }
-
     fn build(
         &self,
         tier: crate::storage::EnrichmentTier,
@@ -76,16 +67,6 @@ impl ArtifactProcessorFactory for SplitStageProcessorFactory {
         self.primary.build_batch_processor(tier)
     }
 
-    fn build_preprocess_batch_processor(
-        &self,
-        tier: crate::storage::EnrichmentTier,
-    ) -> Result<
-        Option<Box<dyn crate::processor::PreprocessBatchProcessor>>,
-        crate::processor::ProcessorError,
-    > {
-        self.primary.build_preprocess_batch_processor(tier)
-    }
-
     fn build_reconciliation_batch_processor(
         &self,
         tier: crate::storage::EnrichmentTier,
@@ -104,16 +85,6 @@ impl ArtifactProcessorFactory for SplitStageProcessorFactory {
         crate::processor::ProcessorError,
     > {
         self.primary.build_extraction_submitter(tier)
-    }
-
-    fn build_preprocess_submitter(
-        &self,
-        tier: crate::storage::EnrichmentTier,
-    ) -> Result<
-        Option<Box<dyn crate::processor::PreprocessBatchSubmitter>>,
-        crate::processor::ProcessorError,
-    > {
-        self.primary.build_preprocess_submitter(tier)
     }
 
     fn build_reconciliation_submitter(
@@ -167,11 +138,6 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
 
     match &config.relational_store {
         RelationalStoreConfig::Postgres(pg_config) => {
-            let embedder: Option<Arc<dyn TextEmbedder>> = if config.embeddings.enabled {
-                Some(Arc::new(FastembedTextEmbedder::new(&config.embeddings)))
-            } else {
-                None
-            };
             let import_store: Arc<dyn ImportWriteStore + Send + Sync> =
                 Arc::new(PostgresImportWriteStore::new(pg_config.clone()));
             let read_store: Arc<dyn ArtifactReadStore + Send + Sync> =
@@ -206,7 +172,6 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 Some(search_read_store),
                 Some(artifact_detail_store),
                 Some(context_pack_store),
-                embedder,
                 Arc::clone(&object_store),
             ));
             Ok(ServiceBundle {
@@ -221,11 +186,6 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
             })
         }
         RelationalStoreConfig::Oracle(db_config) => {
-            let embedder: Option<Arc<dyn TextEmbedder>> = if config.embeddings.enabled {
-                Some(Arc::new(FastembedTextEmbedder::new(&config.embeddings)))
-            } else {
-                None
-            };
             let import_store: Arc<dyn ImportWriteStore + Send + Sync> =
                 Arc::new(OracleImportWriteStore::new(db_config.clone()));
             let read_store: Arc<dyn ArtifactReadStore + Send + Sync> =
@@ -248,7 +208,6 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 None,
                 None,
                 None,
-                embedder,
                 Arc::clone(&object_store),
             ));
             Ok(ServiceBundle {

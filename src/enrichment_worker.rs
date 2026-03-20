@@ -1,23 +1,21 @@
 use crate::config::{EnrichmentPipelineConfig, ExtractionChunkingConfig, InferenceExecutionMode};
 use crate::domain::SourceTimestamp;
 use crate::extraction_chunking::{
-    build_chunk_inputs, build_preprocess_coverage_windows, build_topic_thread_inputs,
+    build_chunk_inputs, build_coverage_windows, build_topic_thread_inputs,
 };
 use crate::processor::{
     ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
-    ClassificationOutput, EntityOutput, MemoryOutput, PreprocessProcessorInput, ProcessorError,
+    ClassificationOutput, EntityOutput, MemoryOutput, ProcessorError,
     ReconciliationProcessorInput, RelationshipOutput, StubProcessorFactory, SummaryOutput,
-    cleanup_artifact_processor_output, memory_candidate_key_from_fields,
-    should_shape_conversation_input,
+    cleanup_artifact_processor_output, memory_candidate_key_from_fields, should_shape_conversation_input,
 };
-use crate::rate_limiter::RateLimiter;
 use crate::shutdown::ShutdownToken;
-use crate::stage_poller::{stage_poller_loop, ExtractStage, PreprocessStage, ReconcileStage};
+use crate::stage_poller::{stage_poller_loop, ExtractStage, ReconcileStage};
 use crate::storage::JobType;
 use crate::storage::{
     ArchiveRetrievalStore, ArtifactExtractPayload, ArtifactExtractionResult,
-    ArtifactPreprocessPayload, ArtifactReadStore, ArtifactReconcilePayload,
-    ArtifactRetrieveContextPayload, CandidateEntity, CandidateRelationship, ClaimedJob,
+    ArtifactReadStore, ArtifactReconcilePayload, ArtifactRetrieveContextPayload,
+    CandidateEntity, CandidateRelationship, ClaimedJob,
     ClassificationObjectJson, ConversationWindowRef, DerivationRunStatus, DerivationRunType,
     DerivedMetadataWriteStore, DerivedObjectPayload, EnrichmentJobLifecycleStore,
     EnrichmentStateStore, EnrichmentTier, EvidenceRole, ExtractedClassification, ExtractedMemory,
@@ -114,41 +112,6 @@ fn process_claimed_jobs(
 ) -> std::result::Result<(), String> {
     if execution_mode == InferenceExecutionMode::Batch {
         match first_job.job_type {
-            crate::storage::JobType::ArtifactPreprocess => {
-                if let Some(batch_processor) = processor_factory
-                    .build_preprocess_batch_processor(first_job.enrichment_tier)
-                    .map_err(|err| {
-                        fail_job(
-                            job_store,
-                            worker_id,
-                            &first_job.job_id,
-                            "Failed to build preprocess batch processor",
-                            err,
-                        )
-                    })?
-                {
-                    let mut jobs = vec![first_job];
-                    let additional = job_store
-                        .claim_matching_jobs(
-                            worker_id,
-                            &jobs[0],
-                            batch_processor.max_batch_jobs().saturating_sub(1),
-                        )
-                        .map_err(|err| {
-                            format!("failed to claim matching preprocess jobs: {err}")
-                        })?;
-                    jobs.extend(additional);
-                    return process_preprocess_job_batch(
-                        worker_id,
-                        jobs,
-                        job_store,
-                        read_store,
-                        processor_factory,
-                        batch_processor.as_ref(),
-                        chunking,
-                    );
-                }
-            }
             crate::storage::JobType::ArtifactExtract => {
                 if let Some(batch_processor) = processor_factory
                     .build_batch_processor(first_job.enrichment_tier)
@@ -253,14 +216,6 @@ fn process_claimed_job(
     coverage_policy: &ExtractCoveragePolicy,
 ) -> std::result::Result<(), String> {
     match claimed_job.job_type {
-        crate::storage::JobType::ArtifactPreprocess => process_preprocess_job(
-            worker_id,
-            &claimed_job,
-            job_store,
-            read_store,
-            processor_factory,
-            chunking,
-        ),
         crate::storage::JobType::ArtifactExtract => process_extract_job(
             worker_id,
             &claimed_job,
@@ -675,273 +630,6 @@ fn process_reconcile_job_batch(
             state_store,
             derived_store,
             processor_factory,
-        )?;
-    }
-
-    Ok(())
-}
-
-fn process_preprocess_job(
-    worker_id: &str,
-    claimed_job: &ClaimedJob,
-    job_store: &dyn EnrichmentJobLifecycleStore,
-    read_store: &dyn ArtifactReadStore,
-    processor_factory: &dyn ArtifactProcessorFactory,
-    chunking: &ExtractionChunkingConfig,
-) -> std::result::Result<(), String> {
-    let payload =
-        ArtifactPreprocessPayload::from_json(&claimed_job.payload_json).map_err(|err| {
-            fail_job(
-                job_store,
-                worker_id,
-                &claimed_job.job_id,
-                "Failed to parse preprocess payload JSON",
-                err,
-            )
-        })?;
-
-    let loaded = read_store
-        .load_artifact_for_enrichment(&claimed_job.artifact_id)
-        .map_err(|err| {
-            fail_job(
-                job_store,
-                worker_id,
-                &claimed_job.job_id,
-                "Failed to load artifact for preprocessing",
-                err,
-            )
-        })?
-        .ok_or_else(|| {
-            fail_job_message(
-                job_store,
-                worker_id,
-                &claimed_job.job_id,
-                format!(
-                    "Artifact {} not found for preprocessing",
-                    claimed_job.artifact_id
-                ),
-            )
-        })?;
-
-    let Some(source_type) = crate::storage::SourceType::from_str(&payload.source_type) else {
-        return Err(fail_job_message(
-            job_store,
-            worker_id,
-            &claimed_job.job_id,
-            format!(
-                "Invalid artifact source_type in preprocess payload: {}",
-                payload.source_type
-            ),
-        ));
-    };
-
-    let processor = processor_factory
-        .build_preprocess_processor(claimed_job.enrichment_tier)
-        .map_err(|err| {
-            fail_job(
-                job_store,
-                worker_id,
-                &claimed_job.job_id,
-                "Failed to build preprocess processor",
-                err,
-            )
-        })?;
-    let processor_input = PreprocessProcessorInput {
-        artifact_id: loaded.artifact.artifact_id.clone(),
-        import_id: payload.import_id.clone(),
-        source_type,
-        title: loaded.artifact.title.clone(),
-        participants: loaded.participants,
-        segments: loaded.segments,
-    };
-    let preprocess_output = processor
-        .segment(&processor_input)
-        .map_err(|err| handle_processor_error(job_store, worker_id, &claimed_job.job_id, err))?;
-    let coverage_windows = build_preprocess_coverage_windows(
-        &claimed_job.artifact_id,
-        &processor_input.segments,
-        &preprocess_output.topic_threads,
-        chunking,
-    );
-    let extract_job = NewEnrichmentJob {
-        job_id: new_id("job"),
-        artifact_id: claimed_job.artifact_id.clone(),
-        job_type: crate::storage::JobType::ArtifactExtract,
-        enrichment_tier: claimed_job.enrichment_tier,
-        spawned_by_job_id: Some(claimed_job.job_id.clone()),
-        job_status: crate::storage::JobStatus::Pending,
-        max_attempts: 3,
-        priority_no: 100,
-        required_capabilities: vec!["text".to_string()],
-        payload_json: ArtifactExtractPayload::new_v1(
-            &claimed_job.artifact_id,
-            &payload.import_id,
-            source_type,
-            coverage_windows,
-            preprocess_output.topic_threads,
-        )
-        .to_json(),
-    };
-
-    job_store.enqueue_jobs(&[extract_job]).map_err(|err| {
-        fail_job(
-            job_store,
-            worker_id,
-            &claimed_job.job_id,
-            "Failed to enqueue extraction job from preprocess",
-            err,
-        )
-    })?;
-
-    complete_job(job_store, worker_id, &claimed_job.job_id)?;
-    Ok(())
-}
-
-fn process_preprocess_job_batch(
-    worker_id: &str,
-    claimed_jobs: Vec<ClaimedJob>,
-    job_store: &dyn EnrichmentJobLifecycleStore,
-    read_store: &dyn ArtifactReadStore,
-    processor_factory: &dyn ArtifactProcessorFactory,
-    batch_processor: &dyn crate::processor::PreprocessBatchProcessor,
-    chunking: &ExtractionChunkingConfig,
-) -> std::result::Result<(), String> {
-    let mut batchable = Vec::new();
-    let mut fallbacks = Vec::new();
-
-    for claimed_job in claimed_jobs {
-        let payload = match ArtifactPreprocessPayload::from_json(&claimed_job.payload_json) {
-            Ok(payload) => payload,
-            Err(err) => {
-                fail_job(
-                    job_store,
-                    worker_id,
-                    &claimed_job.job_id,
-                    "Failed to parse preprocess payload JSON",
-                    err,
-                );
-                continue;
-            }
-        };
-        let Some(source_type) = crate::storage::SourceType::from_str(&payload.source_type) else {
-            fail_job_message(
-                job_store,
-                worker_id,
-                &claimed_job.job_id,
-                format!(
-                    "Invalid artifact source_type in preprocess payload: {}",
-                    payload.source_type
-                ),
-            );
-            continue;
-        };
-        let loaded = match read_store.load_artifact_for_enrichment(&claimed_job.artifact_id) {
-            Ok(Some(loaded)) => loaded,
-            Ok(None) => {
-                fail_job_message(
-                    job_store,
-                    worker_id,
-                    &claimed_job.job_id,
-                    format!(
-                        "Artifact {} not found for preprocessing",
-                        claimed_job.artifact_id
-                    ),
-                );
-                continue;
-            }
-            Err(err) => {
-                fail_job(
-                    job_store,
-                    worker_id,
-                    &claimed_job.job_id,
-                    "Failed to load artifact for preprocessing",
-                    err,
-                );
-                continue;
-            }
-        };
-        let input = PreprocessProcessorInput {
-            artifact_id: loaded.artifact.artifact_id.clone(),
-            import_id: payload.import_id.clone(),
-            source_type,
-            title: loaded.artifact.title.clone(),
-            participants: loaded.participants,
-            segments: loaded.segments,
-        };
-        if batch_processor
-            .estimate_size_bytes(&input)
-            .unwrap_or(usize::MAX)
-            <= batch_processor.max_batch_bytes()
-        {
-            batchable.push((claimed_job, payload, input));
-        } else {
-            fallbacks.push(claimed_job);
-        }
-    }
-
-    if !batchable.is_empty() {
-        let inputs: Vec<_> = batchable
-            .iter()
-            .map(|(_, _, input)| input.clone())
-            .collect();
-        let results = batch_processor.process_batch(&inputs);
-        for ((claimed_job, payload, input), result) in
-            batchable.into_iter().zip(results.into_iter())
-        {
-            match result {
-                Ok(output) => {
-                    let coverage_windows = build_preprocess_coverage_windows(
-                        &claimed_job.artifact_id,
-                        &input.segments,
-                        &output.topic_threads,
-                        chunking,
-                    );
-                    let extract_job = NewEnrichmentJob {
-                        job_id: new_id("job"),
-                        artifact_id: claimed_job.artifact_id.clone(),
-                        job_type: crate::storage::JobType::ArtifactExtract,
-                        enrichment_tier: claimed_job.enrichment_tier,
-                        spawned_by_job_id: Some(claimed_job.job_id.clone()),
-                        job_status: crate::storage::JobStatus::Pending,
-                        max_attempts: 3,
-                        priority_no: 100,
-                        required_capabilities: vec!["text".to_string()],
-                        payload_json: ArtifactExtractPayload::new_v1(
-                            &claimed_job.artifact_id,
-                            &payload.import_id,
-                            input.source_type,
-                            coverage_windows,
-                            output.topic_threads,
-                        )
-                        .to_json(),
-                    };
-                    if let Err(err) = job_store.enqueue_jobs(&[extract_job]) {
-                        let _ = fail_job(
-                            job_store,
-                            worker_id,
-                            &claimed_job.job_id,
-                            "Failed to enqueue extraction job from preprocess",
-                            err,
-                        );
-                        continue;
-                    }
-                    complete_job(job_store, worker_id, &claimed_job.job_id)?;
-                }
-                Err(err) => {
-                    let _ = handle_processor_error(job_store, worker_id, &claimed_job.job_id, err);
-                }
-            }
-        }
-    }
-
-    for claimed_job in fallbacks {
-        process_preprocess_job(
-            worker_id,
-            &claimed_job,
-            job_store,
-            read_store,
-            processor_factory,
-            chunking,
         )?;
     }
 
@@ -1684,7 +1372,7 @@ fn maybe_gap_fill_extraction_output(
         }
 
         let uncovered_windows =
-            build_preprocess_coverage_windows(&input.artifact_id, &uncovered_segments, &[], chunking);
+            build_coverage_windows(&input.artifact_id, &uncovered_segments, &[], chunking);
         if uncovered_windows.is_empty() {
             break;
         }
@@ -2363,11 +2051,10 @@ pub fn start_enrichment_workers_with_factory(
 ///
 /// Spawns:
 /// - batch mode:
-///   - preprocess poller threads
 ///   - extract poller threads
 ///   - reconcile poller threads
 /// - direct mode:
-///   - direct preprocess/extract/reconcile worker threads
+///   - direct extract/reconcile worker threads
 /// - both modes:
 ///   - retrieve-context worker threads
 pub fn start_enrichment_pipeline(
@@ -2385,7 +2072,6 @@ pub fn start_enrichment_pipeline(
         validate_batch_execution_support(processor_factory.as_ref())?;
     }
     let pid = std::process::id();
-    let rate_limiter = Arc::new(RateLimiter::new(config.rate_limit_requests_per_minute));
     let chunking = Arc::new(config.chunking.clone());
     let coverage_policy = Arc::new(ExtractCoveragePolicy {
         min_coverage_percent: config.extract_min_coverage_percent,
@@ -2396,21 +2082,6 @@ pub fn start_enrichment_pipeline(
 
     match execution_mode {
         InferenceExecutionMode::Batch => {
-            handles.extend(spawn_preprocess_batch_workers(
-                pid,
-                config.preprocess_workers,
-                config.preprocess.batch_size,
-                config.preprocess.max_concurrent_batches,
-                Arc::clone(&job_store),
-                Arc::clone(&read_store),
-                Arc::clone(&state_store),
-                Arc::clone(&derived_store),
-                Arc::clone(&processor_factory),
-                Arc::clone(&rate_limiter),
-                Arc::clone(&chunking),
-                poll_interval,
-                shutdown.clone(),
-            )?);
             handles.extend(spawn_extract_batch_workers(
                 pid,
                 config.extract_workers,
@@ -2421,7 +2092,6 @@ pub fn start_enrichment_pipeline(
                 Arc::clone(&state_store),
                 Arc::clone(&derived_store),
                 Arc::clone(&processor_factory),
-                Arc::clone(&rate_limiter),
                 Arc::clone(&chunking),
                 poll_interval,
                 shutdown.clone(),
@@ -2436,28 +2106,11 @@ pub fn start_enrichment_pipeline(
                 Arc::clone(&state_store),
                 Arc::clone(&derived_store),
                 Arc::clone(&processor_factory),
-                Arc::clone(&rate_limiter),
                 poll_interval,
                 shutdown.clone(),
             )?);
         }
         InferenceExecutionMode::Direct => {
-            handles.extend(spawn_direct_stage_workers(
-                pid,
-                "preprocess",
-                JobType::ArtifactPreprocess,
-                config.preprocess_workers,
-                Arc::clone(&job_store),
-                Arc::clone(&read_store),
-                Arc::clone(&retrieval_store),
-                Arc::clone(&state_store),
-                Arc::clone(&derived_store),
-                Arc::clone(&processor_factory),
-                Arc::clone(&chunking),
-                Arc::clone(&coverage_policy),
-                poll_interval,
-                shutdown.clone(),
-            )?);
             handles.extend(spawn_direct_stage_workers(
                 pid,
                 "extract",
@@ -2518,9 +2171,8 @@ pub fn start_enrichment_pipeline(
     }
 
     info!(
-        "Enrichment pipeline started: mode={:?}, preprocess_workers={}, extract_workers={}, reconcile_workers={}, retrieve_context_workers={}, chunk_segments={}, chunk_overlap={}, chunk_max_chars={}",
+        "Enrichment pipeline started: mode={:?}, extract_workers={}, reconcile_workers={}, retrieve_context_workers={}, chunk_segments={}, chunk_overlap={}, chunk_max_chars={}",
         execution_mode,
-        config.preprocess_workers,
         config.extract_workers,
         config.reconcile_workers,
         config.retrieve_context_workers
@@ -2537,14 +2189,6 @@ fn validate_batch_execution_support(
 ) -> Result<()> {
     use crate::storage::EnrichmentTier;
 
-    if processor_factory
-        .build_preprocess_submitter(EnrichmentTier::Standard)?
-        .is_none()
-    {
-        return Err(anyhow::anyhow!(
-            "batch execution mode requires preprocess batch submitter support"
-        ));
-    }
     if processor_factory
         .build_extraction_submitter(EnrichmentTier::Standard)?
         .is_none()
@@ -2564,67 +2208,6 @@ fn validate_batch_execution_support(
     Ok(())
 }
 
-fn spawn_preprocess_batch_workers(
-    pid: u32,
-    worker_count: usize,
-    batch_size: usize,
-    max_concurrent: usize,
-    job_store: Arc<dyn EnrichmentJobLifecycleStore>,
-    read_store: Arc<dyn ArtifactReadStore>,
-    state_store: Arc<dyn EnrichmentStateStore>,
-    derived_store: Arc<dyn DerivedMetadataWriteStore>,
-    processor_factory: Arc<dyn ArtifactProcessorFactory>,
-    rate_limiter: Arc<RateLimiter>,
-    chunking: Arc<ExtractionChunkingConfig>,
-    poll_interval: Duration,
-    shutdown: ShutdownToken,
-) -> Result<Vec<thread::JoinHandle<()>>> {
-    (0..worker_count)
-        .map(|i| {
-            let worker_id = format!("enrichment:{}:preprocess:{}", pid, i);
-            let job_store = Arc::clone(&job_store);
-            let read_store = Arc::clone(&read_store);
-            let state_store = Arc::clone(&state_store);
-            let derived_store = Arc::clone(&derived_store);
-            let processor_factory = Arc::clone(&processor_factory);
-            let rate_limiter = Arc::clone(&rate_limiter);
-            let chunking = Arc::clone(&chunking);
-            let shutdown = shutdown.clone();
-            thread::Builder::new()
-                .name(format!("preprocess-poller-{}", i))
-                .spawn(move || {
-                    let submitter = processor_factory
-                        .build_preprocess_submitter(crate::storage::EnrichmentTier::Standard)
-                        .ok()
-                        .flatten();
-                    let Some(submitter) = submitter else {
-                        info!("No preprocess batch submitter available; preprocess poller exiting");
-                        return;
-                    };
-                    let stage = PreprocessStage::new(
-                        submitter,
-                        crate::storage::EnrichmentTier::Standard,
-                        batch_size,
-                        max_concurrent,
-                        (*chunking).clone(),
-                    );
-                    stage_poller_loop(
-                        &stage,
-                        worker_id,
-                        job_store.as_ref(),
-                        read_store.as_ref(),
-                        state_store.as_ref(),
-                        derived_store.as_ref(),
-                        &rate_limiter,
-                        poll_interval,
-                        shutdown,
-                    );
-                })
-                .map_err(|e| anyhow::anyhow!("Failed to spawn preprocess poller: {}", e))
-        })
-        .collect()
-}
-
 fn spawn_reconcile_batch_workers(
     pid: u32,
     worker_count: usize,
@@ -2635,7 +2218,6 @@ fn spawn_reconcile_batch_workers(
     state_store: Arc<dyn EnrichmentStateStore>,
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
-    rate_limiter: Arc<RateLimiter>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
 ) -> Result<Vec<thread::JoinHandle<()>>> {
@@ -2647,7 +2229,6 @@ fn spawn_reconcile_batch_workers(
             let state_store = Arc::clone(&state_store);
             let derived_store = Arc::clone(&derived_store);
             let processor_factory = Arc::clone(&processor_factory);
-            let rate_limiter = Arc::clone(&rate_limiter);
             let shutdown = shutdown.clone();
             thread::Builder::new()
                 .name(format!("reconcile-poller-{}", i))
@@ -2675,7 +2256,6 @@ fn spawn_reconcile_batch_workers(
                         read_store.as_ref(),
                         state_store.as_ref(),
                         derived_store.as_ref(),
-                        &rate_limiter,
                         poll_interval,
                         shutdown,
                     );
@@ -2695,7 +2275,6 @@ fn spawn_extract_batch_workers(
     state_store: Arc<dyn EnrichmentStateStore>,
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
-    rate_limiter: Arc<RateLimiter>,
     chunking: Arc<ExtractionChunkingConfig>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
@@ -2708,7 +2287,6 @@ fn spawn_extract_batch_workers(
             let state_store = Arc::clone(&state_store);
             let derived_store = Arc::clone(&derived_store);
             let processor_factory = Arc::clone(&processor_factory);
-            let rate_limiter = Arc::clone(&rate_limiter);
             let chunking = Arc::clone(&chunking);
             let shutdown = shutdown.clone();
             thread::Builder::new()
@@ -2736,7 +2314,6 @@ fn spawn_extract_batch_workers(
                         read_store.as_ref(),
                         state_store.as_ref(),
                         derived_store.as_ref(),
-                        &rate_limiter,
                         poll_interval,
                         shutdown,
                     );

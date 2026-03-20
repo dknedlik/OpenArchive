@@ -6,7 +6,7 @@ use open_archive::error::StorageResult;
 use open_archive::processor::{ArtifactProcessor, ArtifactProcessorFactory, ProcessorError};
 use open_archive::shutdown::ShutdownToken;
 use open_archive::storage::types::{
-    ArtifactExtractionResult, ArtifactPreprocessPayload, ClaimedJob, EnrichmentTier,
+    ArtifactExtractPayload, ArtifactExtractionResult, ClaimedJob, EnrichmentTier,
     LoadedArtifactForEnrichment, LoadedArtifactRecord, LoadedParticipant, LoadedSegment,
     NewEnrichmentBatch, NewEnrichmentJob, PersistedEnrichmentBatch, ReconciliationDecision,
     RetrievalResultSet, RetryOutcome, SourceType,
@@ -251,7 +251,7 @@ fn test_worker_fails_job_when_artifact_cannot_be_loaded() {
         .unwrap()
         .as_deref()
         .unwrap_or_default()
-        .contains("not found for preprocessing"));
+        .contains("not found for extraction"));
     assert!(derived_store.attempts.lock().unwrap().is_empty());
 }
 
@@ -304,7 +304,7 @@ fn test_worker_fails_job_when_payload_source_type_is_invalid() {
         .unwrap()
         .as_deref()
         .unwrap_or_default()
-        .contains("Invalid artifact source_type in preprocess payload"));
+        .contains("Invalid artifact source_type in extract payload"));
     assert!(derived_store.attempts.lock().unwrap().is_empty());
 }
 
@@ -318,12 +318,17 @@ fn test_config(enrichment_worker_count: usize) -> HttpConfig {
 }
 
 fn valid_claimed_job() -> ClaimedJob {
-    let payload =
-        ArtifactPreprocessPayload::new_v1("artifact-1", "import-1", SourceType::ChatGptExport);
+    let payload = ArtifactExtractPayload::new_v1(
+        "artifact-1",
+        "import-1",
+        SourceType::ChatGptExport,
+        Vec::new(),
+        Vec::new(),
+    );
     ClaimedJob {
         job_id: "job-1".to_string(),
         artifact_id: "artifact-1".to_string(),
-        job_type: JobType::ArtifactPreprocess,
+        job_type: JobType::ArtifactExtract,
         enrichment_tier: EnrichmentTier::Standard,
         spawned_by_job_id: None,
         attempt_count: 1,
@@ -393,6 +398,16 @@ impl EnrichmentJobLifecycleStore for SingleJobStore {
         self.retryable_count.fetch_add(1, Ordering::SeqCst);
         *self.last_retryable_message.lock().unwrap() = Some(_error_message.to_string());
         Ok(RetryOutcome::Retried)
+    }
+
+    fn reschedule_running_job(
+        &self,
+        _worker_id: &str,
+        _job_id: &str,
+        _error_message: &str,
+        _retry_after_seconds: i64,
+    ) -> StorageResult<()> {
+        Ok(())
     }
 
     fn enqueue_jobs(&self, jobs: &[NewEnrichmentJob]) -> StorageResult<()> {
@@ -469,6 +484,10 @@ impl EnrichmentJobLifecycleStore for SingleJobStore {
     fn reconcile_stale_running_batches(&self, _stage_name: &str) -> StorageResult<usize> {
         Ok(0)
     }
+
+    fn reconcile_stale_running_jobs(&self, _worker_id: &str) -> StorageResult<usize> {
+        Ok(0)
+    }
 }
 
 struct EmptyQueueMockStore {
@@ -505,6 +524,16 @@ impl EnrichmentJobLifecycleStore for EmptyQueueMockStore {
         _retry_after_seconds: i64,
     ) -> StorageResult<RetryOutcome> {
         Ok(RetryOutcome::Retried)
+    }
+
+    fn reschedule_running_job(
+        &self,
+        _worker_id: &str,
+        _job_id: &str,
+        _error_message: &str,
+        _retry_after_seconds: i64,
+    ) -> StorageResult<()> {
+        Ok(())
     }
 
     fn enqueue_jobs(&self, _jobs: &[NewEnrichmentJob]) -> StorageResult<()> {
@@ -567,6 +596,10 @@ impl EnrichmentJobLifecycleStore for EmptyQueueMockStore {
     }
 
     fn reconcile_stale_running_batches(&self, _stage_name: &str) -> StorageResult<usize> {
+        Ok(0)
+    }
+
+    fn reconcile_stale_running_jobs(&self, _worker_id: &str) -> StorageResult<usize> {
         Ok(0)
     }
 }
@@ -759,16 +792,6 @@ impl EnrichmentStateStore for MockStateStore {
 struct RejectAllFactory;
 
 impl ArtifactProcessorFactory for RejectAllFactory {
-    fn build_preprocess_processor(
-        &self,
-        _tier: EnrichmentTier,
-    ) -> std::result::Result<Box<dyn open_archive::processor::PreprocessProcessor>, ProcessorError>
-    {
-        Err(ProcessorError::Message {
-            message: "tier rejected".to_string(),
-        })
-    }
-
     fn build(
         &self,
         _tier: EnrichmentTier,
@@ -794,14 +817,6 @@ impl ArtifactProcessorFactory for RejectAllFactory {
 struct RetryableProcessorFactory;
 
 impl ArtifactProcessorFactory for RetryableProcessorFactory {
-    fn build_preprocess_processor(
-        &self,
-        _tier: EnrichmentTier,
-    ) -> std::result::Result<Box<dyn open_archive::processor::PreprocessProcessor>, ProcessorError>
-    {
-        Ok(Box::new(RetryablePreprocessProcessor))
-    }
-
     fn build(
         &self,
         _tier: EnrichmentTier,
@@ -827,21 +842,6 @@ impl ArtifactProcessor for RetryableProcessor {
         &self,
         _input: &open_archive::processor::ArtifactProcessorInput,
     ) -> std::result::Result<open_archive::processor::ArtifactProcessorOutput, ProcessorError> {
-        Err(ProcessorError::InferenceHttpStatus {
-            status: 429,
-            body_preview: "rate limited".to_string(),
-        })
-    }
-}
-
-struct RetryablePreprocessProcessor;
-
-impl open_archive::processor::PreprocessProcessor for RetryablePreprocessProcessor {
-    fn segment(
-        &self,
-        _input: &open_archive::processor::PreprocessProcessorInput,
-    ) -> std::result::Result<open_archive::processor::PreprocessProcessorOutput, ProcessorError>
-    {
         Err(ProcessorError::InferenceHttpStatus {
             status: 429,
             body_preview: "rate limited".to_string(),

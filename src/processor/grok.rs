@@ -9,14 +9,12 @@ use crate::storage::types::EnrichmentTier;
 
 use super::{
     ArtifactProcessor, ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
-    BatchHandle, BatchPollResult, ExtractionBatchSubmitter, HostedPreprocessProcessor,
-    HostedReconciliationProcessor, InferenceClient, InferenceResult, InferenceUsage,
-    OpenRouterResponsesContentItem, OpenRouterResponsesInputItem, OpenRouterResponsesReasoningConfig,
-    OpenRouterResponsesRequest, OpenRouterResponsesResponse, OpenRouterResponsesTextConfig,
-    PreprocessBatchSubmitter, PreprocessPhaseOneSpanResolved, PreprocessProcessor, ProcessorError,
-    ReconciliationBatchSubmitter, ReconciliationProcessor, GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, GROK_PROMPT_VERSION,
-    PREPROCESS_PHASE_ONE_SYSTEM_PROMPT, PREPROCESS_PHASE_TWO_SYSTEM_PROMPT,
-    PREPROCESS_PROMPT_VERSION, RECONCILIATION_SYSTEM_PROMPT, structured_output_schema_with_allowed_refs,
+    BatchHandle, BatchPollResult, ExtractionBatchSubmitter, HostedReconciliationProcessor,
+    InferenceClient, InferenceResult, InferenceUsage, OpenRouterResponsesContentItem,
+    OpenRouterResponsesInputItem, OpenRouterResponsesRequest, OpenRouterResponsesResponse,
+    OpenRouterResponsesTextConfig, ProcessorError, ReconciliationBatchSubmitter,
+    ReconciliationProcessor, GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, GROK_PROMPT_VERSION,
+    RECONCILIATION_SYSTEM_PROMPT, structured_output_schema_with_allowed_refs,
     structured_output_schema_wrapper,
 };
 
@@ -51,24 +49,6 @@ impl GrokProcessorFactory {
 }
 
 impl ArtifactProcessorFactory for GrokProcessorFactory {
-    fn build_preprocess_processor(
-        &self,
-        tier: EnrichmentTier,
-    ) -> Result<Box<dyn PreprocessProcessor>, ProcessorError> {
-        let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
-        };
-        let client: Arc<dyn InferenceClient> = self.client.clone();
-        Ok(Box::new(HostedPreprocessProcessor {
-            client,
-            model,
-            pipeline_name: "grok_preprocess",
-            provider_name: "grok",
-            prompt_version: PREPROCESS_PROMPT_VERSION,
-        }))
-    }
-
     fn build(&self, tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError> {
         let model = match tier {
             EnrichmentTier::Standard => self.standard_model.clone(),
@@ -111,23 +91,6 @@ impl ArtifactProcessorFactory for GrokProcessorFactory {
             EnrichmentTier::Quality => self.quality_model.clone(),
         };
         Ok(Some(Box::new(GrokExtractionSubmitter {
-            client: Arc::clone(client),
-            model,
-        })))
-    }
-
-    fn build_preprocess_submitter(
-        &self,
-        tier: EnrichmentTier,
-    ) -> Result<Option<Box<dyn PreprocessBatchSubmitter>>, ProcessorError> {
-        let Some(client) = &self.batch_client else {
-            return Ok(None);
-        };
-        let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
-        };
-        Ok(Some(Box::new(GrokPreprocessSubmitter {
             client: Arc::clone(client),
             model,
         })))
@@ -218,7 +181,7 @@ impl GrokClient {
         let body = OpenRouterResponsesRequest {
             model,
             max_output_tokens,
-            reasoning: OpenRouterResponsesReasoningConfig { effort: None },
+            reasoning: None,
             text: OpenRouterResponsesTextConfig {
                 format: schema.clone(),
             },
@@ -433,20 +396,9 @@ struct GrokExtractionSubmitter {
     model: String,
 }
 
-struct GrokPreprocessSubmitter {
-    client: Arc<GrokClient>,
-    model: String,
-}
-
 struct GrokReconciliationSubmitter {
     client: Arc<GrokClient>,
     model: String,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct GrokPhaseOneData {
-    resolved: std::collections::HashMap<String, Vec<PreprocessPhaseOneSpanResolved>>,
-    usage: std::collections::HashMap<String, Option<InferenceUsage>>,
 }
 
 impl ExtractionBatchSubmitter for GrokExtractionSubmitter {
@@ -509,7 +461,7 @@ impl ExtractionBatchSubmitter for GrokExtractionSubmitter {
                     .collect();
             }
         };
-        match parse_grok_results(&self.client, &batch.id, inputs, |result, input| {
+        parse_grok_results(&self.client, &batch.id, inputs, |result, input| {
             let parsed: super::ModelArtifactOutput = serde_json::from_str(&result.output_text)
                 .map_err(|source| ProcessorError::ParseModelJson {
                     source,
@@ -526,258 +478,7 @@ impl ExtractionBatchSubmitter for GrokExtractionSubmitter {
                 "grok",
                 GROK_PROMPT_VERSION,
             ))
-        }) {
-            Ok(outputs) => outputs,
-            Err(err) => inputs
-                .iter()
-                .map(|_| Err(grok_message_error(&err)))
-                .collect(),
-        }
-    }
-}
-
-impl PreprocessBatchSubmitter for GrokPreprocessSubmitter {
-    fn max_batch_size(&self) -> usize {
-        10_000
-    }
-
-    fn submit_phase_one(
-        &self,
-        inputs: &[super::PreprocessProcessorInput],
-    ) -> Result<BatchHandle, ProcessorError> {
-        let batch = self
-            .client
-            .create_batch("openarchive-preprocess-phase-one")?;
-        let requests = build_grok_requests(inputs, &self.model, |input| {
-            Ok(self.client.build_chat_completion_body(
-                &self.model,
-                PREPROCESS_PHASE_ONE_SYSTEM_PROMPT,
-                &super::build_preprocess_phase_one_user_prompt(input)?,
-                &super::preprocess_phase_one_schema(),
-                self.client.max_output_tokens,
-            ))
-        })?;
-        self.client.add_batch_requests(&batch.id, &requests)?;
-        Ok(BatchHandle {
-            batch_id: batch.id,
-            provider: "grok".to_string(),
-            submitted_at: std::time::Instant::now(),
         })
-    }
-
-    fn poll_batch(&self, handle: &BatchHandle) -> Result<BatchPollResult, ProcessorError> {
-        GrokExtractionSubmitter {
-            client: Arc::clone(&self.client),
-            model: self.model.clone(),
-        }
-        .poll_batch(handle)
-    }
-
-    fn parse_phase_one(
-        &self,
-        completed: Box<dyn std::any::Any>,
-        inputs: &[super::PreprocessProcessorInput],
-    ) -> Result<Box<dyn std::any::Any>, ProcessorError> {
-        let batch = completed
-            .downcast::<GrokBatch>()
-            .map_err(|_| ProcessorError::Message {
-                message: "failed to downcast Grok preprocess phase-one batch result".to_string(),
-            })?;
-        let items = parse_grok_results(&self.client, &batch.id, inputs, |result, input| {
-            let parsed: super::ModelPreprocessPhaseOneOutput =
-                serde_json::from_str(&result.output_text).map_err(|source| {
-                    ProcessorError::ParseModelJson {
-                        source,
-                        body_preview: super::preview(&result.output_text),
-                    }
-                })?;
-            Ok((parsed.resolve_and_validate(input)?, result.usage))
-        })?;
-        let mut resolved = std::collections::HashMap::new();
-        let mut usage = std::collections::HashMap::new();
-        for (input, item) in inputs.iter().zip(items.into_iter()) {
-            let (spans, item_usage) = item?;
-            resolved.insert(input.artifact_id.clone(), spans);
-            usage.insert(input.artifact_id.clone(), item_usage);
-        }
-        Ok(Box::new(GrokPhaseOneData { resolved, usage }))
-    }
-
-    fn submit_phase_two(
-        &self,
-        inputs: &[super::PreprocessProcessorInput],
-        phase_one_data: &dyn std::any::Any,
-    ) -> Result<BatchHandle, ProcessorError> {
-        let data = phase_one_data
-            .downcast_ref::<GrokPhaseOneData>()
-            .ok_or_else(|| ProcessorError::Message {
-                message: "failed to downcast Grok preprocess phase-one data".to_string(),
-            })?;
-        let batch = self
-            .client
-            .create_batch("openarchive-preprocess-phase-two")?;
-        let requests = build_grok_requests(inputs, &self.model, |input| {
-            let spans =
-                data.resolved
-                    .get(&input.artifact_id)
-                    .ok_or_else(|| ProcessorError::Message {
-                        message: format!("missing phase-one spans for {}", input.artifact_id),
-                    })?;
-            Ok(self.client.build_chat_completion_body(
-                &self.model,
-                PREPROCESS_PHASE_TWO_SYSTEM_PROMPT,
-                &super::build_preprocess_phase_two_user_prompt(input, spans)?,
-                &super::preprocess_output_schema(),
-                self.client.max_output_tokens,
-            ))
-        })?;
-        self.client.add_batch_requests(&batch.id, &requests)?;
-        Ok(BatchHandle {
-            batch_id: batch.id,
-            provider: "grok".to_string(),
-            submitted_at: std::time::Instant::now(),
-        })
-    }
-
-    fn serialize_phase_one_data(
-        &self,
-        phase_one_data: &dyn std::any::Any,
-    ) -> Result<String, ProcessorError> {
-        let data = phase_one_data
-            .downcast_ref::<GrokPhaseOneData>()
-            .ok_or_else(|| ProcessorError::Message {
-                message: "failed to downcast Grok preprocess phase-one data".to_string(),
-            })?;
-        serde_json::to_string(data).map_err(|source| ProcessorError::Message {
-            message: format!("failed to serialize Grok preprocess phase-one data: {source}"),
-        })
-    }
-
-    fn deserialize_phase_one_data(
-        &self,
-        serialized: &str,
-    ) -> Result<Box<dyn std::any::Any>, ProcessorError> {
-        let data: GrokPhaseOneData =
-            serde_json::from_str(serialized).map_err(|source| ProcessorError::ParseModelJson {
-                source,
-                body_preview: super::preview(serialized),
-            })?;
-        Ok(Box::new(data))
-    }
-
-    fn parse_phase_two(
-        &self,
-        completed: Box<dyn std::any::Any>,
-        inputs: &[super::PreprocessProcessorInput],
-        phase_one_data: &dyn std::any::Any,
-    ) -> Vec<Result<super::PreprocessProcessorOutput, ProcessorError>> {
-        let batch = match completed.downcast::<GrokBatch>() {
-            Ok(batch) => *batch,
-            Err(_) => {
-                return inputs
-                    .iter()
-                    .map(|_| {
-                        Err(ProcessorError::Message {
-                            message: "failed to downcast Grok preprocess phase-two batch result"
-                                .to_string(),
-                        })
-                    })
-                    .collect();
-            }
-        };
-        let Some(data) = phase_one_data.downcast_ref::<GrokPhaseOneData>() else {
-            return inputs
-                .iter()
-                .map(|_| {
-                    Err(ProcessorError::Message {
-                        message: "failed to downcast Grok preprocess phase-one data".to_string(),
-                    })
-                })
-                .collect();
-        };
-        match parse_grok_results(&self.client, &batch.id, inputs, |result, input| {
-            let parsed: super::ModelPreprocessOutput = serde_json::from_str(&result.output_text)
-                .map_err(|source| ProcessorError::ParseModelJson {
-                    source,
-                    body_preview: super::preview(&result.output_text),
-                })?;
-            let spans =
-                data.resolved
-                    .get(&input.artifact_id)
-                    .ok_or_else(|| ProcessorError::Message {
-                        message: format!("missing phase-one spans for {}", input.artifact_id),
-                    })?;
-            let parsed = parsed.resolve_segment_aliases(input, spans);
-            parsed.validate_against(input)?;
-            Ok(parsed.into_processor_output(
-                input,
-                self.model.clone(),
-                super::combine_inference_usage(
-                    data.usage.get(&input.artifact_id).cloned().unwrap_or(None),
-                    result.usage,
-                ),
-                "grok_preprocess",
-                "grok",
-                PREPROCESS_PROMPT_VERSION,
-            ))
-        }) {
-            Ok(outputs) => outputs,
-            Err(err) => inputs
-                .iter()
-                .map(|_| Err(grok_message_error(&err)))
-                .collect(),
-        }
-    }
-
-    fn repair_phase_one_batch(
-        &self,
-        inputs: &[super::PreprocessProcessorInput],
-        _error: &ProcessorError,
-    ) -> Result<Box<dyn std::any::Any>, ProcessorError> {
-        let mut resolved = std::collections::HashMap::new();
-        let mut usage = std::collections::HashMap::new();
-        for input in inputs {
-            let (spans, item_usage) = super::run_preprocess_phase_one_with_repair(
-                self.client.as_ref(),
-                &self.model,
-                input,
-            )?;
-            resolved.insert(input.artifact_id.clone(), spans);
-            usage.insert(input.artifact_id.clone(), item_usage);
-        }
-        Ok(Box::new(GrokPhaseOneData { resolved, usage }))
-    }
-
-    fn repair_phase_two(
-        &self,
-        input: &super::PreprocessProcessorInput,
-        phase_one_data: &dyn std::any::Any,
-        _error: &ProcessorError,
-    ) -> Result<super::PreprocessProcessorOutput, ProcessorError> {
-        let data = phase_one_data
-            .downcast_ref::<GrokPhaseOneData>()
-            .ok_or_else(|| ProcessorError::Message {
-                message: "failed to downcast Grok preprocess phase-one data".to_string(),
-            })?;
-        let spans =
-            data.resolved
-                .get(&input.artifact_id)
-                .ok_or_else(|| ProcessorError::Message {
-                    message: format!("missing phase-one spans for {}", input.artifact_id),
-                })?;
-        let mut output = super::run_preprocess_phase_two_with_repair(
-            self.client.as_ref(),
-            &self.model,
-            input,
-            spans,
-            "grok_preprocess",
-            "grok",
-        )?;
-        output.usage = super::combine_inference_usage(
-            data.usage.get(&input.artifact_id).cloned().unwrap_or(None),
-            output.usage,
-        );
-        Ok(output)
     }
 }
 
@@ -835,7 +536,7 @@ impl ReconciliationBatchSubmitter for GrokReconciliationSubmitter {
                     .collect();
             }
         };
-        match parse_grok_results(&self.client, &batch.id, inputs, |result, input| {
+        parse_grok_results(&self.client, &batch.id, inputs, |result, input| {
             let parsed: super::ModelReconciliationOutput =
                 serde_json::from_str(&result.output_text).map_err(|source| {
                     ProcessorError::ParseModelJson {
@@ -845,13 +546,7 @@ impl ReconciliationBatchSubmitter for GrokReconciliationSubmitter {
                 })?;
             parsed.validate_against(input)?;
             Ok(parsed.into_outputs())
-        }) {
-            Ok(outputs) => outputs,
-            Err(err) => inputs
-                .iter()
-                .map(|_| Err(grok_message_error(&err)))
-                .collect(),
-        }
+        })
     }
 }
 
@@ -881,56 +576,65 @@ fn parse_grok_results<I, O, F>(
     batch_id: &str,
     inputs: &[I],
     mut parse: F,
-) -> Result<Vec<Result<O, ProcessorError>>, ProcessorError>
+) -> Vec<Result<O, ProcessorError>>
 where
     I: GrokBatchInput,
     F: FnMut(GrokBatchParsedResult, &I) -> Result<O, ProcessorError>,
 {
     let mut by_id = std::collections::HashMap::new();
-    for item in client.list_results(batch_id)? {
+    let items = match client.list_results(batch_id) {
+        Ok(items) => items,
+        Err(err) => return inputs.iter().map(|_| Err(grok_message_error(&err))).collect(),
+    };
+    for item in items {
         let parsed = if let Some(error) = item.error_message() {
             if is_retryable_grok_batch_error(&error) {
-                return Err(ProcessorError::InferenceHttpStatus {
+                Err(ProcessorError::InferenceHttpStatus {
                     status: 503,
                     body_preview: format!(
                         "Grok batch item {} retryable error: {}",
                         item.batch_request_id, error
                     ),
-                });
+                })
+            } else {
+                Err(ProcessorError::Message {
+                    message: format!(
+                        "Grok batch item {} failed: {}",
+                        item.batch_request_id, error
+                    ),
+                })
             }
-            return Err(ProcessorError::Message {
-                message: format!(
-                    "Grok batch item {} failed: {}",
-                    item.batch_request_id, error
-                ),
-            });
         } else {
-            let response_value =
-                item.chat_completion_response()
-                    .ok_or_else(|| ProcessorError::InferenceHttpStatus {
+            item.chat_completion_response()
+                .ok_or_else(|| ProcessorError::InferenceHttpStatus {
                         status: 503,
                         body_preview: format!(
                             "Grok batch item {} missing response payload: {}",
                             item.batch_request_id,
                             super::preview(&item.debug_snapshot())
                         ),
-                    })?;
-            GrokBatchParsedResult {
-                output_text: flatten_grok_response_text(response_value)?,
-                usage: extract_grok_usage(response_value),
-            }
+                    })
+                .and_then(|response_value| {
+                    Ok(GrokBatchParsedResult {
+                        output_text: flatten_grok_response_text(response_value)?,
+                        usage: extract_grok_usage(response_value),
+                    })
+                })
         };
         by_id.insert(item.batch_request_id, parsed);
     }
     let mut outputs = Vec::with_capacity(inputs.len());
     for input in inputs {
         let custom_id = input.batch_custom_id();
-        let item = by_id.remove(&custom_id).ok_or_else(|| ProcessorError::Message {
-            message: format!("Grok batch missing result for {}", custom_id),
-        })?;
-        outputs.push(parse(item, input));
+        match by_id.remove(&custom_id) {
+            Some(Ok(item)) => outputs.push(parse(item, input)),
+            Some(Err(err)) => outputs.push(Err(err)),
+            None => outputs.push(Err(ProcessorError::Message {
+                message: format!("Grok batch missing result for {}", custom_id),
+            })),
+        }
     }
-    Ok(outputs)
+    outputs
 }
 
 fn flatten_grok_response_text(value: &serde_json::Value) -> Result<String, ProcessorError> {
@@ -979,12 +683,6 @@ trait GrokBatchInput {
 impl GrokBatchInput for super::ArtifactProcessorInput {
     fn batch_custom_id(&self) -> String {
         super::artifact_processor_batch_custom_id(self)
-    }
-}
-
-impl GrokBatchInput for super::PreprocessProcessorInput {
-    fn batch_custom_id(&self) -> String {
-        self.artifact_id.clone()
     }
 }
 

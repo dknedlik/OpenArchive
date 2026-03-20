@@ -2,7 +2,7 @@
 // Stage Poller — non-blocking batch pipeline for enrichment stages
 // ---------------------------------------------------------------------------
 //
-// Each batch-capable pipeline stage (preprocess, extract, reconcile) gets a
+// Each batch-capable pipeline stage gets a
 // dedicated poller thread. The poller submits small batches to a provider's
 // batch API, tracks in-flight batch IDs, polls for completion on subsequent
 // loop iterations, and processes completed results. No thread ever blocks
@@ -22,17 +22,14 @@ use crate::enrichment_worker::{
     build_extract_chunk_inputs, build_extraction_result as worker_build_extraction_result,
     merge_chunk_outputs as worker_merge_chunk_outputs,
 };
-use crate::extraction_chunking::build_preprocess_coverage_windows;
 use crate::processor::{
     ArtifactProcessorInput, BatchHandle, BatchPollResult, ExtractionBatchSubmitter,
-    PreprocessBatchSubmitter, PreprocessProcessorInput, ProcessorError,
-    ReconciliationBatchSubmitter, ReconciliationProcessorInput,
+    ProcessorError, ReconciliationBatchSubmitter, ReconciliationProcessorInput,
 };
-use crate::rate_limiter::RateLimiter;
 use crate::shutdown::ShutdownToken;
 use crate::storage::{
-    ArtifactExtractPayload, ArtifactExtractionResult, ArtifactPreprocessPayload, ArtifactReadStore,
-    ArtifactReconcilePayload, ArtifactRetrieveContextPayload, ClaimedJob,
+    ArtifactExtractPayload, ArtifactExtractionResult, ArtifactReadStore, ArtifactReconcilePayload,
+    ArtifactRetrieveContextPayload, ClaimedJob,
     DerivedMetadataWriteStore, EnrichmentJobLifecycleStore, EnrichmentStateStore, EnrichmentTier,
     JobType, LoadedArtifactForEnrichment, NewEnrichmentBatch, NewEnrichmentJob,
     PersistedEnrichmentBatch, ReconciliationDecision, ReconciliationDecisionKind,
@@ -40,7 +37,7 @@ use crate::storage::{
 };
 
 const RETRYABLE_INFERENCE_BACKOFF_SECONDS: i64 = 60;
-const RATE_LIMIT_429_BACKOFF_SECS: u64 = 30;
+const EXTRACT_CHUNK_WAVE_LIMIT: usize = 8;
 
 // ---------------------------------------------------------------------------
 // InFlightContext — stage-specific state carried with each in-flight batch
@@ -51,15 +48,6 @@ const RATE_LIMIT_429_BACKOFF_SECS: u64 = 30;
 /// Each variant holds the prepared inputs and payloads needed to process
 /// results when the batch completes.
 enum InFlightContext {
-    PreprocessPhaseOne {
-        inputs: Vec<PreprocessProcessorInput>,
-        payloads: Vec<ArtifactPreprocessPayload>,
-    },
-    PreprocessPhaseTwo {
-        inputs: Vec<PreprocessProcessorInput>,
-        payloads: Vec<ArtifactPreprocessPayload>,
-        phase_one_data: Box<dyn std::any::Any>,
-    },
     Extract {
         groups: Vec<ExtractPreparedJob>,
     },
@@ -72,11 +60,17 @@ enum InFlightContext {
     },
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct ExtractPreparedJob {
     parent_input: ArtifactProcessorInput,
     payload: ArtifactExtractPayload,
-    chunk_inputs: Vec<ArtifactProcessorInput>,
+    pending_chunk_inputs: Vec<ArtifactProcessorInput>,
+    #[serde(default)]
+    deferred_chunk_inputs: Vec<ArtifactProcessorInput>,
+    #[serde(default)]
+    successful_chunk_outputs: Vec<crate::processor::ArtifactProcessorOutput>,
+    #[serde(default)]
+    retry_count: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -129,7 +123,6 @@ pub trait StageBehavior {
     fn submit(
         &self,
         jobs: Vec<ClaimedJob>,
-        rate_limiter: &RateLimiter,
         read_store: &dyn ArtifactReadStore,
         state_store: &dyn EnrichmentStateStore,
         derived_store: &dyn DerivedMetadataWriteStore,
@@ -142,9 +135,8 @@ pub trait StageBehavior {
 
     /// Process a completed batch.
     ///
-    /// Returns `Ok(Some(new_batch))` when a phase transition occurs (e.g.
-    /// preprocess phase one -> phase two). Returns `Ok(None)` when the batch
-    /// is fully processed.
+    /// Returns `Ok(Some(new_batch))` when a phase transition occurs.
+    /// Returns `Ok(None)` when the batch is fully processed.
     fn process_completed(
         &self,
         batch: InFlightBatch,
@@ -190,7 +182,6 @@ pub fn stage_poller_loop(
     read_store: &dyn ArtifactReadStore,
     state_store: &dyn EnrichmentStateStore,
     derived_store: &dyn DerivedMetadataWriteStore,
-    rate_limiter: &RateLimiter,
     poll_interval: Duration,
     shutdown: ShutdownToken,
 ) {
@@ -284,17 +275,6 @@ pub fn stage_poller_loop(
         let mut failed: Vec<(String, String)> = Vec::new();
 
         for (batch_id, batch) in in_flight.iter() {
-            if rate_limiter.try_acquire().is_err() {
-                warn!(
-                    "[{}] rate limit hit while polling batch {}, skipping this cycle (in_flight={}, submitted_for_ms={})",
-                    stage.stage_name(),
-                    batch_id,
-                    in_flight.len(),
-                    batch.handle.submitted_at.elapsed().as_millis()
-                );
-                continue;
-            }
-
             debug!(
                 "[{}] polling batch {} (jobs={}, submitted_for_ms={})",
                 stage.stage_name(),
@@ -323,14 +303,6 @@ pub fn stage_poller_loop(
                 }
                 Ok(BatchPollResult::Pending) => {
                     debug!("[{}] batch {} still pending", stage.stage_name(), batch_id);
-                }
-                Err(ProcessorError::InferenceHttpStatus { status: 429, .. }) => {
-                    warn!(
-                        "[{}] 429 rate limit on batch {} poll, signaling backoff",
-                        stage.stage_name(),
-                        batch_id
-                    );
-                    rate_limiter.signal_backoff(Duration::from_secs(RATE_LIMIT_429_BACKOFF_SECS));
                 }
                 Err(err) => {
                     error!(
@@ -367,7 +339,7 @@ pub fn stage_poller_loop(
                 &owner_worker_id,
             ) {
                 Ok(Some(new_batch)) => {
-                    // Phase transition (preprocess phase one -> phase two).
+                    // Phase transition to the next provider-managed batch step.
                     let new_id = new_batch.handle.batch_id.clone();
                     let next_context = match stage.serialize_context(&new_batch) {
                         Ok(context) => context,
@@ -487,7 +459,6 @@ pub fn stage_poller_loop(
                     );
                     match stage.submit(
                         jobs,
-                        rate_limiter,
                         read_store,
                         state_store,
                         derived_store,
@@ -567,521 +538,6 @@ pub fn stage_poller_loop(
         // Step 4: Sleep
         // -----------------------------------------------------------------
         thread::sleep(poll_interval);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// PreprocessStage
-// ---------------------------------------------------------------------------
-
-/// Stage behavior for the preprocessing pipeline stage.
-///
-/// Preprocessing is two-phase: phase one identifies topic threads, phase two
-/// produces the final preprocessing output. Both phases go through the batch
-/// submitter when available.
-pub struct PreprocessStage {
-    submitter: Box<dyn PreprocessBatchSubmitter>,
-    tier: EnrichmentTier,
-    batch_size: usize,
-    max_concurrent: usize,
-    chunking: ExtractionChunkingConfig,
-}
-
-impl PreprocessStage {
-    pub fn new(
-        submitter: Box<dyn PreprocessBatchSubmitter>,
-        tier: EnrichmentTier,
-        batch_size: usize,
-        max_concurrent: usize,
-        chunking: ExtractionChunkingConfig,
-    ) -> Self {
-        Self {
-            submitter,
-            tier,
-            batch_size,
-            max_concurrent,
-            chunking,
-        }
-    }
-}
-
-impl StageBehavior for PreprocessStage {
-    fn job_type(&self) -> JobType {
-        JobType::ArtifactPreprocess
-    }
-
-    fn enrichment_tier(&self) -> EnrichmentTier {
-        self.tier
-    }
-
-    fn stage_name(&self) -> &'static str {
-        "preprocess"
-    }
-
-    fn batch_size(&self) -> usize {
-        self.batch_size
-    }
-
-    fn max_concurrent(&self) -> usize {
-        self.max_concurrent
-    }
-
-    fn submit(
-        &self,
-        jobs: Vec<ClaimedJob>,
-        rate_limiter: &RateLimiter,
-        read_store: &dyn ArtifactReadStore,
-        _state_store: &dyn EnrichmentStateStore,
-        _derived_store: &dyn DerivedMetadataWriteStore,
-        job_store: &dyn EnrichmentJobLifecycleStore,
-        worker_id: &str,
-    ) -> Result<InFlightBatch, ()> {
-        let mut valid_jobs: Vec<ClaimedJob> = Vec::new();
-        let mut inputs = Vec::new();
-        let mut payloads = Vec::new();
-
-        for job in jobs {
-            let payload = match ArtifactPreprocessPayload::from_json(&job.payload_json) {
-                Ok(p) => p,
-                Err(err) => {
-                    poller_fail_job(
-                        job_store,
-                        worker_id,
-                        &job.job_id,
-                        "Failed to parse preprocess payload JSON",
-                        err,
-                    );
-                    continue;
-                }
-            };
-            let Some(source_type) = SourceType::from_str(&payload.source_type) else {
-                poller_fail_job_message(
-                    job_store,
-                    worker_id,
-                    &job.job_id,
-                    format!(
-                        "Invalid source_type in preprocess payload: {}",
-                        payload.source_type
-                    ),
-                );
-                continue;
-            };
-            let loaded = match read_store.load_artifact_for_enrichment(&job.artifact_id) {
-                Ok(Some(l)) => l,
-                Ok(None) => {
-                    poller_fail_job_message(
-                        job_store,
-                        worker_id,
-                        &job.job_id,
-                        format!("Artifact {} not found for preprocessing", job.artifact_id),
-                    );
-                    continue;
-                }
-                Err(err) => {
-                    poller_fail_job(
-                        job_store,
-                        worker_id,
-                        &job.job_id,
-                        "Failed to load artifact for preprocessing",
-                        err,
-                    );
-                    continue;
-                }
-            };
-            let input = PreprocessProcessorInput {
-                artifact_id: loaded.artifact.artifact_id.clone(),
-                import_id: payload.import_id.clone(),
-                source_type,
-                title: loaded.artifact.title.clone(),
-                participants: loaded.participants,
-                segments: loaded.segments,
-            };
-            inputs.push(input);
-            payloads.push(payload);
-            valid_jobs.push(job);
-        }
-
-        if valid_jobs.is_empty() {
-            return Err(());
-        }
-
-        // Acquire a rate limit token before submission.
-        if let Err(wait) = rate_limiter.try_acquire() {
-            warn!(
-                "[preprocess] rate limit wait {:?} before submit, returning claimed jobs to queue",
-                wait
-            );
-            // Return the jobs to the pool by marking them retryable.
-            for job in &valid_jobs {
-                poller_mark_retryable(
-                    job_store,
-                    worker_id,
-                    &job.job_id,
-                    "Rate limited before submit",
-                    5,
-                );
-            }
-            return Err(());
-        }
-
-        match self.submitter.submit_phase_one(&inputs) {
-            Ok(handle) => Ok(InFlightBatch {
-                handle,
-                owner_worker_id: worker_id.to_string(),
-                jobs: valid_jobs,
-                context: InFlightContext::PreprocessPhaseOne { inputs, payloads },
-            }),
-            Err(err) => {
-                if matches!(err, ProcessorError::InferenceHttpStatus { status: 429, .. }) {
-                    rate_limiter.signal_backoff(Duration::from_secs(RATE_LIMIT_429_BACKOFF_SECS));
-                }
-                for job in &valid_jobs {
-                    poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
-                }
-                Err(())
-            }
-        }
-    }
-
-    fn poll(&self, batch: &InFlightBatch) -> Result<BatchPollResult, ProcessorError> {
-        self.submitter.poll_batch(&batch.handle)
-    }
-
-    fn process_completed(
-        &self,
-        batch: InFlightBatch,
-        data: Box<dyn std::any::Any>,
-        job_store: &dyn EnrichmentJobLifecycleStore,
-        _state_store: &dyn EnrichmentStateStore,
-        _derived_store: &dyn DerivedMetadataWriteStore,
-        worker_id: &str,
-    ) -> Result<Option<InFlightBatch>, ()> {
-        match batch.context {
-            InFlightContext::PreprocessPhaseOne { inputs, payloads } => {
-                // Parse phase one results, then submit phase two.
-                let phase_one_data = match self.submitter.parse_phase_one(data, &inputs) {
-                    Ok(d) => d,
-                    Err(err) => {
-                        if is_repairable_processor_error(&err) {
-                            match self.submitter.repair_phase_one_batch(&inputs, &err) {
-                                Ok(repaired) => repaired,
-                                Err(repair_err) => {
-                                    for job in &batch.jobs {
-                                        poller_handle_processor_error(
-                                            job_store,
-                                            worker_id,
-                                            &job.job_id,
-                                            &repair_err,
-                                        );
-                                    }
-                                    return Err(());
-                                }
-                            }
-                        } else {
-                            for job in &batch.jobs {
-                                poller_handle_processor_error(
-                                    job_store,
-                                    worker_id,
-                                    &job.job_id,
-                                    &err,
-                                );
-                            }
-                            return Err(());
-                        }
-                    }
-                };
-
-                match self
-                    .submitter
-                    .submit_phase_two(&inputs, phase_one_data.as_ref())
-                {
-                    Ok(new_handle) => {
-                        let new_batch = InFlightBatch {
-                            handle: new_handle,
-                            owner_worker_id: worker_id.to_string(),
-                            jobs: batch.jobs,
-                            context: InFlightContext::PreprocessPhaseTwo {
-                                inputs,
-                                payloads,
-                                phase_one_data,
-                            },
-                        };
-                        Ok(Some(new_batch))
-                    }
-                    Err(err) => {
-                        for job in &batch.jobs {
-                            poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
-                        }
-                        Err(())
-                    }
-                }
-            }
-            InFlightContext::PreprocessPhaseTwo {
-                inputs,
-                payloads,
-                phase_one_data,
-            } => {
-                // Parse phase two results and process each.
-                let results =
-                    self.submitter
-                        .parse_phase_two(data, &inputs, phase_one_data.as_ref());
-
-                for ((job, (input, payload)), result) in batch
-                    .jobs
-                    .into_iter()
-                    .zip(inputs.into_iter().zip(payloads.into_iter()))
-                    .zip(results.into_iter())
-                {
-                    match result {
-                        Ok(output) => {
-                            let coverage_windows = build_preprocess_coverage_windows(
-                                &job.artifact_id,
-                                &input.segments,
-                                &output.topic_threads,
-                                &self.chunking,
-                            );
-                            let extract_job = NewEnrichmentJob {
-                                job_id: new_id("job"),
-                                artifact_id: job.artifact_id.clone(),
-                                job_type: JobType::ArtifactExtract,
-                                enrichment_tier: job.enrichment_tier,
-                                spawned_by_job_id: Some(job.job_id.clone()),
-                                job_status: crate::storage::JobStatus::Pending,
-                                max_attempts: 3,
-                                priority_no: 100,
-                                required_capabilities: vec!["text".to_string()],
-                                payload_json: ArtifactExtractPayload::new_v1(
-                                    &job.artifact_id,
-                                    &payload.import_id,
-                                    input.source_type,
-                                    coverage_windows,
-                                    output.topic_threads,
-                                )
-                                .to_json(),
-                            };
-                            if let Err(err) = job_store.enqueue_jobs(&[extract_job]) {
-                                poller_fail_job(
-                                    job_store,
-                                    worker_id,
-                                    &job.job_id,
-                                    "Failed to enqueue extraction job from preprocess",
-                                    err,
-                                );
-                                continue;
-                            }
-                            if let Err(msg) = poller_complete_job(job_store, worker_id, &job.job_id)
-                            {
-                                error!("[preprocess] {}", msg);
-                            }
-                        }
-                        Err(err) => {
-                            if is_repairable_processor_error(&err) {
-                                match self.submitter.repair_phase_two(
-                                    &input,
-                                    phase_one_data.as_ref(),
-                                    &err,
-                                ) {
-                                    Ok(output) => {
-                                        let coverage_windows = build_preprocess_coverage_windows(
-                                            &job.artifact_id,
-                                            &input.segments,
-                                            &output.topic_threads,
-                                            &self.chunking,
-                                        );
-                                        let extract_job = NewEnrichmentJob {
-                                            job_id: new_id("job"),
-                                            artifact_id: job.artifact_id.clone(),
-                                            job_type: JobType::ArtifactExtract,
-                                            enrichment_tier: job.enrichment_tier,
-                                            spawned_by_job_id: Some(job.job_id.clone()),
-                                            job_status: crate::storage::JobStatus::Pending,
-                                            max_attempts: 3,
-                                            priority_no: 100,
-                                            required_capabilities: vec!["text".to_string()],
-                                            payload_json: ArtifactExtractPayload::new_v1(
-                                                &job.artifact_id,
-                                                &payload.import_id,
-                                                input.source_type,
-                                                coverage_windows,
-                                                output.topic_threads,
-                                            )
-                                            .to_json(),
-                                        };
-                                        if let Err(err) = job_store.enqueue_jobs(&[extract_job]) {
-                                            poller_fail_job(
-                                                job_store, worker_id, &job.job_id,
-                                                "Failed to enqueue extraction job from repaired preprocess", err,
-                                            );
-                                            continue;
-                                        }
-                                        if let Err(msg) =
-                                            poller_complete_job(job_store, worker_id, &job.job_id)
-                                        {
-                                            error!("[preprocess] {}", msg);
-                                        }
-                                    }
-                                    Err(repair_err) => {
-                                        poller_handle_processor_error(
-                                            job_store,
-                                            worker_id,
-                                            &job.job_id,
-                                            &repair_err,
-                                        );
-                                    }
-                                }
-                            } else {
-                                poller_handle_processor_error(
-                                    job_store,
-                                    worker_id,
-                                    &job.job_id,
-                                    &err,
-                                );
-                            }
-                        }
-                    }
-                }
-                Ok(None)
-            }
-            _ => {
-                error!("[preprocess] process_completed called with wrong context variant");
-                Err(())
-            }
-        }
-    }
-
-    fn phase_name(&self, batch: &InFlightBatch) -> &'static str {
-        match &batch.context {
-            InFlightContext::PreprocessPhaseOne { .. } => "phase_one",
-            InFlightContext::PreprocessPhaseTwo { .. } => "phase_two",
-            _ => "unknown",
-        }
-    }
-
-    fn serialize_context(&self, batch: &InFlightBatch) -> Result<Option<String>, ProcessorError> {
-        match &batch.context {
-            InFlightContext::PreprocessPhaseOne { .. } => Ok(None),
-            InFlightContext::PreprocessPhaseTwo { phase_one_data, .. } => self
-                .submitter
-                .serialize_phase_one_data(phase_one_data.as_ref())
-                .map(Some),
-            _ => Ok(None),
-        }
-    }
-
-    fn recover_batch(
-        &self,
-        persisted: PersistedEnrichmentBatch,
-        read_store: &dyn ArtifactReadStore,
-        _state_store: &dyn EnrichmentStateStore,
-        job_store: &dyn EnrichmentJobLifecycleStore,
-        worker_id: &str,
-    ) -> Result<InFlightBatch, ()> {
-        let mut inputs = Vec::new();
-        let mut payloads = Vec::new();
-        for job in &persisted.jobs {
-            let payload = match ArtifactPreprocessPayload::from_json(&job.payload_json) {
-                Ok(p) => p,
-                Err(err) => {
-                    poller_fail_job(
-                        job_store,
-                        worker_id,
-                        &job.job_id,
-                        "Failed to parse preprocess payload JSON during recovery",
-                        err,
-                    );
-                    return Err(());
-                }
-            };
-            let Some(source_type) = SourceType::from_str(&payload.source_type) else {
-                poller_fail_job_message(
-                    job_store,
-                    worker_id,
-                    &job.job_id,
-                    format!(
-                        "Invalid source_type in preprocess recovery payload: {}",
-                        payload.source_type
-                    ),
-                );
-                return Err(());
-            };
-            let loaded = match read_store.load_artifact_for_enrichment(&job.artifact_id) {
-                Ok(Some(l)) => l,
-                Ok(None) => {
-                    poller_fail_job_message(
-                        job_store,
-                        worker_id,
-                        &job.job_id,
-                        format!(
-                            "Artifact {} not found for preprocessing recovery",
-                            job.artifact_id
-                        ),
-                    );
-                    return Err(());
-                }
-                Err(err) => {
-                    poller_fail_job(
-                        job_store,
-                        worker_id,
-                        &job.job_id,
-                        "Failed to load artifact for preprocessing recovery",
-                        err,
-                    );
-                    return Err(());
-                }
-            };
-            inputs.push(PreprocessProcessorInput {
-                artifact_id: loaded.artifact.artifact_id.clone(),
-                import_id: payload.import_id.clone(),
-                source_type,
-                title: loaded.artifact.title.clone(),
-                participants: loaded.participants,
-                segments: loaded.segments,
-            });
-            payloads.push(payload);
-        }
-
-        let context = match persisted.phase_name.as_str() {
-            "phase_one" => InFlightContext::PreprocessPhaseOne { inputs, payloads },
-            "phase_two" => {
-                let Some(serialized) = persisted.context_json.as_deref() else {
-                    error!(
-                        "[preprocess] missing serialized context for recovered phase-two batch {}",
-                        persisted.provider_batch_id
-                    );
-                    return Err(());
-                };
-                let phase_one_data = match self.submitter.deserialize_phase_one_data(serialized) {
-                    Ok(data) => data,
-                    Err(err) => {
-                        error!("[preprocess] failed to deserialize phase-one recovery context for {}: {}", persisted.provider_batch_id, err);
-                        return Err(());
-                    }
-                };
-                InFlightContext::PreprocessPhaseTwo {
-                    inputs,
-                    payloads,
-                    phase_one_data,
-                }
-            }
-            other => {
-                error!(
-                    "[preprocess] unknown persisted phase {} for batch {}",
-                    other, persisted.provider_batch_id
-                );
-                return Err(());
-            }
-        };
-
-        Ok(InFlightBatch {
-            handle: BatchHandle {
-                batch_id: persisted.provider_batch_id,
-                provider: persisted.provider_name,
-                submitted_at: std::time::Instant::now(),
-            },
-            owner_worker_id: persisted.owner_worker_id,
-            jobs: persisted.jobs,
-            context,
-        })
     }
 }
 
@@ -1170,7 +626,6 @@ impl StageBehavior for ExtractStage {
     fn submit(
         &self,
         jobs: Vec<ClaimedJob>,
-        rate_limiter: &RateLimiter,
         read_store: &dyn ArtifactReadStore,
         _state_store: &dyn EnrichmentStateStore,
         _derived_store: &dyn DerivedMetadataWriteStore,
@@ -1227,10 +682,16 @@ impl StageBehavior for ExtractStage {
             }
 
             submitted_chunk_count += chunk_inputs.len();
+            let split_at = chunk_inputs.len().min(EXTRACT_CHUNK_WAVE_LIMIT);
+            let pending_chunk_inputs = chunk_inputs[..split_at].to_vec();
+            let deferred_chunk_inputs = chunk_inputs[split_at..].to_vec();
             groups.push(ExtractPreparedJob {
                 parent_input,
                 payload,
-                chunk_inputs,
+                pending_chunk_inputs,
+                deferred_chunk_inputs,
+                successful_chunk_outputs: Vec::new(),
+                retry_count: 0,
             });
             valid_jobs.push(job);
         }
@@ -1239,26 +700,9 @@ impl StageBehavior for ExtractStage {
             return Err(());
         }
 
-        if let Err(wait) = rate_limiter.try_acquire() {
-            warn!(
-                "[extract] rate limit wait {:?} before submit, returning claimed jobs to queue",
-                wait
-            );
-            for job in &valid_jobs {
-                poller_mark_retryable(
-                    job_store,
-                    worker_id,
-                    &job.job_id,
-                    "Rate limited before submit",
-                    5,
-                );
-            }
-            return Err(());
-        }
-
         let flat_inputs: Vec<_> = groups
             .iter()
-            .flat_map(|group| group.chunk_inputs.iter().cloned())
+            .flat_map(|group| group.pending_chunk_inputs.iter().cloned())
             .collect();
 
         match self.submitter.prepare_and_submit(&flat_inputs) {
@@ -1269,11 +713,20 @@ impl StageBehavior for ExtractStage {
                 context: InFlightContext::Extract { groups },
             }),
             Err(err) => {
-                if matches!(err, ProcessorError::InferenceHttpStatus { status: 429, .. }) {
-                    rate_limiter.signal_backoff(Duration::from_secs(RATE_LIMIT_429_BACKOFF_SECS));
-                }
-                for job in &valid_jobs {
-                    poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
+                if matches!(err, ProcessorError::InferenceHttpStatus { status: 413, .. }) {
+                    for job in &valid_jobs {
+                        poller_reschedule_without_attempt(
+                            job_store,
+                            worker_id,
+                            &job.job_id,
+                            "Provider rejected extract batch body as too large; will retry in smaller waves",
+                            RETRYABLE_INFERENCE_BACKOFF_SECONDS,
+                        );
+                    }
+                } else {
+                    for job in &valid_jobs {
+                        poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
+                    }
                 }
                 Err(())
             }
@@ -1303,16 +756,21 @@ impl StageBehavior for ExtractStage {
 
         let flat_inputs: Vec<_> = groups
             .iter()
-            .flat_map(|group| group.chunk_inputs.iter().cloned())
+            .flat_map(|group| group.pending_chunk_inputs.iter().cloned())
             .collect();
         let mut results = self.submitter.parse_results(data, &flat_inputs).into_iter();
+        let mut next_jobs = Vec::new();
+        let mut next_groups = Vec::new();
 
-        for (job, group) in batch.jobs.into_iter().zip(groups.into_iter()) {
-            let mut chunk_outputs = Vec::with_capacity(group.chunk_inputs.len());
-            let mut chunk_error = None;
-            for _ in &group.chunk_inputs {
+        for (job, mut group) in batch.jobs.into_iter().zip(groups.into_iter()) {
+            let pending_chunk_inputs = std::mem::take(&mut group.pending_chunk_inputs);
+            let mut retryable_chunk_inputs = Vec::new();
+            let mut terminal_chunk_error = None;
+            let mut first_retryable_error = None;
+            for chunk_input in pending_chunk_inputs {
                 let Some(result) = results.next() else {
-                    chunk_error = Some(ProcessorError::Message {
+                    retryable_chunk_inputs.push(chunk_input);
+                    first_retryable_error.get_or_insert_with(|| ProcessorError::Message {
                         message: format!(
                             "Missing chunk result for artifact {} in extract batch",
                             job.artifact_id
@@ -1321,26 +779,70 @@ impl StageBehavior for ExtractStage {
                     break;
                 };
                 match result {
-                    Ok(output) => chunk_outputs.push(output),
+                    Ok(output) => group.successful_chunk_outputs.push(output),
                     Err(err) => {
-                        chunk_error = Some(err);
-                        break;
+                        if err.is_retryable() || is_repairable_processor_error(&err) {
+                            if first_retryable_error.is_none() {
+                                first_retryable_error = Some(ProcessorError::Message {
+                                    message: err.to_string(),
+                                });
+                            }
+                            retryable_chunk_inputs.push(chunk_input);
+                        } else {
+                            terminal_chunk_error = Some(err);
+                            break;
+                        }
                     }
                 }
             }
 
-            if let Some(err) = chunk_error {
+            if let Some(err) = terminal_chunk_error {
                 poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
                 continue;
             }
 
-            let output = if chunk_outputs.len() == 1 {
-                chunk_outputs
+            if !retryable_chunk_inputs.is_empty() {
+                if group.retry_count + 1 >= job.max_attempts as usize {
+                    let err = first_retryable_error.unwrap_or_else(|| ProcessorError::Message {
+                        message: format!(
+                            "extract chunk retries exhausted for artifact {}",
+                            job.artifact_id
+                        ),
+                    });
+                    poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
+                    continue;
+                }
+
+                info!(
+                    "[extract] artifact {} retrying {} failed chunk items while preserving {} successful chunk outputs",
+                    job.artifact_id,
+                    retryable_chunk_inputs.len(),
+                    group.successful_chunk_outputs.len()
+                );
+                group.pending_chunk_inputs = retryable_chunk_inputs;
+                group.retry_count += 1;
+                next_jobs.push(job);
+                next_groups.push(group);
+                continue;
+            }
+
+            if !group.deferred_chunk_inputs.is_empty() {
+                let split_at = group.deferred_chunk_inputs.len().min(EXTRACT_CHUNK_WAVE_LIMIT);
+                let remaining = std::mem::take(&mut group.deferred_chunk_inputs);
+                group.pending_chunk_inputs = remaining[..split_at].to_vec();
+                group.deferred_chunk_inputs = remaining[split_at..].to_vec();
+                next_jobs.push(job);
+                next_groups.push(group);
+                continue;
+            }
+
+            let output = if group.successful_chunk_outputs.len() == 1 {
+                group.successful_chunk_outputs
                     .into_iter()
                     .next()
                     .expect("single chunk output should exist")
             } else {
-                worker_merge_chunk_outputs(&group.parent_input, &chunk_outputs)
+                worker_merge_chunk_outputs(&group.parent_input, &group.successful_chunk_outputs)
             };
 
             let extraction_result = worker_build_extraction_result(
@@ -1391,15 +893,53 @@ impl StageBehavior for ExtractStage {
                 error!("[extract] {}", msg);
             }
         }
-        Ok(None)
+        if next_jobs.is_empty() {
+            Ok(None)
+        } else {
+            let retry_inputs: Vec<_> = next_groups
+                .iter()
+                .flat_map(|group| group.pending_chunk_inputs.iter().cloned())
+                .collect();
+            match self.submitter.prepare_and_submit(&retry_inputs) {
+                Ok(handle) => Ok(Some(InFlightBatch {
+                    handle,
+                    owner_worker_id: worker_id.to_string(),
+                    jobs: next_jobs,
+                    context: InFlightContext::Extract { groups: next_groups },
+                })),
+                Err(err) => {
+                    if matches!(err, ProcessorError::InferenceHttpStatus { status: 413, .. }) {
+                        for job in next_jobs {
+                            poller_reschedule_without_attempt(
+                                job_store,
+                                worker_id,
+                                &job.job_id,
+                                "Provider rejected extract retry batch body as too large; will retry in smaller waves",
+                                RETRYABLE_INFERENCE_BACKOFF_SECONDS,
+                            );
+                        }
+                    } else {
+                        for job in next_jobs {
+                            poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
+                        }
+                    }
+                    Err(())
+                }
+            }
+        }
     }
 
     fn phase_name(&self, _batch: &InFlightBatch) -> &'static str {
         "extract"
     }
 
-    fn serialize_context(&self, _batch: &InFlightBatch) -> Result<Option<String>, ProcessorError> {
-        Ok(None)
+    fn serialize_context(&self, batch: &InFlightBatch) -> Result<Option<String>, ProcessorError> {
+        match &batch.context {
+            InFlightContext::Extract { groups } => serde_json::to_string(groups)
+                .map(Some)
+                .map_err(|source| ProcessorError::SerializePrompt { source }),
+            _ => Ok(None),
+        }
     }
 
     fn recover_batch(
@@ -1410,34 +950,52 @@ impl StageBehavior for ExtractStage {
         job_store: &dyn EnrichmentJobLifecycleStore,
         worker_id: &str,
     ) -> Result<InFlightBatch, ()> {
-        let mut groups = Vec::new();
-        for job in &persisted.jobs {
-            let (parent_input, payload) = match self.prepare_job(job, read_store) {
-                Ok(prepared) => prepared,
-                Err(message) => {
-                    poller_fail_job_message(job_store, worker_id, &job.job_id, message);
+        let groups = if let Some(serialized) = persisted.context_json.as_deref() {
+            match serde_json::from_str::<Vec<ExtractPreparedJob>>(serialized) {
+                Ok(groups) => groups,
+                Err(err) => {
+                    error!(
+                        "[extract] failed to deserialize extract recovery context for {}: {}",
+                        persisted.provider_batch_id,
+                        err
+                    );
                     return Err(());
                 }
-            };
-            let chunk_inputs = build_extract_chunk_inputs(&parent_input, &payload, &self.chunking);
-            if chunk_inputs.is_empty() {
-                poller_fail_job_message(
-                    job_store,
-                    worker_id,
-                    &job.job_id,
-                    format!(
-                        "Artifact {} produced no extraction chunks during recovery",
-                        job.artifact_id
-                    ),
-                );
-                return Err(());
             }
-            groups.push(ExtractPreparedJob {
-                parent_input,
-                payload,
-                chunk_inputs,
-            });
-        }
+        } else {
+            let mut groups = Vec::new();
+            for job in &persisted.jobs {
+                let (parent_input, payload) = match self.prepare_job(job, read_store) {
+                    Ok(prepared) => prepared,
+                    Err(message) => {
+                        poller_fail_job_message(job_store, worker_id, &job.job_id, message);
+                        return Err(());
+                    }
+                };
+                let chunk_inputs = build_extract_chunk_inputs(&parent_input, &payload, &self.chunking);
+                if chunk_inputs.is_empty() {
+                    poller_fail_job_message(
+                        job_store,
+                        worker_id,
+                        &job.job_id,
+                        format!(
+                            "Artifact {} produced no extraction chunks during recovery",
+                            job.artifact_id
+                        ),
+                    );
+                    return Err(());
+                }
+                groups.push(ExtractPreparedJob {
+                    parent_input,
+                    payload,
+                    pending_chunk_inputs: chunk_inputs,
+                    deferred_chunk_inputs: Vec::new(),
+                    successful_chunk_outputs: Vec::new(),
+                    retry_count: 0,
+                });
+            }
+            groups
+        };
 
         Ok(InFlightBatch {
             handle: BatchHandle {
@@ -1504,7 +1062,6 @@ impl StageBehavior for ReconcileStage {
     fn submit(
         &self,
         jobs: Vec<ClaimedJob>,
-        rate_limiter: &RateLimiter,
         read_store: &dyn ArtifactReadStore,
         state_store: &dyn EnrichmentStateStore,
         derived_store: &dyn DerivedMetadataWriteStore,
@@ -1651,23 +1208,6 @@ impl StageBehavior for ReconcileStage {
             return Err(());
         }
 
-        if let Err(wait) = rate_limiter.try_acquire() {
-            warn!(
-                "[reconcile] rate limit wait {:?} before submit, returning claimed jobs to queue",
-                wait
-            );
-            for job in &valid_jobs {
-                poller_mark_retryable(
-                    job_store,
-                    worker_id,
-                    &job.job_id,
-                    "Rate limited before submit",
-                    5,
-                );
-            }
-            return Err(());
-        }
-
         match self.submitter.prepare_and_submit(&inputs) {
             Ok(handle) => Ok(InFlightBatch {
                 handle,
@@ -1682,9 +1222,6 @@ impl StageBehavior for ReconcileStage {
                 },
             }),
             Err(err) => {
-                if matches!(err, ProcessorError::InferenceHttpStatus { status: 429, .. }) {
-                    rate_limiter.signal_backoff(Duration::from_secs(RATE_LIMIT_429_BACKOFF_SECS));
-                }
                 for job in &valid_jobs {
                     poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
                 }
@@ -1808,7 +1345,17 @@ impl StageBehavior for ReconcileStage {
                     }
                 }
                 Err(err) => {
-                    poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
+                    if err.is_retryable() || is_repairable_processor_error(&err) {
+                        poller_mark_retryable(
+                            job_store,
+                            worker_id,
+                            &job.job_id,
+                            &format!("Processor execution failed: {err}"),
+                            RETRYABLE_INFERENCE_BACKOFF_SECONDS,
+                        );
+                    } else {
+                        poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
+                    }
                 }
             }
         }
@@ -2068,6 +1615,23 @@ fn poller_handle_processor_error(
     );
 }
 
+fn poller_reschedule_without_attempt(
+    job_store: &dyn EnrichmentJobLifecycleStore,
+    worker_id: &str,
+    job_id: &str,
+    message: &str,
+    retry_after_seconds: i64,
+) {
+    if let Err(err) =
+        job_store.reschedule_running_job(worker_id, job_id, message, retry_after_seconds)
+    {
+        error!(
+            "Failed to reschedule job {} without consuming attempt: {}; original error: {}",
+            job_id, err, message
+        );
+    }
+}
+
 fn is_repairable_processor_error(err: &ProcessorError) -> bool {
     matches!(
         err,
@@ -2100,6 +1664,7 @@ fn poller_mark_retryable(
         }
     }
 }
+
 
 fn complete_reconcile_without_candidates(
     job: &ClaimedJob,

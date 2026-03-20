@@ -59,8 +59,7 @@ pub use retrieval_read_store::{
 pub use segment_store::SegmentStore;
 pub use types::{
     ArtifactClass, ArtifactExtractPayload, ArtifactExtractionResult, ArtifactIngestResult,
-    ArtifactListItem, ArtifactPreprocessPayload, ArtifactReconcilePayload,
-    ArtifactRetrieveContextPayload, ArtifactStatus, CandidateEntity, CandidateRelationship,
+    ArtifactListItem, ArtifactReconcilePayload, ArtifactRetrieveContextPayload, ArtifactStatus, CandidateEntity, CandidateRelationship,
     ClaimedJob, ClassificationObjectJson, ConversationWindowRef, DerivationRunStatus,
     DerivationRunType, DerivedObjectPayload, DerivedObjectType, EnrichmentStatus, EnrichmentTier,
     EvidenceRole, ExtractedClassification, ExtractedMemory, ImportStatus, InputScopeType,

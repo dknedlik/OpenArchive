@@ -1,13 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::embeddings::TextEmbedder;
 use crate::error::{OpenArchiveError, Result};
 use crate::storage::{
     ArtifactContextPackReadStore, DerivedObjectType, EnrichmentStatus, EvidenceRole, ScopeType,
     SourceType, SupportStrength,
 };
-use log::warn;
 
 /// Maximum characters to include in an evidence text excerpt.
 const EXCERPT_MAX_CHARS: usize = 200;
@@ -101,18 +99,11 @@ pub struct ContextPackResponse {
 
 pub struct ContextPackService {
     read_store: Arc<dyn ArtifactContextPackReadStore + Send + Sync>,
-    embedder: Option<Arc<dyn TextEmbedder>>,
 }
 
 impl ContextPackService {
-    pub fn new(
-        read_store: Arc<dyn ArtifactContextPackReadStore + Send + Sync>,
-        embedder: Option<Arc<dyn TextEmbedder>>,
-    ) -> Self {
-        Self {
-            read_store,
-            embedder,
-        }
+    pub fn new(read_store: Arc<dyn ArtifactContextPackReadStore + Send + Sync>) -> Self {
+        Self { read_store }
     }
 
     pub fn assemble(&self, request: ContextPackRequest) -> Result<Option<ContextPackResponse>> {
@@ -291,22 +282,7 @@ fn truncate_to_chars(s: &str, max: usize) -> &str {
 
 impl ContextPackService {
     fn deduplicate_memories(&self, memories: Vec<ContextDerivedEntry>) -> Vec<ContextDerivedEntry> {
-        if memories.len() <= 1 {
-            return memories;
-        }
-
-        let exact_groups = cluster_exact_memory_duplicates(memories);
-        let Some(embedder) = &self.embedder else {
-            return exact_groups;
-        };
-
-        match cluster_memory_entries_with_embeddings(embedder.as_ref(), exact_groups.clone()) {
-            Ok(clustered) => clustered,
-            Err(err) => {
-                warn!("context-pack memory embedding dedupe failed: {err}");
-                exact_groups
-            }
-        }
+        cluster_exact_memory_duplicates(memories)
     }
 }
 
@@ -335,128 +311,6 @@ fn exact_memory_duplicate(left: &ContextDerivedEntry, right: &ContextDerivedEntr
     let right_body = normalize_memory_text(right.body_text.as_deref().unwrap_or_default());
     (!left_body.is_empty() && left_body == right_body)
         || (!left_title.is_empty() && left_title == right_title && left_body == right_body)
-}
-
-fn cluster_memory_entries_with_embeddings(
-    embedder: &dyn TextEmbedder,
-    memories: Vec<ContextDerivedEntry>,
-) -> Result<Vec<ContextDerivedEntry>> {
-    if memories.len() <= 1 {
-        return Ok(memories);
-    }
-
-    let embedding_inputs: Vec<String> = memories
-        .iter()
-        .map(memory_embedding_text)
-        .collect();
-    let vectors = embedder
-        .embed_texts(&embedding_inputs)
-        .map_err(OpenArchiveError::from)?;
-    if vectors.len() != memories.len() {
-        return Err(OpenArchiveError::Invariant(
-            "embedding service returned mismatched vector count".to_string(),
-        ));
-    }
-
-    let mut uf = UnionFind::new(memories.len());
-    for i in 0..memories.len() {
-        for j in (i + 1)..memories.len() {
-            if memories[i].scope_type != memories[j].scope_type {
-                continue;
-            }
-            let similarity = cosine_similarity(&vectors[i], &vectors[j]);
-            if should_cluster_memory_pair(&memories[i], &memories[j], similarity) {
-                uf.union(i, j);
-            }
-        }
-    }
-
-    let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
-    for index in 0..memories.len() {
-        clusters.entry(uf.find(index)).or_default().push(index);
-    }
-
-    let mut clustered = Vec::new();
-    for indices in clusters.into_values() {
-        let mut members: Vec<ContextDerivedEntry> =
-            indices.into_iter().map(|index| memories[index].clone()).collect();
-        let representative_index = select_representative_index(&members);
-        let mut representative = members.remove(representative_index);
-        for member in members {
-            merge_context_memory(&mut representative, &member);
-        }
-        clustered.push(representative);
-    }
-
-    Ok(clustered)
-}
-
-fn memory_embedding_text(entry: &ContextDerivedEntry) -> String {
-    match (&entry.body_text, &entry.title) {
-        (Some(body), Some(title)) if !title.trim().is_empty() => format!("{body}\n\n{title}"),
-        (Some(body), _) => body.clone(),
-        (None, Some(title)) => title.clone(),
-        (None, None) => String::new(),
-    }
-}
-
-fn should_cluster_memory_pair(
-    left: &ContextDerivedEntry,
-    right: &ContextDerivedEntry,
-    similarity: f32,
-) -> bool {
-    if similarity >= 0.90 {
-        return true;
-    }
-    if similarity < 0.80 {
-        return false;
-    }
-
-    memory_overlap_score(left, right) >= 0.65
-}
-
-fn memory_overlap_score(left: &ContextDerivedEntry, right: &ContextDerivedEntry) -> f32 {
-    let left_body = left.body_text.as_deref().unwrap_or_default();
-    let right_body = right.body_text.as_deref().unwrap_or_default();
-    if !left_body.trim().is_empty() && !right_body.trim().is_empty() {
-        return lexical_overlap(left_body, right_body);
-    }
-
-    lexical_overlap(
-        left.title.as_deref().unwrap_or_default(),
-        right.title.as_deref().unwrap_or_default(),
-    )
-}
-
-fn lexical_overlap(left: &str, right: &str) -> f32 {
-    let left_tokens: HashSet<String> = normalize_memory_text(left)
-        .split_whitespace()
-        .map(|token| token.to_string())
-        .collect();
-    let right_tokens: HashSet<String> = normalize_memory_text(right)
-        .split_whitespace()
-        .map(|token| token.to_string())
-        .collect();
-    if left_tokens.is_empty() || right_tokens.is_empty() {
-        return 0.0;
-    }
-    let overlap = left_tokens.intersection(&right_tokens).count() as f32;
-    let smaller = left_tokens.len().min(right_tokens.len()) as f32;
-    overlap / smaller
-}
-
-fn select_representative_index(entries: &[ContextDerivedEntry]) -> usize {
-    entries
-        .iter()
-        .enumerate()
-        .max_by_key(|(_, entry)| {
-            let evidence_count = entry.evidence.len();
-            let body_len = entry.body_text.as_deref().unwrap_or_default().len();
-            let title_len = entry.title.as_deref().unwrap_or_default().len();
-            (evidence_count, body_len, title_len)
-        })
-        .map(|(index, _)| index)
-        .unwrap_or(0)
 }
 
 fn merge_context_memory(target: &mut ContextDerivedEntry, incoming: &ContextDerivedEntry) {
@@ -526,52 +380,6 @@ fn normalize_memory_text(value: &str) -> String {
     normalized.trim().to_string()
 }
 
-fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
-    if left.len() != right.len() || left.is_empty() {
-        return 0.0;
-    }
-    let mut dot = 0.0f32;
-    let mut left_norm = 0.0f32;
-    let mut right_norm = 0.0f32;
-    for (l, r) in left.iter().zip(right.iter()) {
-        dot += l * r;
-        left_norm += l * l;
-        right_norm += r * r;
-    }
-    if left_norm == 0.0 || right_norm == 0.0 {
-        return 0.0;
-    }
-    dot / (left_norm.sqrt() * right_norm.sqrt())
-}
-
-struct UnionFind {
-    parents: Vec<usize>,
-}
-
-impl UnionFind {
-    fn new(size: usize) -> Self {
-        Self {
-            parents: (0..size).collect(),
-        }
-    }
-
-    fn find(&mut self, index: usize) -> usize {
-        if self.parents[index] != index {
-            let root = self.find(self.parents[index]);
-            self.parents[index] = root;
-        }
-        self.parents[index]
-    }
-
-    fn union(&mut self, left: usize, right: usize) {
-        let left_root = self.find(left);
-        let right_root = self.find(right);
-        if left_root != right_root {
-            self.parents[right_root] = left_root;
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -579,13 +387,11 @@ impl UnionFind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::embeddings::TextEmbedder;
     use crate::error::StorageResult;
     use crate::storage::{
         ArtifactContextDerivedObject, ArtifactContextEvidenceLink, ArtifactContextPackMaterial,
         ArtifactContextPackReadStore, ArtifactDetailRecord, ArtifactDetailSegment,
     };
-    use crate::error::EmbeddingError;
 
     struct MockPackReadStore {
         material: Option<ArtifactContextPackMaterial>,
@@ -647,27 +453,7 @@ mod tests {
     }
 
     fn service_with(material: Option<ArtifactContextPackMaterial>) -> ContextPackService {
-        ContextPackService::new(Arc::new(MockPackReadStore { material }), None)
-    }
-
-    struct MockEmbedder {
-        vectors: Vec<Vec<f32>>,
-    }
-
-    impl TextEmbedder for MockEmbedder {
-        fn embed_texts(&self, _texts: &[String]) -> std::result::Result<Vec<Vec<f32>>, EmbeddingError> {
-            Ok(self.vectors.clone())
-        }
-    }
-
-    fn service_with_embedder(
-        material: Option<ArtifactContextPackMaterial>,
-        vectors: Vec<Vec<f32>>,
-    ) -> ContextPackService {
-        ContextPackService::new(
-            Arc::new(MockPackReadStore { material }),
-            Some(Arc::new(MockEmbedder { vectors })),
-        )
+        ContextPackService::new(Arc::new(MockPackReadStore { material }))
     }
 
     fn request() -> ContextPackRequest {
@@ -698,93 +484,6 @@ mod tests {
         // P1: unreferenced segments should NOT be reported as NoEvidenceLinks
         // when enrichment hasn't produced evidence yet.
         assert!(pack.provenance.omissions.is_empty());
-    }
-
-    #[test]
-    fn context_pack_memory_dedup_suppresses_embedding_cluster_variants() {
-        let svc = service_with_embedder(
-            Some(ArtifactContextPackMaterial {
-                artifact: make_artifact(EnrichmentStatus::Completed),
-                segments: vec![
-                    make_segment("seg-1", "first"),
-                    make_segment("seg-2", "second"),
-                ],
-                derived_objects: vec![
-                    make_derived_object("mem-1", DerivedObjectType::Memory),
-                    make_derived_object("mem-2", DerivedObjectType::Memory),
-                    make_derived_object("mem-3", DerivedObjectType::Memory),
-                ],
-                evidence_links: vec![
-                    make_evidence_link("ev-1", "mem-1", "seg-1", 1),
-                    make_evidence_link("ev-2", "mem-2", "seg-1", 1),
-                    make_evidence_link("ev-3", "mem-3", "seg-2", 1),
-                ],
-            }),
-            vec![
-                vec![1.0, 0.0],
-                vec![0.95, 0.05],
-                vec![0.0, 1.0],
-            ],
-        );
-
-        let pack = svc.assemble(request()).unwrap().unwrap();
-        assert_eq!(pack.memories.len(), 2);
-        assert!(pack
-            .memories
-            .iter()
-            .any(|memory| memory.suppressed_variant_ids.len() == 1));
-    }
-
-    #[test]
-    fn context_pack_memory_dedup_keeps_related_but_distinct_memories_when_overlap_is_weak() {
-        let svc = service_with_embedder(
-            Some(ArtifactContextPackMaterial {
-                artifact: make_artifact(EnrichmentStatus::Completed),
-                segments: vec![
-                    make_segment("seg-1", "first"),
-                    make_segment("seg-2", "second"),
-                ],
-                derived_objects: vec![
-                    ArtifactContextDerivedObject {
-                        derived_object_id: "mem-a".to_string(),
-                        derived_object_type: DerivedObjectType::Memory,
-                        title: Some("Breakfast Fish Rotation".to_string()),
-                        body_text: Some(
-                            "The user rotates breakfast fish options such as kippers, mackerel, and lox."
-                                .to_string(),
-                        ),
-                        scope_id: "art-1".to_string(),
-                        scope_type: ScopeType::Artifact,
-                    },
-                    ArtifactContextDerivedObject {
-                        derived_object_id: "mem-b".to_string(),
-                        derived_object_type: DerivedObjectType::Memory,
-                        title: Some("Tinned fish breakfast rotation for cost savings".to_string()),
-                        body_text: Some(
-                            "The user is using tinned kippers and mackerel in breakfast specifically to reduce costs compared with daily lox."
-                                .to_string(),
-                        ),
-                        scope_id: "art-1".to_string(),
-                        scope_type: ScopeType::Artifact,
-                    },
-                ],
-                evidence_links: vec![
-                    make_evidence_link("ev-a", "mem-a", "seg-1", 1),
-                    make_evidence_link("ev-b", "mem-b", "seg-2", 1),
-                ],
-            }),
-            vec![
-                vec![1.0, 0.0],
-                vec![0.85, 0.5267827],
-            ],
-        );
-
-        let pack = svc.assemble(request()).unwrap().unwrap();
-        assert_eq!(pack.memories.len(), 2);
-        assert!(pack
-            .memories
-            .iter()
-            .all(|memory| memory.suppressed_variant_ids.is_empty()));
     }
 
     #[test]

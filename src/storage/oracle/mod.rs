@@ -387,6 +387,17 @@ impl EnrichmentJobLifecycleStore for OracleEnrichmentJobStore {
         job::mark_job_retryable(&conn, worker_id, job_id, error_message, retry_after_seconds)
     }
 
+    fn reschedule_running_job(
+        &self,
+        worker_id: &str,
+        job_id: &str,
+        message: &str,
+        retry_after_seconds: i64,
+    ) -> StorageResult<()> {
+        let conn = db::connect(&self.config)?;
+        job::reschedule_running_job(&conn, worker_id, job_id, message, retry_after_seconds)
+    }
+
     fn record_batch_submission(
         &self,
         _batch: &NewEnrichmentBatch,
