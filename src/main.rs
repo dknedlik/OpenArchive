@@ -117,7 +117,7 @@ fn serve() -> Result<(), anyhow::Error> {
                     inference_mode,
                     Arc::clone(&services.enrichment_store),
                     Arc::clone(&services.read_store),
-                    Arc::clone(&services.retrieval_store),
+                    Arc::clone(&services.app.retrieval),
                     Arc::clone(&services.state_store),
                     Arc::clone(&services.derived_store),
                     shutdown.clone(),
@@ -133,7 +133,7 @@ fn serve() -> Result<(), anyhow::Error> {
                     inference_mode,
                     Arc::clone(&services.enrichment_store),
                     Arc::clone(&services.read_store),
-                    Arc::clone(&services.retrieval_store),
+                    Arc::clone(&services.app.retrieval),
                     Arc::clone(&services.state_store),
                     Arc::clone(&services.derived_store),
                     shutdown.clone(),
@@ -223,8 +223,8 @@ mod tests {
     use open_archive::app::ArchiveApplication;
     use open_archive::object_store::{NewObject, ObjectStore, PutObjectResult, StoredObject};
     use open_archive::storage::{
-        ArtifactListItem, ArtifactReadStore, ImportStatus, ImportWriteResult, ImportWriteStore,
-        WriteImportSet,
+        ArchiveRetrievalStore, ArtifactListItem, ArtifactReadStore, ImportStatus,
+        ImportWriteResult, ImportWriteStore, RetrievedContextItem, RetrievalIntent, WriteImportSet,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -319,6 +319,17 @@ mod tests {
         }
     }
 
+    impl ArchiveRetrievalStore for MockStore {
+        fn retrieve_for_intents(
+            &self,
+            _artifact_id: &str,
+            _intents: &[RetrievalIntent],
+            _limit_per_intent: usize,
+        ) -> open_archive::error::StorageResult<Vec<RetrievedContextItem>> {
+            Ok(Vec::new())
+        }
+    }
+
     #[test]
     fn test_worker_exits_on_shutdown() {
         let shutdown = ShutdownToken::new();
@@ -410,10 +421,12 @@ mod tests {
         let store = Arc::new(store);
         let import_store: Arc<dyn ImportWriteStore + Send + Sync> = store.clone();
         let read_store: Arc<dyn ArtifactReadStore + Send + Sync> = store.clone();
+        let retrieval_store: Arc<dyn ArchiveRetrievalStore + Send + Sync> = store.clone();
         let object_store: Arc<dyn ObjectStore + Send + Sync> = store;
         Arc::new(ArchiveApplication::new(
             import_store,
             read_store,
+            retrieval_store,
             None,
             None,
             None,

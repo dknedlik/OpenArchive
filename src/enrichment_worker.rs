@@ -1,3 +1,4 @@
+use crate::app::retrieval::ArchiveRetrievalServiceApi;
 use crate::config::{EnrichmentPipelineConfig, ExtractionChunkingConfig, InferenceExecutionMode};
 use crate::domain::SourceTimestamp;
 use crate::extraction_chunking::{
@@ -13,8 +14,8 @@ use crate::shutdown::ShutdownToken;
 use crate::stage_poller::{stage_poller_loop, ExtractStage, ReconcileStage};
 use crate::storage::JobType;
 use crate::storage::{
-    ArchiveRetrievalStore, ArtifactExtractPayload, ArtifactExtractionResult,
-    ArtifactReadStore, ArtifactReconcilePayload, ArtifactRetrieveContextPayload,
+    ArtifactExtractPayload, ArtifactExtractionResult, ArtifactReadStore,
+    ArtifactReconcilePayload, ArtifactRetrieveContextPayload,
     CandidateEntity, CandidateRelationship, ClaimedJob,
     ClassificationObjectJson, ConversationWindowRef, DerivationRunStatus, DerivationRunType,
     DerivedMetadataWriteStore, DerivedObjectPayload, EnrichmentJobLifecycleStore,
@@ -49,7 +50,7 @@ fn enrichment_worker(
     worker_id: String,
     job_store: Arc<dyn EnrichmentJobLifecycleStore>,
     read_store: Arc<dyn ArtifactReadStore>,
-    retrieval_store: Arc<dyn ArchiveRetrievalStore>,
+    retrieval_service: Arc<dyn ArchiveRetrievalServiceApi>,
     state_store: Arc<dyn EnrichmentStateStore>,
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
@@ -74,7 +75,7 @@ fn enrichment_worker(
                     claimed_job,
                     job_store.as_ref(),
                     read_store.as_ref(),
-                    retrieval_store.as_ref(),
+                    retrieval_service.as_ref(),
                     state_store.as_ref(),
                     derived_store.as_ref(),
                     processor_factory.as_ref(),
@@ -102,7 +103,7 @@ fn process_claimed_jobs(
     first_job: ClaimedJob,
     job_store: &dyn EnrichmentJobLifecycleStore,
     read_store: &dyn ArtifactReadStore,
-    retrieval_store: &dyn ArchiveRetrievalStore,
+    retrieval_service: &dyn ArchiveRetrievalServiceApi,
     state_store: &dyn EnrichmentStateStore,
     derived_store: &dyn DerivedMetadataWriteStore,
     processor_factory: &dyn ArtifactProcessorFactory,
@@ -194,7 +195,7 @@ fn process_claimed_jobs(
         first_job,
         job_store,
         read_store,
-        retrieval_store,
+        retrieval_service,
         state_store,
         derived_store,
         processor_factory,
@@ -208,7 +209,7 @@ fn process_claimed_job(
     claimed_job: ClaimedJob,
     job_store: &dyn EnrichmentJobLifecycleStore,
     read_store: &dyn ArtifactReadStore,
-    retrieval_store: &dyn ArchiveRetrievalStore,
+    retrieval_service: &dyn ArchiveRetrievalServiceApi,
     state_store: &dyn EnrichmentStateStore,
     derived_store: &dyn DerivedMetadataWriteStore,
     processor_factory: &dyn ArtifactProcessorFactory,
@@ -230,7 +231,7 @@ fn process_claimed_job(
             worker_id,
             &claimed_job,
             job_store,
-            retrieval_store,
+            retrieval_service,
             state_store,
         ),
         crate::storage::JobType::ArtifactReconcile => process_reconcile_job(
@@ -797,7 +798,7 @@ fn process_retrieve_context_job(
     worker_id: &str,
     claimed_job: &ClaimedJob,
     job_store: &dyn EnrichmentJobLifecycleStore,
-    retrieval_store: &dyn ArchiveRetrievalStore,
+    retrieval_service: &dyn ArchiveRetrievalServiceApi,
     state_store: &dyn EnrichmentStateStore,
 ) -> std::result::Result<(), String> {
     let payload =
@@ -834,7 +835,7 @@ fn process_retrieve_context_job(
             )
         })?;
 
-    let results = retrieval_store
+    let results = retrieval_service
         .retrieve_for_intents(
             &claimed_job.artifact_id,
             &extraction_result.retrieval_intents,
@@ -1967,7 +1968,7 @@ pub fn start_enrichment_workers(
     config: &crate::config::HttpConfig,
     job_store: Arc<dyn EnrichmentJobLifecycleStore>,
     read_store: Arc<dyn ArtifactReadStore>,
-    retrieval_store: Arc<dyn ArchiveRetrievalStore>,
+    retrieval_service: Arc<dyn ArchiveRetrievalServiceApi>,
     state_store: Arc<dyn EnrichmentStateStore>,
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     shutdown: ShutdownToken,
@@ -1976,7 +1977,7 @@ pub fn start_enrichment_workers(
         config,
         job_store,
         read_store,
-        retrieval_store,
+        retrieval_service,
         state_store,
         derived_store,
         shutdown,
@@ -1989,7 +1990,7 @@ pub fn start_enrichment_workers_with_factory(
     config: &crate::config::HttpConfig,
     job_store: Arc<dyn EnrichmentJobLifecycleStore>,
     read_store: Arc<dyn ArtifactReadStore>,
-    retrieval_store: Arc<dyn ArchiveRetrievalStore>,
+    retrieval_service: Arc<dyn ArchiveRetrievalServiceApi>,
     state_store: Arc<dyn EnrichmentStateStore>,
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     shutdown: ShutdownToken,
@@ -2003,7 +2004,7 @@ pub fn start_enrichment_workers_with_factory(
             let worker_id = format_worker_id(pid, worker_index);
             let job_store = Arc::clone(&job_store);
             let read_store = Arc::clone(&read_store);
-            let retrieval_store = Arc::clone(&retrieval_store);
+            let retrieval_service = Arc::clone(&retrieval_service);
             let state_store = Arc::clone(&state_store);
             let derived_store = Arc::clone(&derived_store);
             let shutdown = shutdown.clone();
@@ -2025,7 +2026,7 @@ pub fn start_enrichment_workers_with_factory(
                         worker_id,
                         job_store,
                         read_store,
-                        retrieval_store,
+                        retrieval_service,
                         state_store,
                         derived_store,
                         processor_factory,
@@ -2062,7 +2063,7 @@ pub fn start_enrichment_pipeline(
     execution_mode: InferenceExecutionMode,
     job_store: Arc<dyn EnrichmentJobLifecycleStore>,
     read_store: Arc<dyn ArtifactReadStore>,
-    retrieval_store: Arc<dyn ArchiveRetrievalStore>,
+    retrieval_service: Arc<dyn ArchiveRetrievalServiceApi>,
     state_store: Arc<dyn EnrichmentStateStore>,
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     shutdown: ShutdownToken,
@@ -2118,7 +2119,7 @@ pub fn start_enrichment_pipeline(
                 config.extract_workers,
                 Arc::clone(&job_store),
                 Arc::clone(&read_store),
-                Arc::clone(&retrieval_store),
+                Arc::clone(&retrieval_service),
                 Arc::clone(&state_store),
                 Arc::clone(&derived_store),
                 Arc::clone(&processor_factory),
@@ -2134,7 +2135,7 @@ pub fn start_enrichment_pipeline(
                 config.reconcile_workers,
                 Arc::clone(&job_store),
                 Arc::clone(&read_store),
-                Arc::clone(&retrieval_store),
+                Arc::clone(&retrieval_service),
                 Arc::clone(&state_store),
                 Arc::clone(&derived_store),
                 Arc::clone(&processor_factory),
@@ -2150,7 +2151,7 @@ pub fn start_enrichment_pipeline(
     for i in 0..config.retrieve_context_workers {
         let worker_id = format!("enrichment:{}:retrieve:{}", pid, i);
         let job_store = Arc::clone(&job_store);
-        let retrieval_store = Arc::clone(&retrieval_store);
+        let retrieval_service = Arc::clone(&retrieval_service);
         let state_store = Arc::clone(&state_store);
         let shutdown = shutdown.clone();
 
@@ -2160,7 +2161,7 @@ pub fn start_enrichment_pipeline(
                 retrieve_context_worker_loop(
                     worker_id,
                     job_store.as_ref(),
-                    retrieval_store.as_ref(),
+                    retrieval_service.as_ref(),
                     state_store.as_ref(),
                     poll_interval,
                     shutdown,
@@ -2330,7 +2331,7 @@ fn spawn_direct_stage_workers(
     worker_count: usize,
     job_store: Arc<dyn EnrichmentJobLifecycleStore>,
     read_store: Arc<dyn ArtifactReadStore>,
-    retrieval_store: Arc<dyn ArchiveRetrievalStore>,
+    retrieval_service: Arc<dyn ArchiveRetrievalServiceApi>,
     state_store: Arc<dyn EnrichmentStateStore>,
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
@@ -2344,7 +2345,7 @@ fn spawn_direct_stage_workers(
             let worker_id = format!("enrichment:{}:{}:{}", pid, stage_name, i);
             let job_store = Arc::clone(&job_store);
             let read_store = Arc::clone(&read_store);
-            let retrieval_store = Arc::clone(&retrieval_store);
+            let retrieval_service = Arc::clone(&retrieval_service);
             let state_store = Arc::clone(&state_store);
             let derived_store = Arc::clone(&derived_store);
             let processor_factory = Arc::clone(&processor_factory);
@@ -2359,7 +2360,7 @@ fn spawn_direct_stage_workers(
                         job_type,
                         job_store.as_ref(),
                         read_store.as_ref(),
-                        retrieval_store.as_ref(),
+                        retrieval_service.as_ref(),
                         state_store.as_ref(),
                         derived_store.as_ref(),
                         processor_factory.as_ref(),
@@ -2384,7 +2385,7 @@ fn direct_stage_worker_loop(
     job_type: JobType,
     job_store: &dyn EnrichmentJobLifecycleStore,
     read_store: &dyn ArtifactReadStore,
-    retrieval_store: &dyn ArchiveRetrievalStore,
+    retrieval_service: &dyn ArchiveRetrievalServiceApi,
     state_store: &dyn EnrichmentStateStore,
     derived_store: &dyn DerivedMetadataWriteStore,
     processor_factory: &dyn ArtifactProcessorFactory,
@@ -2419,7 +2420,7 @@ fn direct_stage_worker_loop(
                     job,
                     job_store,
                     read_store,
-                    retrieval_store,
+                    retrieval_service,
                     state_store,
                     derived_store,
                     processor_factory,
@@ -2452,7 +2453,7 @@ fn direct_stage_worker_loop(
 fn retrieve_context_worker_loop(
     worker_id: String,
     job_store: &dyn EnrichmentJobLifecycleStore,
-    retrieval_store: &dyn ArchiveRetrievalStore,
+    retrieval_service: &dyn ArchiveRetrievalServiceApi,
     state_store: &dyn EnrichmentStateStore,
     poll_interval: Duration,
     shutdown: ShutdownToken,
@@ -2481,7 +2482,7 @@ fn retrieve_context_worker_loop(
                     &worker_id,
                     job,
                     job_store,
-                    retrieval_store,
+                    retrieval_service,
                     state_store,
                 ) {
                     error!(

@@ -7,7 +7,8 @@ use crate::storage::retrieval_read_store::{
     ArtifactDetailSegment, ArtifactDetailView, SearchCandidateKind,
 };
 use crate::storage::types::{
-    DerivedObjectType, EnrichmentStatus, EvidenceRole, ScopeType, SourceType, SupportStrength,
+    DerivedObjectType, EnrichmentStatus, EvidenceRole, RetrievalIntent, RetrievedContextItem,
+    ScopeType, SourceType, SupportStrength,
 };
 use crate::ParticipantRole;
 
@@ -119,6 +120,89 @@ pub fn search_candidates(
     }
 
     Ok(candidates)
+}
+
+pub fn retrieve_for_intents(
+    client: &mut Client,
+    connection_string: &str,
+    artifact_id: &str,
+    intents: &[RetrievalIntent],
+    limit_per_intent: usize,
+) -> StorageResult<Vec<RetrievedContextItem>> {
+    let limit = i64::try_from(limit_per_intent).map_err(|_| StorageError::InvalidDerivationWrite {
+        detail: format!(
+            "retrieval limit {limit_per_intent} exceeds Postgres BIGINT range"
+        ),
+    })?;
+    let mut items = Vec::new();
+
+    for intent in intents {
+        let query_text = intent.query_text.trim();
+        if query_text.is_empty() {
+            continue;
+        }
+
+        let derived_type_filter = match intent.intent_type.as_str() {
+            "memory_match" => "AND d.derived_object_type = 'memory'",
+            "relationship_lookup" => "AND d.derived_object_type = 'relationship'",
+            "topic_lookup" => "AND d.derived_object_type IN ('classification', 'summary')",
+            "contradiction_check" => "AND d.derived_object_type IN ('memory', 'relationship')",
+            "entity_lookup" => {
+                "AND d.derived_object_type IN ('memory', 'relationship', 'classification', 'summary')"
+            }
+            _ => "",
+        };
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT d.derived_object_type,
+                            d.derived_object_id,
+                            d.artifact_id,
+                            d.title,
+                            d.body_text,
+                            COALESCE(array_agg(e.segment_id ORDER BY e.evidence_rank)
+                                FILTER (WHERE e.segment_id IS NOT NULL), ARRAY[]::text[]) AS segment_ids,
+                            (to_tsvector('english', COALESCE(d.title, '')) @@ websearch_to_tsquery('english', $2)) AS title_hit,
+                            (to_tsvector('english', COALESCE(d.body_text, '')) @@ websearch_to_tsquery('english', $2)) AS body_hit,
+                            ts_rank_cd(d.search_tsv, websearch_to_tsquery('english', $2)) AS rank_score
+                     FROM oa_derived_object d
+                     LEFT JOIN oa_evidence_link e ON e.derived_object_id = d.derived_object_id
+                     WHERE d.artifact_id <> $1
+                       AND d.object_status = 'active'
+                       {derived_type_filter}
+                       AND d.search_tsv @@ websearch_to_tsquery('english', $2)
+                     GROUP BY d.derived_object_type, d.derived_object_id, d.artifact_id, d.title, d.body_text, d.search_tsv
+                     ORDER BY rank_score DESC, d.derived_object_id ASC
+                     LIMIT $3"
+                ),
+                &[&artifact_id, &query_text, &limit],
+            )
+            .map_err(|source| map_pg_err(connection_string, source))?;
+
+        for row in rows {
+            let mut matched_fields = Vec::new();
+            if row.get::<_, bool>(6) {
+                matched_fields.push("title".to_string());
+            }
+            if row.get::<_, bool>(7) {
+                matched_fields.push("body_text".to_string());
+            }
+
+            items.push(RetrievedContextItem {
+                item_type: row.get::<_, String>(0),
+                object_id: row.get(1),
+                artifact_id: row.get(2),
+                title: row.get(3),
+                body_text: row.get(4),
+                supporting_segment_ids: row.get::<_, Vec<String>>(5),
+                retrieval_reason: intent.question.clone(),
+                matched_fields,
+                rank_score: (row.get::<_, f32>(8) * 1000.0) as i32,
+            });
+        }
+    }
+
+    Ok(items)
 }
 
 pub fn load_artifact_detail(

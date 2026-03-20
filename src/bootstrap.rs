@@ -15,18 +15,15 @@ use crate::processor::{
 };
 use crate::storage::{
     ArchiveRetrievalStore, ArchiveSearchReadStore, ArtifactReadStore, EnrichmentJobLifecycleStore,
-    EnrichmentStateStore, ImportWriteStore, MvpRetrievalReadStore, OracleArchiveRetrievalStore,
-    OracleArtifactReadStore, OracleDerivedMetadataStore, OracleEnrichmentJobStore,
-    OracleImportWriteStore, PostgresArchiveRetrievalStore, PostgresArtifactReadStore,
-    PostgresDerivedMetadataStore, PostgresEnrichmentJobStore, PostgresImportWriteStore,
-    PostgresRetrievalReadStore,
+    EnrichmentStateStore, ImportWriteStore, OracleArchiveRetrievalStore, OracleArtifactReadStore,
+    OracleDerivedMetadataStore, OracleEnrichmentJobStore, OracleImportWriteStore,
+    PostgresArtifactReadStore, PostgresDerivedMetadataStore, PostgresEnrichmentJobStore,
+    PostgresImportWriteStore, PostgresRetrievalReadStore,
 };
 
 pub struct ServiceBundle {
     pub app: Arc<ArchiveApplication>,
     pub read_store: Arc<dyn ArtifactReadStore>,
-    pub retrieval_store: Arc<dyn ArchiveRetrievalStore>,
-    pub mvp_retrieval_read_store: Option<Arc<dyn MvpRetrievalReadStore>>,
     pub enrichment_store: Arc<dyn EnrichmentJobLifecycleStore>,
     pub state_store: Arc<dyn EnrichmentStateStore>,
     pub derived_store: Arc<dyn crate::storage::DerivedMetadataWriteStore>,
@@ -142,17 +139,14 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 Arc::new(PostgresImportWriteStore::new(pg_config.clone()));
             let read_store: Arc<dyn ArtifactReadStore + Send + Sync> =
                 Arc::new(PostgresArtifactReadStore::new(pg_config.clone()));
-            let retrieval_store: Arc<dyn ArchiveRetrievalStore> =
-                Arc::new(PostgresArchiveRetrievalStore::new(pg_config.clone()));
-            let mvp_retrieval_store_impl =
-                Arc::new(PostgresRetrievalReadStore::new(pg_config.clone()));
-            let mvp_retrieval_read_store: Arc<dyn MvpRetrievalReadStore> =
-                mvp_retrieval_store_impl.clone();
+            let retrieval_impl = Arc::new(PostgresRetrievalReadStore::new(pg_config.clone()));
+            let retrieval_store: Arc<dyn ArchiveRetrievalStore + Send + Sync> =
+                retrieval_impl.clone();
             let search_read_store: Arc<dyn ArchiveSearchReadStore + Send + Sync> =
-                mvp_retrieval_store_impl.clone();
+                retrieval_impl.clone();
             let artifact_detail_store: Arc<
                 dyn crate::storage::ArtifactDetailReadStore + Send + Sync,
-            > = mvp_retrieval_store_impl.clone();
+            > = retrieval_impl.clone();
             let primary_factory = build_processor_factory(&config.inference)?;
             let processor_factory: Arc<dyn ArtifactProcessorFactory> =
                 if let Some(reconcile_inference) = &config.reconcile_inference {
@@ -165,10 +159,11 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 };
             let context_pack_store: Arc<
                 dyn crate::storage::ArtifactContextPackReadStore + Send + Sync,
-            > = mvp_retrieval_store_impl.clone();
+            > = retrieval_impl.clone();
             let app = Arc::new(ArchiveApplication::new(
                 Arc::clone(&import_store),
                 Arc::clone(&read_store),
+                retrieval_store,
                 Some(search_read_store),
                 Some(artifact_detail_store),
                 Some(context_pack_store),
@@ -177,8 +172,6 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
             Ok(ServiceBundle {
                 app,
                 read_store,
-                retrieval_store,
-                mvp_retrieval_read_store: Some(mvp_retrieval_read_store),
                 enrichment_store: Arc::new(PostgresEnrichmentJobStore::new(pg_config.clone())),
                 state_store: Arc::new(PostgresDerivedMetadataStore::new(pg_config.clone())),
                 derived_store: Arc::new(PostgresDerivedMetadataStore::new(pg_config.clone())),
@@ -205,6 +198,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
             let app = Arc::new(ArchiveApplication::new(
                 Arc::clone(&import_store),
                 Arc::clone(&read_store),
+                retrieval_store,
                 None,
                 None,
                 None,
@@ -213,8 +207,6 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
             Ok(ServiceBundle {
                 app,
                 read_store,
-                retrieval_store,
-                mvp_retrieval_read_store: None,
                 enrichment_store: Arc::new(OracleEnrichmentJobStore::new(db_config.clone())),
                 state_store: Arc::new(OracleDerivedMetadataStore::new(db_config.clone())),
                 derived_store: Arc::new(OracleDerivedMetadataStore::new(db_config.clone())),

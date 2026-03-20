@@ -168,8 +168,9 @@ mod tests {
     use crate::app::ArchiveApplication;
     use crate::object_store::{NewObject, ObjectStore, PutObjectResult, StoredObject};
     use crate::storage::{
-        ArtifactIngestResult, ArtifactListItem, ArtifactReadStore, EnrichmentStatus, ImportStatus,
-        ImportWriteResult, ImportWriteStore, ImportedArtifact, WriteImportSet,
+        ArchiveRetrievalStore, ArtifactIngestResult, ArtifactListItem, ArtifactReadStore,
+        EnrichmentStatus, ImportStatus, ImportWriteResult, ImportWriteStore, ImportedArtifact,
+        RetrievedContextItem, RetrievalIntent, WriteImportSet,
     };
     use std::io::Read;
     use std::sync::Arc;
@@ -213,6 +214,17 @@ mod tests {
         ) -> crate::error::StorageResult<Option<crate::storage::LoadedArtifactForEnrichment>>
         {
             Ok(None)
+        }
+    }
+
+    impl ArchiveRetrievalStore for MockStore {
+        fn retrieve_for_intents(
+            &self,
+            _artifact_id: &str,
+            _intents: &[RetrievalIntent],
+            _limit_per_intent: usize,
+        ) -> crate::error::StorageResult<Vec<RetrievedContextItem>> {
+            Ok(Vec::new())
         }
     }
 
@@ -408,14 +420,17 @@ mod tests {
         );
     }
 
-    fn test_app(store: MockStore) -> Arc<ArchiveApplication> {
+fn test_app(store: MockStore) -> Arc<ArchiveApplication> {
         let store = Arc::new(store);
         let import_store: Arc<dyn ImportWriteStore + Send + Sync> = store.clone();
         let read_store: Arc<dyn ArtifactReadStore + Send + Sync> = store.clone();
+        let retrieval_store: Arc<dyn crate::storage::ArchiveRetrievalStore + Send + Sync> =
+            store.clone();
         let object_store: Arc<dyn ObjectStore + Send + Sync> = store;
         Arc::new(ArchiveApplication::new(
             import_store,
             read_store,
+            retrieval_store,
             None,
             None,
             None,

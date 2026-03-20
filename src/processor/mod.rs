@@ -585,8 +585,7 @@ impl HostedReconciliationProcessor {
                 source,
                 body_preview: preview(&inference_result.output_text),
             })?;
-        parsed.validate_against(input)?;
-        Ok(parsed.into_outputs())
+        parsed.into_validated_outputs(input)
     }
 }
 
@@ -1509,8 +1508,7 @@ impl ReconciliationBatchSubmitter for OpenAiReconciliationSubmitter {
                         source,
                         body_preview: preview(&result.output_text),
                     })?;
-                parsed.validate_against(input)?;
-                Ok(parsed.into_outputs())
+                parsed.into_validated_outputs(input)
             },
         )
     }
@@ -2609,6 +2607,26 @@ fn confidence_rank(label: &str) -> i32 {
 }
 
 impl ModelReconciliationOutput {
+    fn normalize_ungrounded_existing_decisions(mut self) -> Self {
+        for decision in &mut self.decisions {
+            if requires_matched_object_id(decision.decision_kind)
+                && decision
+                    .matched_object_id
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .is_empty()
+            {
+                // Reconciliation is only allowed to merge when it can point at a
+                // concrete existing object. Otherwise preserve the extracted
+                // candidate by treating it as create_new.
+                decision.decision_kind = ReconciliationDecisionKind::CreateNew;
+                decision.matched_object_id = None;
+            }
+        }
+        self
+    }
+
     fn validate_against(&self, input: &ReconciliationProcessorInput) -> Result<(), ProcessorError> {
         let valid_evidence_ids: HashSet<&str> = input
             .summary
@@ -2656,6 +2674,21 @@ impl ModelReconciliationOutput {
                 &format!("decisions[{index}].rationale"),
                 &decision.rationale,
             )?;
+            if requires_matched_object_id(decision.decision_kind)
+                && decision
+                    .matched_object_id
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .is_empty()
+            {
+                return Err(ProcessorError::InvalidModelOutput {
+                    detail: format!(
+                        "decisions[{index}].matched_object_id is required for {:?}",
+                        decision.decision_kind
+                    ),
+                });
+            }
             if !valid_targets.contains(&decision.target_key) {
                 return Err(ProcessorError::InvalidModelOutput {
                     detail: format!(
@@ -2689,6 +2722,15 @@ impl ModelReconciliationOutput {
         Ok(())
     }
 
+    fn into_validated_outputs(
+        self,
+        input: &ReconciliationProcessorInput,
+    ) -> Result<Vec<ReconciliationDecisionOutput>, ProcessorError> {
+        let normalized = self.normalize_ungrounded_existing_decisions();
+        normalized.validate_against(input)?;
+        Ok(normalized.into_outputs())
+    }
+
     fn into_outputs(self) -> Vec<ReconciliationDecisionOutput> {
         self.decisions
             .into_iter()
@@ -2702,6 +2744,16 @@ impl ModelReconciliationOutput {
             })
             .collect()
     }
+}
+
+fn requires_matched_object_id(kind: ReconciliationDecisionKind) -> bool {
+    matches!(
+        kind,
+        ReconciliationDecisionKind::AttachToExisting
+            | ReconciliationDecisionKind::StrengthenExisting
+            | ReconciliationDecisionKind::SupersedeExisting
+            | ReconciliationDecisionKind::ContradictsExisting
+    )
 }
 
 fn validate_input(input: &ArtifactProcessorInput) -> Result<(), ProcessorError> {
@@ -2958,7 +3010,10 @@ pub(crate) fn build_reconciliation_prompt(
          \n\
          Output one decision per candidate memory or relationship.\n\
          target_key must match a candidate target_key exactly.\n\
-         target_kind must be memory or relationship.\n",
+         target_kind must be memory or relationship.\n\
+         If decision_kind is attach_to_existing, strengthen_existing, supersede_existing, or contradicts_existing,\n\
+         matched_object_id must be copied exactly from a retrieved object.\n\
+         If you cannot name an exact matched_object_id, choose create_new instead.\n",
         artifact_id = input.artifact_id,
         source_type = input.source_type.as_str(),
         summary = input.summary.body_text,
@@ -3321,7 +3376,7 @@ pub(crate) const GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenA
 
 pub(crate) const GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Grok. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, ongoing state, and personal history that could be independently retrieved later. A rich conversation should produce many memories — not a summary of a few highlights.\n5. Generic how-to advice, recipes, troubleshooting steps, and one-off utility answers should produce zero memories unless they reveal a stable user preference, durable personal fact, or ongoing state.\n6. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, architecture decision, implementation plan, or durable operating model.\n7. Named projects, workflows, architecture choices, health protocols, training programs, and repeated operating preferences should be preserved as memories when the artifact provides explicit evidence.\n8. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact or bundles multiple unrelated subtopics together.\n9. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n10. When uncertain on a low-signal artifact, keep the information in the summary instead of emitting memories.\n11. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n12. Do not guess prior continuity; emit retrieval_intents instead.\n13. Emit relationships only when the artifact explicitly supports the link.\n14. relationship confidence_label must be low, medium, or high.\n15. memory_scope is always artifact and memory_scope_value is the artifact_id.\n16. Low-signal artifacts should usually have low importance and no classifications.\n17. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n18. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
-pub(crate) const RECONCILIATION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict reconciliation engine. Use only the provided extraction candidates, retrieval results, and source evidence. Return ONLY valid JSON.\n\nRules:\n1. Prefer no merge over a weak merge.\n2. Choose create_new when the archive evidence is insufficient.\n3. Use attach_to_existing or strengthen_existing only when the retrieved object clearly matches the candidate.\n4. Use supersede_existing only when the new artifact clearly updates or replaces prior state.\n5. Use contradicts_existing only when the artifact clearly conflicts with retrieved prior state.\n6. Never merge identities, projects, or relationships on vague topical overlap.\n7. Every decision must cite real evidence_segment_ids from the extraction candidates.\n8. Output valid JSON only.";
+pub(crate) const RECONCILIATION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict reconciliation engine. Use only the provided extraction candidates, retrieval results, and source evidence. Return ONLY valid JSON.\n\nRules:\n1. Prefer no merge over a weak merge.\n2. Choose create_new when the archive evidence is insufficient.\n3. Use attach_to_existing or strengthen_existing only when the retrieved object clearly matches the candidate.\n4. Use supersede_existing only when the new artifact clearly updates or replaces prior state.\n5. Use contradicts_existing only when the artifact clearly conflicts with retrieved prior state.\n6. Never merge identities, projects, or relationships on vague topical overlap.\n7. Every decision must cite real evidence_segment_ids from the extraction candidates.\n8. Any decision that uses an existing-object action must include the exact matched_object_id from retrieval results.\n9. If you cannot name an exact matched_object_id, choose create_new.\n10. Output valid JSON only.";
 
 #[derive(Debug, Error)]
 pub enum ProcessorError {
@@ -3702,5 +3757,87 @@ mod tests {
         assert!(prompt.contains("evidence_ref_1"));
         assert!(prompt.contains("evidence_ref_2"));
         assert!(!prompt.contains("for example s1, s2"));
+    }
+
+    fn sample_reconciliation_input() -> ReconciliationProcessorInput {
+        ReconciliationProcessorInput {
+            artifact_id: "artifact-1".to_string(),
+            source_type: SourceType::ChatGptExport,
+            summary: SummaryOutput {
+                title: Some("Architecture direction".to_string()),
+                body_text: "The user wants the worker to avoid silent fallback."
+                    .to_string(),
+                evidence_segment_ids: vec!["seg-1".to_string()],
+            },
+            memories: vec![MemoryOutput {
+                candidate_key: "memory_1".to_string(),
+                title: Some("Avoid silent fallback".to_string()),
+                body_text: "The worker should not silently fall back.".to_string(),
+                memory_type: "project_fact".to_string(),
+                memory_scope: ScopeType::Artifact,
+                memory_scope_value: "artifact-1".to_string(),
+                evidence_segment_ids: vec!["seg-1".to_string()],
+            }],
+            relationships: Vec::new(),
+            retrieval_results_json: serde_json::json!({
+                "objects": [
+                    {
+                        "object_id": "obj-1",
+                        "title": "Silent fallback rule",
+                        "body_text": "The worker should not silently fall back."
+                    }
+                ]
+            })
+            .to_string(),
+        }
+    }
+
+    #[test]
+    fn reconciliation_normalizes_ungrounded_existing_decision_to_create_new() {
+        let input = sample_reconciliation_input();
+        let output = ModelReconciliationOutput {
+            decisions: vec![ModelReconciliationDecision {
+                decision_kind: ReconciliationDecisionKind::StrengthenExisting,
+                target_kind: "memory".to_string(),
+                target_key: "memory_1".to_string(),
+                matched_object_id: None,
+                rationale: "This looks like the same memory.".to_string(),
+                evidence_segment_ids: vec!["seg-1".to_string()],
+            }],
+        };
+
+        let decisions = output
+            .into_validated_outputs(&input)
+            .expect("normalization should preserve the candidate");
+
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].decision_kind, ReconciliationDecisionKind::CreateNew);
+        assert_eq!(decisions[0].matched_object_id, None);
+    }
+
+    #[test]
+    fn reconciliation_requires_id_for_existing_object_decisions_after_normalization() {
+        let input = sample_reconciliation_input();
+        let output = ModelReconciliationOutput {
+            decisions: vec![ModelReconciliationDecision {
+                decision_kind: ReconciliationDecisionKind::StrengthenExisting,
+                target_kind: "memory".to_string(),
+                target_key: "memory_1".to_string(),
+                matched_object_id: Some("obj-1".to_string()),
+                rationale: "This clearly matches the prior memory.".to_string(),
+                evidence_segment_ids: vec!["seg-1".to_string()],
+            }],
+        };
+
+        let decisions = output
+            .into_validated_outputs(&input)
+            .expect("grounded existing-object decision should remain valid");
+
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decisions[0].decision_kind,
+            ReconciliationDecisionKind::StrengthenExisting
+        );
+        assert_eq!(decisions[0].matched_object_id.as_deref(), Some("obj-1"));
     }
 }

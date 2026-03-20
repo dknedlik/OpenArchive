@@ -259,96 +259,31 @@ impl ArchiveRetrievalStore for PostgresArchiveRetrievalStore {
         limit_per_intent: usize,
     ) -> StorageResult<Vec<RetrievedContextItem>> {
         let mut client = postgres_db::connect(&self.config)?;
-        let mut items = Vec::new();
-        for intent in intents {
-            let like_pattern = format!("%{}%", intent.query_text.to_ascii_lowercase());
-            let derived_type_filter = match intent.intent_type.as_str() {
-                "memory_match" => "AND d.derived_object_type = 'memory'",
-                "relationship_lookup" => "AND d.derived_object_type = 'relationship'",
-                "topic_lookup" => "AND d.derived_object_type IN ('classification', 'summary')",
-                "contradiction_check" => "AND d.derived_object_type IN ('memory', 'relationship')",
-                "entity_lookup" => "AND d.derived_object_type IN ('memory', 'relationship', 'classification', 'summary')",
-                _ => "",
-            };
-            let sql = format!(
-                "SELECT d.derived_object_type,
-                        d.derived_object_id,
-                        d.artifact_id,
-                        d.title,
-                        d.body_text,
-                        COALESCE(array_agg(e.segment_id ORDER BY e.evidence_rank)
-                            FILTER (WHERE e.segment_id IS NOT NULL), ARRAY[]::text[]) AS segment_ids
-                 FROM oa_derived_object d
-                 LEFT JOIN oa_evidence_link e ON e.derived_object_id = d.derived_object_id
-                 WHERE d.artifact_id <> $1
-                   AND d.object_status = 'active'
-                   {derived_type_filter}
-                   AND (
-                        lower(COALESCE(d.title, '')) LIKE $2
-                        OR lower(COALESCE(d.body_text, '')) LIKE $2
-                        OR lower(COALESCE(d.object_json::text, '')) LIKE $2
-                   )
-                 GROUP BY d.derived_object_type, d.derived_object_id, d.artifact_id, d.title, d.body_text
-                 ORDER BY
-                   CASE
-                     WHEN lower(COALESCE(d.title, '')) LIKE $2 THEN 4
-                     WHEN lower(COALESCE(d.body_text, '')) LIKE $2 THEN 3
-                     WHEN lower(COALESCE(d.object_json::text, '')) LIKE $2 THEN 2
-                     ELSE 1
-                   END DESC,
-                   d.derived_object_id
-                 LIMIT $3"
-            );
-            let rows = client
-                .query(
-                    &sql,
-                    &[&artifact_id, &like_pattern, &(limit_per_intent as i64)],
-                )
-                .map_err(|source| {
-                    crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
-                        connection_string: self.config.connection_string.clone(),
-                        source,
-                    })
-                })?;
-            for row in rows {
-                let matched_title = row.get::<_, Option<String>>(3);
-                let matched_body = row.get::<_, Option<String>>(4);
-                let mut matched_fields = Vec::new();
-                if matched_title
-                    .as_deref()
-                    .map(|title| {
-                        title
-                            .to_ascii_lowercase()
-                            .contains(&intent.query_text.to_ascii_lowercase())
-                    })
-                    .unwrap_or(false)
-                {
-                    matched_fields.push("title".to_string());
-                }
-                if matched_body
-                    .as_deref()
-                    .map(|body| {
-                        body.to_ascii_lowercase()
-                            .contains(&intent.query_text.to_ascii_lowercase())
-                    })
-                    .unwrap_or(false)
-                {
-                    matched_fields.push("body_text".to_string());
-                }
-                items.push(RetrievedContextItem {
-                    item_type: row.get::<_, String>(0),
-                    object_id: row.get(1),
-                    artifact_id: row.get(2),
-                    title: matched_title,
-                    body_text: matched_body,
-                    supporting_segment_ids: row.get::<_, Vec<String>>(5),
-                    retrieval_reason: intent.question.clone(),
-                    matched_fields,
-                    rank_score: 100 - (items.len() as i32),
-                });
-            }
-        }
-        Ok(items)
+        retrieval::retrieve_for_intents(
+            &mut client,
+            &self.config.connection_string,
+            artifact_id,
+            intents,
+            limit_per_intent,
+        )
+    }
+}
+
+impl ArchiveRetrievalStore for PostgresRetrievalReadStore {
+    fn retrieve_for_intents(
+        &self,
+        artifact_id: &str,
+        intents: &[RetrievalIntent],
+        limit_per_intent: usize,
+    ) -> StorageResult<Vec<RetrievedContextItem>> {
+        let mut client = postgres_db::connect(&self.config)?;
+        retrieval::retrieve_for_intents(
+            &mut client,
+            &self.config.connection_string,
+            artifact_id,
+            intents,
+            limit_per_intent,
+        )
     }
 }
 

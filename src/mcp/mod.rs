@@ -340,7 +340,9 @@ mod tests {
     use super::*;
     use crate::app::artifact_detail::ArtifactDetailService;
     use crate::app::context_pack::ContextPackService;
+    use crate::app::retrieval::ArchiveRetrievalService;
     use crate::app::search::ArchiveSearchService;
+    use crate::storage::{ArchiveRetrievalStore, RetrievalIntent, RetrievedContextItem};
 
     fn test_app() -> ArchiveApplication {
         let search = Some(ArchiveSearchService::new(Arc::new(MockSearchReadStore)));
@@ -356,6 +358,7 @@ mod tests {
                 Arc::new(MockImportWriteStore),
                 Arc::new(MockObjectStore),
             ),
+            retrieval: Arc::new(ArchiveRetrievalService::new(Arc::new(MockRetrievalStore))),
             search,
             artifact_detail,
             context_pack,
@@ -444,6 +447,18 @@ mod tests {
                 snippet: "title".to_string(),
                 score_hint: 300,
             }])
+        }
+    }
+
+    struct MockRetrievalStore;
+    impl ArchiveRetrievalStore for MockRetrievalStore {
+        fn retrieve_for_intents(
+            &self,
+            _artifact_id: &str,
+            _intents: &[RetrievalIntent],
+            _limit_per_intent: usize,
+        ) -> crate::error::StorageResult<Vec<RetrievedContextItem>> {
+            Ok(Vec::new())
         }
     }
 

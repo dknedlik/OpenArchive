@@ -305,6 +305,7 @@ pub fn seed_postgres_stub_derivations(
                             title: Some("Memory".to_string()),
                             body_text: "Memory for retrieval testing".to_string(),
                             object_json: MemoryObjectJson {
+                                candidate_key: "seed-memory".to_string(),
                                 memory_type: "fact".to_string(),
                                 memory_scope: ScopeType::Artifact,
                                 memory_scope_value: artifact_id.to_string(),
@@ -502,6 +503,7 @@ fn fixture_derivation_attempt(
                         title: Some("closing_pattern".to_string()),
                         body_text: "The user closes the conversation politely.".to_string(),
                         object_json: MemoryObjectJson {
+                            candidate_key: "closing-pattern".to_string(),
                             memory_type: "preference".to_string(),
                             memory_scope: ScopeType::Segment,
                             memory_scope_value: fixture.segment_ids[2].clone(),

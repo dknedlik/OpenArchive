@@ -1,3 +1,4 @@
+use open_archive::app::retrieval::ArchiveRetrievalServiceApi;
 use open_archive::config::HttpConfig;
 use open_archive::enrichment_worker::{
     format_worker_id, start_enrichment_workers, start_enrichment_workers_with_factory,
@@ -34,7 +35,7 @@ fn test_disabled_workers_start() {
     let config = test_config(0);
     let job_store = Arc::new(EmptyQueueMockStore::new());
     let read_store = Arc::new(FixedReadStore::default());
-    let retrieval_store = Arc::new(MockRetrievalStore);
+    let retrieval_store: Arc<dyn ArchiveRetrievalServiceApi> = Arc::new(MockRetrievalStore);
     let state_store = Arc::new(MockStateStore::default());
     let derived_store = Arc::new(MockDerivedStore::default());
     let shutdown = ShutdownToken::new();
@@ -59,7 +60,7 @@ fn test_enabled_workers_start_and_shutdown() {
     let config = test_config(2);
     let job_store = Arc::new(EmptyQueueMockStore::new());
     let read_store = Arc::new(FixedReadStore::default());
-    let retrieval_store = Arc::new(MockRetrievalStore);
+    let retrieval_store: Arc<dyn ArchiveRetrievalServiceApi> = Arc::new(MockRetrievalStore);
     let state_store = Arc::new(MockStateStore::default());
     let derived_store = Arc::new(MockDerivedStore::default());
     let shutdown = ShutdownToken::new();
@@ -93,7 +94,7 @@ fn test_worker_persists_stub_outputs_and_completes_job() {
     let shutdown = ShutdownToken::new();
     let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
     let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
-    let retrieval_store_trait: Arc<dyn ArchiveRetrievalStore> = retrieval_store;
+    let retrieval_store_trait: Arc<dyn ArchiveRetrievalServiceApi> = retrieval_store;
     let state_store_trait: Arc<dyn EnrichmentStateStore> = state_store;
     let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store.clone();
 
@@ -140,7 +141,7 @@ fn test_worker_fails_job_when_factory_rejects_claimed_tier() {
     let shutdown = ShutdownToken::new();
     let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
     let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
-    let retrieval_store_trait: Arc<dyn ArchiveRetrievalStore> = retrieval_store;
+    let retrieval_store_trait: Arc<dyn ArchiveRetrievalServiceApi> = retrieval_store;
     let state_store_trait: Arc<dyn EnrichmentStateStore> = state_store;
     let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store;
 
@@ -177,7 +178,7 @@ fn test_worker_marks_job_retryable_for_transient_inference_failures() {
     let shutdown = ShutdownToken::new();
     let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
     let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
-    let retrieval_store_trait: Arc<dyn ArchiveRetrievalStore> = retrieval_store;
+    let retrieval_store_trait: Arc<dyn ArchiveRetrievalServiceApi> = retrieval_store;
     let state_store_trait: Arc<dyn EnrichmentStateStore> = state_store;
     let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store;
 
@@ -222,7 +223,7 @@ fn test_worker_fails_job_when_artifact_cannot_be_loaded() {
     let shutdown = ShutdownToken::new();
     let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
     let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
-    let retrieval_store_trait: Arc<dyn ArchiveRetrievalStore> = retrieval_store;
+    let retrieval_store_trait: Arc<dyn ArchiveRetrievalServiceApi> = retrieval_store;
     let state_store_trait: Arc<dyn EnrichmentStateStore> = state_store;
     let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store.clone();
 
@@ -275,7 +276,7 @@ fn test_worker_fails_job_when_payload_source_type_is_invalid() {
     let shutdown = ShutdownToken::new();
     let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
     let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
-    let retrieval_store_trait: Arc<dyn ArchiveRetrievalStore> = retrieval_store;
+    let retrieval_store_trait: Arc<dyn ArchiveRetrievalServiceApi> = retrieval_store;
     let state_store_trait: Arc<dyn EnrichmentStateStore> = state_store;
     let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store.clone();
 
@@ -711,6 +712,18 @@ impl ArchiveRetrievalStore for MockRetrievalStore {
         _limit_per_intent: usize,
     ) -> StorageResult<Vec<RetrievedContextItem>> {
         Ok(Vec::new())
+    }
+}
+
+impl ArchiveRetrievalServiceApi for MockRetrievalStore {
+    fn retrieve_for_intents(
+        &self,
+        artifact_id: &str,
+        intents: &[RetrievalIntent],
+        limit_per_intent: usize,
+    ) -> open_archive::Result<Vec<RetrievedContextItem>> {
+        ArchiveRetrievalStore::retrieve_for_intents(self, artifact_id, intents, limit_per_intent)
+            .map_err(open_archive::OpenArchiveError::from)
     }
 }
 

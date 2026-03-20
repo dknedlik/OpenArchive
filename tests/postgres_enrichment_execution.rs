@@ -1,14 +1,15 @@
 mod support;
 
+use open_archive::app::retrieval::{ArchiveRetrievalService, ArchiveRetrievalServiceApi};
 use open_archive::config::{HttpConfig, PostgresConfig};
 use open_archive::enrichment_worker::start_enrichment_workers;
 use open_archive::migrations;
 use open_archive::shutdown::ShutdownToken;
 use open_archive::storage::{
-    ArchiveRetrievalStore, ArtifactReadStore, DerivedMetadataWriteStore,
-    EnrichmentJobLifecycleStore, EnrichmentStateStore, ImportWriteStore,
-    PostgresArchiveRetrievalStore, PostgresArtifactReadStore, PostgresDerivedMetadataStore,
-    PostgresEnrichmentJobStore, PostgresImportWriteStore,
+    ArtifactReadStore, DerivedMetadataWriteStore, EnrichmentJobLifecycleStore,
+    EnrichmentStateStore, ImportWriteStore, PostgresArtifactReadStore,
+    PostgresDerivedMetadataStore, PostgresEnrichmentJobStore, PostgresImportWriteStore,
+    PostgresRetrievalReadStore,
 };
 use postgres::NoTls;
 use std::sync::Arc;
@@ -93,8 +94,10 @@ impl PostgresHarness {
         Arc::new(PostgresDerivedMetadataStore::new(self.0.clone()))
     }
 
-    fn retrieval_store(&self) -> Arc<dyn ArchiveRetrievalStore> {
-        Arc::new(PostgresArchiveRetrievalStore::new(self.0.clone()))
+    fn retrieval_store(&self) -> Arc<dyn ArchiveRetrievalServiceApi> {
+        Arc::new(ArchiveRetrievalService::new(Arc::new(
+            PostgresRetrievalReadStore::new(self.0.clone()),
+        )))
     }
 
     fn state_store(&self) -> Arc<dyn EnrichmentStateStore> {

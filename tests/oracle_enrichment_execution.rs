@@ -1,14 +1,15 @@
 mod support;
 
+use open_archive::app::retrieval::{ArchiveRetrievalService, ArchiveRetrievalServiceApi};
 use open_archive::config::{HttpConfig, OracleConfig};
 use open_archive::enrichment_worker::start_enrichment_workers;
 use open_archive::migrations;
 use open_archive::shutdown::ShutdownToken;
 use open_archive::storage::{
-    ArchiveRetrievalStore, ArtifactReadStore, DerivedMetadataWriteStore,
-    EnrichmentJobLifecycleStore, EnrichmentStateStore, ImportWriteStore,
-    OracleArchiveRetrievalStore, OracleArtifactReadStore, OracleDerivedMetadataStore,
-    OracleEnrichmentJobStore, OracleImportWriteStore,
+    ArtifactReadStore, DerivedMetadataWriteStore, EnrichmentJobLifecycleStore,
+    EnrichmentStateStore, ImportWriteStore, OracleArchiveRetrievalStore,
+    OracleArtifactReadStore, OracleDerivedMetadataStore, OracleEnrichmentJobStore,
+    OracleImportWriteStore,
 };
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -67,8 +68,10 @@ impl OracleHarness {
         Arc::new(OracleDerivedMetadataStore::new(self.0.clone()))
     }
 
-    fn retrieval_store(&self) -> Arc<dyn ArchiveRetrievalStore> {
-        Arc::new(OracleArchiveRetrievalStore::new(self.0.clone()))
+    fn retrieval_store(&self) -> Arc<dyn ArchiveRetrievalServiceApi> {
+        Arc::new(ArchiveRetrievalService::new(Arc::new(
+            OracleArchiveRetrievalStore::new(self.0.clone()),
+        )))
     }
 
     fn state_store(&self) -> Arc<dyn EnrichmentStateStore> {
