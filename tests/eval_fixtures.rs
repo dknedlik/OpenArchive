@@ -75,6 +75,7 @@ struct EvalMemory {
 fn evaluation_fixtures_good_outputs_meet_expectations() {
     for case_name in [
         "architecture_direction",
+        "durable_health_history",
         "worker_hardening",
         "low_signal_chat",
     ] {
@@ -206,7 +207,7 @@ fn evaluate_fixture(case_name: &str, fixture: &EvalFixture, output: &EvalOutput)
         assert!(
             matches!(
                 memory.memory_type.as_str(),
-                "preference" | "project_fact" | "identity_fact" | "ongoing_task" | "reference"
+                "personal_fact" | "preference" | "project_fact" | "ongoing_state" | "reference"
             ),
             "{case_name}: memories[{index}] has invalid type {}",
             memory.memory_type

@@ -4,6 +4,12 @@ use crate::storage::types::{
 };
 use crate::ParticipantRole;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchFilters {
+    pub object_type: Option<DerivedObjectType>,
+    pub source_type: Option<SourceType>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SearchCandidateKind {
     ArtifactTitle,
@@ -25,6 +31,7 @@ pub trait ArchiveSearchReadStore: Send + Sync {
         &self,
         query_text: &str,
         limit: usize,
+        filters: &SearchFilters,
     ) -> StorageResult<Vec<ArchiveSearchCandidate>>;
 }
 
@@ -73,6 +80,7 @@ pub struct ArtifactContextDerivedObject {
     pub body_text: Option<String>,
     pub scope_id: String,
     pub scope_type: ScopeType,
+    pub candidate_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +108,33 @@ pub trait ArtifactContextPackReadStore: Send + Sync {
     ) -> StorageResult<Option<ArtifactContextPackMaterial>>;
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ObjectSearchFilters {
+    pub query: Option<String>,
+    pub object_type: Option<DerivedObjectType>,
+    pub candidate_key: Option<String>,
+    pub artifact_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DerivedObjectSearchResult {
+    pub derived_object_id: String,
+    pub artifact_id: String,
+    pub derived_object_type: DerivedObjectType,
+    pub title: Option<String>,
+    pub body_text: Option<String>,
+    pub candidate_key: Option<String>,
+    pub confidence_score: Option<f64>,
+}
+
+pub trait DerivedObjectSearchStore: Send + Sync {
+    fn search_objects(
+        &self,
+        filters: &ObjectSearchFilters,
+        limit: usize,
+    ) -> StorageResult<Vec<DerivedObjectSearchResult>>;
+}
+
 pub trait MvpRetrievalReadStore:
     ArchiveSearchReadStore + ArtifactDetailReadStore + ArtifactContextPackReadStore
 {
@@ -108,4 +143,26 @@ pub trait MvpRetrievalReadStore:
 impl<T> MvpRetrievalReadStore for T where
     T: ArchiveSearchReadStore + ArtifactDetailReadStore + ArtifactContextPackReadStore
 {
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelatedDerivedObject {
+    pub derived_object_id: String,
+    pub artifact_id: String,
+    pub derived_object_type: DerivedObjectType,
+    pub title: Option<String>,
+    pub body_text: Option<String>,
+    pub candidate_key: Option<String>,
+    pub confidence_score: Option<f64>,
+}
+
+pub trait CrossArtifactReadStore: Send + Sync {
+    /// Given a set of candidate_keys from one artifact, find active derived objects
+    /// from OTHER artifacts that share any of those keys.
+    fn find_related_by_candidate_keys(
+        &self,
+        artifact_id: &str,
+        candidate_keys: &[String],
+        limit: usize,
+    ) -> StorageResult<Vec<RelatedDerivedObject>>;
 }

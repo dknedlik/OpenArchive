@@ -377,7 +377,7 @@ fn score_case(
     for memory in &output.memories {
         if !matches!(
             memory.memory_type.as_str(),
-            "preference" | "project_fact" | "identity_fact" | "ongoing_task" | "reference"
+            "personal_fact" | "preference" | "project_fact" | "ongoing_state" | "reference"
         ) {
             score -= 10;
             notes.push(format!("invalid memory type {}", memory.memory_type));

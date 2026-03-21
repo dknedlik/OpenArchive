@@ -82,8 +82,13 @@ pub fn make_test_import_fixture_with_max_attempts(
     let segment_ids: Vec<String> = (0..3).map(|i| format!("seg-{suffix}-{i}")).collect();
     let conv_hash = sha256_hex(&format!("conv-hash-{suffix}"));
 
-    let enrichment_payload =
-        ArtifactExtractPayload::new_v1(&artifact_id, &import_id, SourceType::ChatGptExport, Vec::new(), Vec::new());
+    let enrichment_payload = ArtifactExtractPayload::new_v1(
+        &artifact_id,
+        &import_id,
+        SourceType::ChatGptExport,
+        Vec::new(),
+        Vec::new(),
+    );
 
     let write_set = WriteImportSet {
         payload_object: NewImportObjectRef {
@@ -978,8 +983,13 @@ pub fn contract_payload_matches_documented_schema<H: ProviderHarness>(harness: &
 
     let payload = ArtifactExtractPayload::from_json(&claimed.payload_json)
         .expect("payload_json should deserialize");
-    let expected =
-        ArtifactExtractPayload::new_v1(&artifact_id, &import_id, SourceType::ChatGptExport, Vec::new(), Vec::new());
+    let expected = ArtifactExtractPayload::new_v1(
+        &artifact_id,
+        &import_id,
+        SourceType::ChatGptExport,
+        Vec::new(),
+        Vec::new(),
+    );
 
     assert_eq!(payload, expected);
     assert_eq!(payload.schema_version, "1");

@@ -23,7 +23,9 @@ impl AppConfig {
             relational_store: RelationalStoreConfig::from_env()?,
             object_store: ObjectStoreConfig::from_env()?,
             inference: InferenceConfig::from_env()?,
-            reconcile_inference: InferenceConfig::from_optional_env("OA_RECONCILE_INFERENCE_PROVIDER")?,
+            reconcile_inference: InferenceConfig::from_optional_env(
+                "OA_RECONCILE_INFERENCE_PROVIDER",
+            )?,
             inference_mode: InferenceExecutionMode::from_env()?,
         })
     }
@@ -853,7 +855,10 @@ mod tests {
 
         assert_eq!(config.api_key, "test-key");
         assert_eq!(config.base_url, "https://api.openai.com/v1");
-        assert_eq!(config.reasoning_effort_override, OpenAiReasoningEffort::None);
+        assert_eq!(
+            config.reasoning_effort_override,
+            OpenAiReasoningEffort::None
+        );
         assert_eq!(config.max_output_tokens, 4000);
         assert_eq!(config.repair_max_output_tokens, 8000);
         assert_eq!(config.standard_model, "gpt-4.1-mini");

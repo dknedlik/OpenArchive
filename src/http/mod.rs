@@ -170,7 +170,7 @@ mod tests {
     use crate::storage::{
         ArchiveRetrievalStore, ArtifactIngestResult, ArtifactListItem, ArtifactReadStore,
         EnrichmentStatus, ImportStatus, ImportWriteResult, ImportWriteStore, ImportedArtifact,
-        RetrievedContextItem, RetrievalIntent, WriteImportSet,
+        RetrievalIntent, RetrievedContextItem, WriteImportSet,
     };
     use std::io::Read;
     use std::sync::Arc;
@@ -420,7 +420,7 @@ mod tests {
         );
     }
 
-fn test_app(store: MockStore) -> Arc<ArchiveApplication> {
+    fn test_app(store: MockStore) -> Arc<ArchiveApplication> {
         let store = Arc::new(store);
         let import_store: Arc<dyn ImportWriteStore + Send + Sync> = store.clone();
         let read_store: Arc<dyn ArtifactReadStore + Send + Sync> = store.clone();
@@ -434,7 +434,10 @@ fn test_app(store: MockStore) -> Arc<ArchiveApplication> {
             None,
             None,
             None,
+            None,
+            None,
             object_store,
+            None,
         ))
     }
 

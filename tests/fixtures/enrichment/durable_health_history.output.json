@@ -1,0 +1,69 @@
+{
+  "summary": {
+    "title": "Durable medical and athletic history",
+    "body_text": "The artifact contains substantive long-term personal history, including traumatic brain injury, concussion and back injury history, elite cycling background, lung nodules with smoking history, diet evolution, and large weight changes over time. These are durable personal facts that should remain queryable as discrete memories rather than being left only in summary prose.",
+    "evidence_segment_ids": ["seg-1", "seg-2", "seg-3", "seg-4", "seg-5", "seg-6"]
+  },
+  "classifications": [
+    {
+      "classification_type": "intent",
+      "classification_value": "record_durable_personal_history",
+      "title": "Record durable personal history",
+      "body_text": "The artifact captures long-lived medical, biographical, and lifestyle history with retrieval value.",
+      "evidence_segment_ids": ["seg-1", "seg-2", "seg-3", "seg-4", "seg-5", "seg-6"]
+    }
+  ],
+  "memories": [
+    {
+      "memory_type": "personal_fact",
+      "memory_scope": "artifact",
+      "memory_scope_value": "artifact-eval-health-history",
+      "title": "TBI with brain hemorrhage history",
+      "body_text": "The user reports a traumatic brain injury from a car accident that involved a brain hemorrhage.",
+      "evidence_segment_ids": ["seg-1"]
+    },
+    {
+      "memory_type": "personal_fact",
+      "memory_scope": "artifact",
+      "memory_scope_value": "artifact-eval-health-history",
+      "title": "Second concussion and broken back history",
+      "body_text": "The user reports a later second concussion and a broken back related to horses and mountain biking.",
+      "evidence_segment_ids": ["seg-2"]
+    },
+    {
+      "memory_type": "personal_fact",
+      "memory_scope": "artifact",
+      "memory_scope_value": "artifact-eval-health-history",
+      "title": "Elite cyclist background",
+      "body_text": "The user was an elite cyclist at the University of Oklahoma.",
+      "evidence_segment_ids": ["seg-3"]
+    },
+    {
+      "memory_type": "personal_fact",
+      "memory_scope": "artifact",
+      "memory_scope_value": "artifact-eval-health-history",
+      "title": "Lung nodules and smoking history",
+      "body_text": "A CT scan found lung nodules, and the user reports about a 13.5 pack year smoking history.",
+      "evidence_segment_ids": ["seg-4"]
+    },
+    {
+      "memory_type": "personal_fact",
+      "memory_scope": "artifact",
+      "memory_scope_value": "artifact-eval-health-history",
+      "title": "Diet evolved over time",
+      "body_text": "The user's diet has evolved over time rather than staying fixed.",
+      "evidence_segment_ids": ["seg-5"]
+    },
+    {
+      "memory_type": "personal_fact",
+      "memory_scope": "artifact",
+      "memory_scope_value": "artifact-eval-health-history",
+      "title": "Large weight swings during racing years",
+      "body_text": "The user's weight history ranged from under 100 pounds to about 170 pounds during racing years.",
+      "evidence_segment_ids": ["seg-6"]
+    }
+  ],
+  "importance_score": 7,
+  "escalate_to_frontier": false,
+  "escalation_reason": ""
+}

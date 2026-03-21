@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use open_archive::config::{GeminiConfig, PostgresConfig};
 use open_archive::processor::{
-    InferenceUsage, MemoryOutput, ReconciliationProcessorInput, RelationshipOutput, SummaryOutput,
-    memory_candidate_key_from_fields,
+    memory_candidate_key_from_fields, InferenceUsage, MemoryOutput, ReconciliationProcessorInput,
+    RelationshipOutput, SummaryOutput,
 };
 use open_archive::storage::enrichment_state_store::EnrichmentStateStore;
 use open_archive::storage::types::{ArtifactReconcilePayload, SourceType};

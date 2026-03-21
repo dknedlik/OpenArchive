@@ -18,7 +18,7 @@ use crate::storage::{
     EnrichmentStateStore, ImportWriteStore, OracleArchiveRetrievalStore, OracleArtifactReadStore,
     OracleDerivedMetadataStore, OracleEnrichmentJobStore, OracleImportWriteStore,
     PostgresArtifactReadStore, PostgresDerivedMetadataStore, PostgresEnrichmentJobStore,
-    PostgresImportWriteStore, PostgresRetrievalReadStore,
+    PostgresImportWriteStore, PostgresRetrievalReadStore, PostgresWritebackStore,
 };
 
 pub struct ServiceBundle {
@@ -47,10 +47,8 @@ impl ArtifactProcessorFactory for SplitStageProcessorFactory {
     fn build_reconciliation_processor(
         &self,
         tier: crate::storage::EnrichmentTier,
-    ) -> Result<
-        Box<dyn crate::processor::ReconciliationProcessor>,
-        crate::processor::ProcessorError,
-    > {
+    ) -> Result<Box<dyn crate::processor::ReconciliationProcessor>, crate::processor::ProcessorError>
+    {
         self.reconcile.build_reconciliation_processor(tier)
     }
 
@@ -160,6 +158,14 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
             let context_pack_store: Arc<
                 dyn crate::storage::ArtifactContextPackReadStore + Send + Sync,
             > = retrieval_impl.clone();
+            let cross_artifact_store: Arc<
+                dyn crate::storage::CrossArtifactReadStore + Send + Sync,
+            > = retrieval_impl.clone();
+            let object_search_store: Arc<
+                dyn crate::storage::DerivedObjectSearchStore + Send + Sync,
+            > = retrieval_impl.clone();
+            let writeback_store: Arc<dyn crate::storage::WritebackStore + Send + Sync> =
+                Arc::new(PostgresWritebackStore::new(pg_config.clone()));
             let app = Arc::new(ArchiveApplication::new(
                 Arc::clone(&import_store),
                 Arc::clone(&read_store),
@@ -167,7 +173,10 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 Some(search_read_store),
                 Some(artifact_detail_store),
                 Some(context_pack_store),
+                Some(cross_artifact_store),
+                Some(object_search_store),
                 Arc::clone(&object_store),
+                Some(writeback_store),
             ));
             Ok(ServiceBundle {
                 app,
@@ -202,7 +211,10 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 None,
                 None,
                 None,
+                None,
+                None,
                 Arc::clone(&object_store),
+                None,
             ));
             Ok(ServiceBundle {
                 app,

@@ -7,9 +7,8 @@ use open_archive::migrations;
 use open_archive::shutdown::ShutdownToken;
 use open_archive::storage::{
     ArtifactReadStore, DerivedMetadataWriteStore, EnrichmentJobLifecycleStore,
-    EnrichmentStateStore, ImportWriteStore, OracleArchiveRetrievalStore,
-    OracleArtifactReadStore, OracleDerivedMetadataStore, OracleEnrichmentJobStore,
-    OracleImportWriteStore,
+    EnrichmentStateStore, ImportWriteStore, OracleArchiveRetrievalStore, OracleArtifactReadStore,
+    OracleDerivedMetadataStore, OracleEnrichmentJobStore, OracleImportWriteStore,
 };
 use std::sync::Arc;
 use std::sync::OnceLock;

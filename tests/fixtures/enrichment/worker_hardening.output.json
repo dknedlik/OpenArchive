@@ -31,7 +31,7 @@
       "evidence_segment_ids": ["seg-3", "seg-4"]
     },
     {
-      "memory_type": "ongoing_task",
+      "memory_type": "ongoing_state",
       "memory_scope": "artifact",
       "memory_scope_value": "artifact-eval-worker",
       "title": "Add artifact-not-found test coverage",
@@ -39,7 +39,7 @@
       "evidence_segment_ids": ["seg-5", "seg-6"]
     },
     {
-      "memory_type": "ongoing_task",
+      "memory_type": "ongoing_state",
       "memory_scope": "artifact",
       "memory_scope_value": "artifact-eval-worker",
       "title": "Task 12 replaces the stub pipeline",

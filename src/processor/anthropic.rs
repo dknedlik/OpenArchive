@@ -8,14 +8,12 @@ use crate::config::AnthropicConfig;
 use crate::storage::types::EnrichmentTier;
 
 use super::{
-    ArtifactProcessor, ArtifactProcessorFactory, BatchHandle, BatchPollResult,
-    ConversationEnrichmentStrategy, ExtractionBatchSubmitter, HostedArtifactProcessor,
-    HostedReconciliationProcessor, InferenceClient, InferenceResult, InferenceUsage,
-    ProcessorError,
-    ReconciliationBatchSubmitter, ReconciliationProcessor,
+    structured_output_schema_with_allowed_refs, ArtifactProcessor, ArtifactProcessorFactory,
+    BatchHandle, BatchPollResult, ConversationEnrichmentStrategy, ExtractionBatchSubmitter,
+    HostedArtifactProcessor, HostedReconciliationProcessor, InferenceClient, InferenceResult,
+    InferenceUsage, ProcessorError, ReconciliationBatchSubmitter, ReconciliationProcessor,
     ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, ANTHROPIC_PROMPT_VERSION,
     RECONCILIATION_SYSTEM_PROMPT,
-    structured_output_schema_with_allowed_refs,
 };
 
 pub struct AnthropicProcessorFactory {
@@ -518,8 +516,8 @@ where
             Ok(item) => item,
             Err(source) => {
                 let err = ProcessorError::ParseInferenceResponse {
-                source,
-                body_preview: super::preview(line),
+                    source,
+                    body_preview: super::preview(line),
                 };
                 return inputs.iter().map(|_| Err(message_error(&err))).collect();
             }

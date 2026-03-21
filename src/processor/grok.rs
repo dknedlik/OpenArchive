@@ -8,14 +8,14 @@ use crate::config::GrokConfig;
 use crate::storage::types::EnrichmentTier;
 
 use super::{
+    structured_output_schema_with_allowed_refs, structured_output_schema_wrapper,
     ArtifactProcessor, ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
     BatchHandle, BatchPollResult, ExtractionBatchSubmitter, HostedReconciliationProcessor,
     InferenceClient, InferenceResult, InferenceUsage, OpenRouterResponsesContentItem,
     OpenRouterResponsesInputItem, OpenRouterResponsesRequest, OpenRouterResponsesResponse,
     OpenRouterResponsesTextConfig, ProcessorError, ReconciliationBatchSubmitter,
     ReconciliationProcessor, GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, GROK_PROMPT_VERSION,
-    RECONCILIATION_SYSTEM_PROMPT, structured_output_schema_with_allowed_refs,
-    structured_output_schema_wrapper,
+    RECONCILIATION_SYSTEM_PROMPT,
 };
 
 pub struct GrokProcessorFactory {
@@ -372,10 +372,12 @@ impl GrokArtifactProcessor {
             &structured_output_schema_wrapper(input),
             max_output_tokens,
         )?;
-        let parsed: super::ModelArtifactOutput = serde_json::from_str(&inference_result.output_text)
-            .map_err(|source| ProcessorError::ParseModelJson {
-                source,
-                body_preview: super::preview(&inference_result.output_text),
+        let parsed: super::ModelArtifactOutput =
+            serde_json::from_str(&inference_result.output_text).map_err(|source| {
+                ProcessorError::ParseModelJson {
+                    source,
+                    body_preview: super::preview(&inference_result.output_text),
+                }
             })?;
         let parsed = parsed.resolve_evidence_aliases(input);
         let parsed = parsed
@@ -584,7 +586,12 @@ where
     let mut by_id = std::collections::HashMap::new();
     let items = match client.list_results(batch_id) {
         Ok(items) => items,
-        Err(err) => return inputs.iter().map(|_| Err(grok_message_error(&err))).collect(),
+        Err(err) => {
+            return inputs
+                .iter()
+                .map(|_| Err(grok_message_error(&err)))
+                .collect()
+        }
     };
     for item in items {
         let parsed = if let Some(error) = item.error_message() {
@@ -607,13 +614,13 @@ where
         } else {
             item.chat_completion_response()
                 .ok_or_else(|| ProcessorError::InferenceHttpStatus {
-                        status: 503,
-                        body_preview: format!(
-                            "Grok batch item {} missing response payload: {}",
-                            item.batch_request_id,
-                            super::preview(&item.debug_snapshot())
-                        ),
-                    })
+                    status: 503,
+                    body_preview: format!(
+                        "Grok batch item {} missing response payload: {}",
+                        item.batch_request_id,
+                        super::preview(&item.debug_snapshot())
+                    ),
+                })
                 .and_then(|response_value| {
                     Ok(GrokBatchParsedResult {
                         output_text: flatten_grok_response_text(response_value)?,

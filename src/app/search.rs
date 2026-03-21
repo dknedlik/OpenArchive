@@ -1,12 +1,17 @@
 use std::sync::Arc;
 
 use crate::error::{OpenArchiveError, Result};
-use crate::storage::{ArchiveSearchReadStore, DerivedObjectType, SearchCandidateKind};
+use crate::storage::{
+    ArchiveSearchReadStore, DerivedObjectSearchResult, DerivedObjectSearchStore, DerivedObjectType,
+    ObjectSearchFilters, SearchCandidateKind, SearchFilters,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ArchiveSearchRequest {
     pub query_text: String,
     pub limit: usize,
+    #[serde(skip)]
+    pub filters: SearchFilters,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -53,7 +58,7 @@ impl ArchiveSearchService {
         let limit = request.limit.max(1);
         let mut hits = self
             .read_store
-            .search_candidates(query_text, limit)
+            .search_candidates(query_text, limit, &request.filters)
             .map_err(OpenArchiveError::from)?
             .into_iter()
             .map(|candidate| ArchiveSearchHit {
@@ -88,6 +93,26 @@ impl ArchiveSearchService {
     }
 }
 
+pub struct ObjectSearchService {
+    store: Arc<dyn DerivedObjectSearchStore + Send + Sync>,
+}
+
+impl ObjectSearchService {
+    pub fn new(store: Arc<dyn DerivedObjectSearchStore + Send + Sync>) -> Self {
+        Self { store }
+    }
+
+    pub fn search(
+        &self,
+        filters: ObjectSearchFilters,
+        limit: usize,
+    ) -> Result<Vec<DerivedObjectSearchResult>> {
+        self.store
+            .search_objects(&filters, limit.max(1))
+            .map_err(OpenArchiveError::from)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +128,7 @@ mod tests {
             &self,
             _query_text: &str,
             _limit: usize,
+            _filters: &SearchFilters,
         ) -> StorageResult<Vec<ArchiveSearchCandidate>> {
             Ok(self.candidates.clone())
         }
@@ -124,6 +150,7 @@ mod tests {
             .search(ArchiveSearchRequest {
                 query_text: "   ".to_string(),
                 limit: 5,
+                filters: SearchFilters::default(),
             })
             .expect("blank query should succeed");
 
@@ -164,6 +191,7 @@ mod tests {
             .search(ArchiveSearchRequest {
                 query_text: "hit".to_string(),
                 limit: 10,
+                filters: SearchFilters::default(),
             })
             .expect("search should succeed");
 
@@ -215,6 +243,7 @@ mod tests {
             .search(ArchiveSearchRequest {
                 query_text: "hit".to_string(),
                 limit: 1,
+                filters: SearchFilters::default(),
             })
             .expect("search should succeed");
 

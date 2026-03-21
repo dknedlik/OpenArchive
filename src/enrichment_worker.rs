@@ -5,18 +5,17 @@ use crate::extraction_chunking::{
     build_chunk_inputs, build_coverage_windows, build_topic_thread_inputs,
 };
 use crate::processor::{
-    ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
-    ClassificationOutput, EntityOutput, MemoryOutput, ProcessorError,
+    cleanup_artifact_processor_output, memory_candidate_key_from_fields,
+    should_shape_conversation_input, ArtifactProcessorFactory, ArtifactProcessorInput,
+    ArtifactProcessorOutput, ClassificationOutput, EntityOutput, MemoryOutput, ProcessorError,
     ReconciliationProcessorInput, RelationshipOutput, StubProcessorFactory, SummaryOutput,
-    cleanup_artifact_processor_output, memory_candidate_key_from_fields, should_shape_conversation_input,
 };
 use crate::shutdown::ShutdownToken;
 use crate::stage_poller::{stage_poller_loop, ExtractStage, ReconcileStage};
 use crate::storage::JobType;
 use crate::storage::{
-    ArtifactExtractPayload, ArtifactExtractionResult, ArtifactReadStore,
-    ArtifactReconcilePayload, ArtifactRetrieveContextPayload,
-    CandidateEntity, CandidateRelationship, ClaimedJob,
+    ArtifactExtractPayload, ArtifactExtractionResult, ArtifactReadStore, ArtifactReconcilePayload,
+    ArtifactRetrieveContextPayload, CandidateEntity, CandidateRelationship, ClaimedJob,
     ClassificationObjectJson, ConversationWindowRef, DerivationRunStatus, DerivationRunType,
     DerivedMetadataWriteStore, DerivedObjectPayload, EnrichmentJobLifecycleStore,
     EnrichmentStateStore, EnrichmentTier, EvidenceRole, ExtractedClassification, ExtractedMemory,

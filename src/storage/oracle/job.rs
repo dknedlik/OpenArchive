@@ -594,7 +594,13 @@ pub fn reschedule_running_job(
              claimed_by = NULL, \
              claimed_at = NULL \
          WHERE job_id = :4 AND claimed_by = :5",
-        &[&retryable, &message, &retry_after_seconds, &job_id, &worker_id],
+        &[
+            &retryable,
+            &message,
+            &retry_after_seconds,
+            &job_id,
+            &worker_id,
+        ],
     )
     .map_err(|source| StorageError::UpdateJobStatus {
         job_id: job_id.to_string(),

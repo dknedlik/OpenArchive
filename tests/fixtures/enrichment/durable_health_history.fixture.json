@@ -1,0 +1,57 @@
+{
+  "artifact_id": "artifact-eval-health-history",
+  "source_type": "chatgpt_export",
+  "title": "Personal medical and athletic history discussion",
+  "segments": [
+    {
+      "segment_id": "seg-1",
+      "participant_role": "user",
+      "text": "I had a TBI from a car accident with a brain hemorrhage."
+    },
+    {
+      "segment_id": "seg-2",
+      "participant_role": "user",
+      "text": "Later I had a second concussion and broke my back from horses and mountain biking."
+    },
+    {
+      "segment_id": "seg-3",
+      "participant_role": "user",
+      "text": "I used to be an elite cyclist at the University of Oklahoma."
+    },
+    {
+      "segment_id": "seg-4",
+      "participant_role": "user",
+      "text": "A CT scan found lung nodules, and I have about a 13.5 pack year smoking history."
+    },
+    {
+      "segment_id": "seg-5",
+      "participant_role": "user",
+      "text": "My diet has evolved a lot over time rather than staying fixed."
+    },
+    {
+      "segment_id": "seg-6",
+      "participant_role": "user",
+      "text": "My weight history runs from under 100 pounds up through about 170 during racing years."
+    }
+  ],
+  "expectations": {
+    "memory_count": { "min": 5, "max": 7 },
+    "classification_count": { "min": 0, "max": 2 },
+    "importance_score": { "min": 6, "max": 9 },
+    "escalate_to_frontier": false,
+    "required_phrases": [
+      "tbi",
+      "brain hemorrhage",
+      "lung nodules",
+      "smoking history",
+      "elite cyclist",
+      "weight history"
+    ],
+    "forbidden_classification_values": [
+      "health",
+      "medical",
+      "biography",
+      "discussion"
+    ]
+  }
+}

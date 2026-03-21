@@ -290,6 +290,7 @@ pub enum DerivationRunType {
     ArchiveRetrieval,
     ArtifactReconciliation,
     ContextPackAssembly,
+    AgentContributed,
 }
 
 impl DerivationRunType {
@@ -299,6 +300,7 @@ impl DerivationRunType {
             DerivationRunType::ArchiveRetrieval => "archive_retrieval",
             DerivationRunType::ArtifactReconciliation => "artifact_reconciliation",
             DerivationRunType::ContextPackAssembly => "context_pack_assembly",
+            DerivationRunType::AgentContributed => "agent_contributed",
         }
     }
 }
@@ -374,6 +376,7 @@ pub enum OriginKind {
     Deterministic,
     Inferred,
     UserConfirmed,
+    AgentContributed,
 }
 
 impl OriginKind {
@@ -383,6 +386,7 @@ impl OriginKind {
             OriginKind::Deterministic => "deterministic",
             OriginKind::Inferred => "inferred",
             OriginKind::UserConfirmed => "user_confirmed",
+            OriginKind::AgentContributed => "agent_contributed",
         }
     }
 }

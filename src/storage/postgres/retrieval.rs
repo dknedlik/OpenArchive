@@ -4,7 +4,8 @@ use crate::error::{StorageError, StorageResult};
 use crate::storage::retrieval_read_store::{
     ArchiveSearchCandidate, ArtifactContextDerivedObject, ArtifactContextEvidenceLink,
     ArtifactContextPackMaterial, ArtifactDetailDerivedObject, ArtifactDetailRecord,
-    ArtifactDetailSegment, ArtifactDetailView, SearchCandidateKind,
+    ArtifactDetailSegment, ArtifactDetailView, DerivedObjectSearchResult, ObjectSearchFilters,
+    RelatedDerivedObject, SearchCandidateKind, SearchFilters,
 };
 use crate::storage::types::{
     DerivedObjectType, EnrichmentStatus, EvidenceRole, RetrievalIntent, RetrievedContextItem,
@@ -39,46 +40,125 @@ pub fn search_candidates(
     connection_string: &str,
     query_text: &str,
     limit: usize,
+    filters: &SearchFilters,
 ) -> StorageResult<Vec<ArchiveSearchCandidate>> {
     let limit = i64::try_from(limit).map_err(|_| StorageError::InvalidDerivationWrite {
         detail: format!("search limit {limit} exceeds Postgres BIGINT range"),
     })?;
 
+    // Build dynamic params list. $1 is always query_text, $2 is always limit.
+    let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> = Vec::new();
+    params.push(&query_text);
+    params.push(&limit);
+
+    let object_type_str: String;
+    let source_type_str: String;
+
+    // Precompute string values for filter params so they live long enough.
+    if let Some(ref ot) = filters.object_type {
+        object_type_str = ot.as_str().to_string();
+    } else {
+        object_type_str = String::new();
+    }
+    if let Some(ref st) = filters.source_type {
+        source_type_str = st.as_str().to_string();
+    } else {
+        source_type_str = String::new();
+    }
+
+    let mut next_param = 3usize;
+    let object_type_param: Option<usize> = if filters.object_type.is_some() {
+        let idx = next_param;
+        params.push(&object_type_str);
+        next_param += 1;
+        Some(idx)
+    } else {
+        None
+    };
+    let source_type_param: Option<usize> = if filters.source_type.is_some() {
+        let idx = next_param;
+        params.push(&source_type_str);
+        Some(idx)
+    } else {
+        None
+    };
+
+    // When object_type filter is set, only include derived_object branch.
+    let include_non_derived = filters.object_type.is_none();
+
+    let mut union_branches: Vec<String> = Vec::new();
+
+    if include_non_derived {
+        // Artifact title branch
+        let source_join = if let Some(idx) = source_type_param {
+            format!(" AND a.source_type = ${idx}")
+        } else {
+            String::new()
+        };
+        union_branches.push(format!(
+            "SELECT a.artifact_id AS artifact_id,
+                    a.artifact_id AS match_record_id,
+                    'artifact_title' AS match_kind,
+                    NULL::text AS derived_object_type,
+                    COALESCE(a.title, '') AS snippet,
+                    300 AS score_hint
+               FROM oa_artifact a
+              WHERE a.title_tsv @@ websearch_to_tsquery('english', $1){source_join}"
+        ));
+    }
+
+    // Derived object branch (always included)
+    {
+        let mut derived_extra = String::new();
+        if let Some(idx) = object_type_param {
+            derived_extra.push_str(&format!(" AND d.derived_object_type = ${idx}"));
+        }
+        if let Some(idx) = source_type_param {
+            derived_extra.push_str(&format!(
+                " AND d.artifact_id IN (SELECT a2.artifact_id FROM oa_artifact a2 WHERE a2.source_type = ${idx})"
+            ));
+        }
+        union_branches.push(format!(
+            "SELECT d.artifact_id AS artifact_id,
+                    d.derived_object_id AS match_record_id,
+                    'derived_object' AS match_kind,
+                    d.derived_object_type AS derived_object_type,
+                    COALESCE(d.title, d.body_text, '') AS snippet,
+                    200 AS score_hint
+               FROM oa_derived_object d
+              WHERE d.object_status = 'active'
+                AND d.search_tsv @@ websearch_to_tsquery('english', $1){derived_extra}"
+        ));
+    }
+
+    if include_non_derived {
+        // Segment excerpt branch
+        let source_join = if let Some(idx) = source_type_param {
+            format!(
+                " AND s.artifact_id IN (SELECT a3.artifact_id FROM oa_artifact a3 WHERE a3.source_type = ${idx})"
+            )
+        } else {
+            String::new()
+        };
+        union_branches.push(format!(
+            "SELECT s.artifact_id AS artifact_id,
+                    s.segment_id AS match_record_id,
+                    'segment_excerpt' AS match_kind,
+                    NULL::text AS derived_object_type,
+                    COALESCE(s.text_content, '') AS snippet,
+                    100 AS score_hint
+               FROM oa_segment s
+              WHERE s.text_content_tsv @@ websearch_to_tsquery('english', $1){source_join}"
+        ));
+    }
+
+    let sql = format!(
+        "SELECT * FROM ({}) matches ORDER BY score_hint DESC, artifact_id ASC, match_record_id ASC LIMIT $2",
+        union_branches.join(" UNION ALL ")
+    );
+
     let rows = client
-        .query(
-            "SELECT * FROM (
-                SELECT a.artifact_id AS artifact_id,
-                       a.artifact_id AS match_record_id,
-                       'artifact_title' AS match_kind,
-                       NULL::text AS derived_object_type,
-                       COALESCE(a.title, '') AS snippet,
-                       300 AS score_hint
-                  FROM oa_artifact a
-                 WHERE a.title_tsv @@ websearch_to_tsquery('english', $1)
-                UNION ALL
-                SELECT d.artifact_id AS artifact_id,
-                       d.derived_object_id AS match_record_id,
-                       'derived_object' AS match_kind,
-                       d.derived_object_type AS derived_object_type,
-                       COALESCE(d.title, d.body_text, '') AS snippet,
-                       200 AS score_hint
-                  FROM oa_derived_object d
-                 WHERE d.object_status = 'active'
-                   AND d.search_tsv @@ websearch_to_tsquery('english', $1)
-                UNION ALL
-                SELECT s.artifact_id AS artifact_id,
-                       s.segment_id AS match_record_id,
-                       'segment_excerpt' AS match_kind,
-                       NULL::text AS derived_object_type,
-                       COALESCE(s.text_content, '') AS snippet,
-                       100 AS score_hint
-                  FROM oa_segment s
-                 WHERE s.text_content_tsv @@ websearch_to_tsquery('english', $1)
-            ) matches
-            ORDER BY score_hint DESC, artifact_id ASC, match_record_id ASC
-            LIMIT $2",
-            &[&query_text, &limit],
-        )
+        .query(&sql, &params)
         .map_err(|source| map_pg_err(connection_string, source))?;
 
     let mut candidates = Vec::with_capacity(rows.len());
@@ -129,11 +209,10 @@ pub fn retrieve_for_intents(
     intents: &[RetrievalIntent],
     limit_per_intent: usize,
 ) -> StorageResult<Vec<RetrievedContextItem>> {
-    let limit = i64::try_from(limit_per_intent).map_err(|_| StorageError::InvalidDerivationWrite {
-        detail: format!(
-            "retrieval limit {limit_per_intent} exceeds Postgres BIGINT range"
-        ),
-    })?;
+    let limit =
+        i64::try_from(limit_per_intent).map_err(|_| StorageError::InvalidDerivationWrite {
+            detail: format!("retrieval limit {limit_per_intent} exceeds Postgres BIGINT range"),
+        })?;
     let mut items = Vec::new();
 
     for intent in intents {
@@ -387,7 +466,7 @@ fn load_artifact_context_derived_objects(
 ) -> StorageResult<Vec<ArtifactContextDerivedObject>> {
     let rows = client
         .query(
-            "SELECT derived_object_id, derived_object_type, title, body_text, scope_id, scope_type
+            "SELECT derived_object_id, derived_object_type, title, body_text, scope_id, scope_type, candidate_key
              FROM oa_derived_object
              WHERE artifact_id = $1 AND object_status = 'active'
              ORDER BY derived_object_type ASC, derived_object_id ASC",
@@ -415,6 +494,7 @@ fn load_artifact_context_derived_objects(
                     value: row.get(5),
                 }
             })?,
+            candidate_key: row.get(6),
         });
     }
 
@@ -465,6 +545,177 @@ fn load_artifact_context_evidence_links(
     }
 
     Ok(links)
+}
+
+pub fn search_objects(
+    client: &mut Client,
+    connection_string: &str,
+    filters: &ObjectSearchFilters,
+    limit: usize,
+) -> StorageResult<Vec<DerivedObjectSearchResult>> {
+    let limit = i64::try_from(limit).map_err(|_| StorageError::InvalidDerivationWrite {
+        detail: format!("search limit {limit} exceeds Postgres BIGINT range"),
+    })?;
+
+    let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> = Vec::new();
+    let mut next_param = 1usize;
+
+    // Pre-compute string values so they live long enough for the borrow.
+    let query_str: String = filters.query.clone().unwrap_or_default();
+    let object_type_str: String = filters
+        .object_type
+        .as_ref()
+        .map(|ot| ot.as_str().to_string())
+        .unwrap_or_default();
+    let candidate_key_str: String = filters.candidate_key.clone().unwrap_or_default();
+    let artifact_id_str: String = filters.artifact_id.clone().unwrap_or_default();
+
+    let mut conditions = vec!["object_status = 'active'".to_string()];
+
+    let query_param_idx: Option<usize> = if filters.query.is_some() {
+        let idx = next_param;
+        params.push(&query_str);
+        next_param += 1;
+        conditions.push(format!(
+            "search_tsv @@ websearch_to_tsquery('english', ${idx})"
+        ));
+        Some(idx)
+    } else {
+        None
+    };
+
+    if filters.object_type.is_some() {
+        let idx = next_param;
+        params.push(&object_type_str);
+        next_param += 1;
+        conditions.push(format!("derived_object_type = ${idx}"));
+    }
+
+    if filters.candidate_key.is_some() {
+        let idx = next_param;
+        params.push(&candidate_key_str);
+        next_param += 1;
+        conditions.push(format!("candidate_key = ${idx}"));
+    }
+
+    if filters.artifact_id.is_some() {
+        let idx = next_param;
+        params.push(&artifact_id_str);
+        next_param += 1;
+        conditions.push(format!("artifact_id = ${idx}"));
+    }
+
+    let limit_idx = next_param;
+    params.push(&limit);
+
+    let order_by = if let Some(idx) = query_param_idx {
+        format!("ts_rank_cd(search_tsv, websearch_to_tsquery('english', ${idx})) DESC")
+    } else {
+        "derived_object_id ASC".to_string()
+    };
+
+    let sql = format!(
+        "SELECT derived_object_id, artifact_id, derived_object_type, title, body_text, \
+                candidate_key, confidence_score::double precision \
+         FROM oa_derived_object \
+         WHERE {} \
+         ORDER BY {} \
+         LIMIT ${limit_idx}",
+        conditions.join(" AND "),
+        order_by
+    );
+
+    let rows = client
+        .query(&sql, &params)
+        .map_err(|source| map_pg_err(connection_string, source))?;
+
+    let mut results = Vec::with_capacity(rows.len());
+    for row in rows {
+        let derived_object_id: String = row.get(0);
+        let artifact_id: String = row.get(1);
+        let derived_object_type_str: String = row.get(2);
+        results.push(DerivedObjectSearchResult {
+            derived_object_id: derived_object_id.clone(),
+            artifact_id: artifact_id.clone(),
+            derived_object_type: DerivedObjectType::from_str(&derived_object_type_str).ok_or_else(
+                || StorageError::InvalidDerivedObjectType {
+                    artifact_id: artifact_id.clone(),
+                    value: derived_object_type_str,
+                },
+            )?,
+            title: row.get(3),
+            body_text: row.get(4),
+            candidate_key: row.get(5),
+            confidence_score: row.try_get(6).map_err(|source| {
+                StorageError::ReadDerivedObjectConfidenceScore {
+                    artifact_id: artifact_id.clone(),
+                    derived_object_id: derived_object_id.clone(),
+                    source,
+                }
+            })?,
+        });
+    }
+
+    Ok(results)
+}
+
+pub fn find_related_by_candidate_keys(
+    client: &mut Client,
+    connection_string: &str,
+    artifact_id: &str,
+    candidate_keys: &[String],
+    limit: usize,
+) -> StorageResult<Vec<RelatedDerivedObject>> {
+    if candidate_keys.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let limit = i64::try_from(limit).map_err(|_| StorageError::InvalidDerivationWrite {
+        detail: format!("limit {limit} exceeds Postgres BIGINT range"),
+    })?;
+
+    let rows = client
+        .query(
+            "SELECT derived_object_id, artifact_id, derived_object_type, title, body_text,
+                    candidate_key, confidence_score::double precision
+             FROM oa_derived_object
+             WHERE object_status = 'active'
+               AND artifact_id <> $1
+               AND candidate_key = ANY($2)
+             ORDER BY candidate_key ASC, derived_object_id ASC
+             LIMIT $3",
+            &[&artifact_id, &candidate_keys, &limit],
+        )
+        .map_err(|source| map_pg_err(connection_string, source))?;
+
+    let mut results = Vec::with_capacity(rows.len());
+    for row in rows {
+        let derived_object_id: String = row.get(0);
+        let row_artifact_id: String = row.get(1);
+        let derived_object_type_str: String = row.get(2);
+        results.push(RelatedDerivedObject {
+            derived_object_id: derived_object_id.clone(),
+            artifact_id: row_artifact_id.clone(),
+            derived_object_type: DerivedObjectType::from_str(&derived_object_type_str).ok_or_else(
+                || StorageError::InvalidDerivedObjectType {
+                    artifact_id: row_artifact_id.clone(),
+                    value: derived_object_type_str,
+                },
+            )?,
+            title: row.get(3),
+            body_text: row.get(4),
+            candidate_key: row.get(5),
+            confidence_score: row.try_get(6).map_err(|source| {
+                StorageError::ReadDerivedObjectConfidenceScore {
+                    artifact_id: row_artifact_id,
+                    derived_object_id,
+                    source,
+                }
+            })?,
+        });
+    }
+
+    Ok(results)
 }
 
 #[cfg(test)]

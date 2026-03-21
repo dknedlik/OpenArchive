@@ -23,17 +23,16 @@ use crate::enrichment_worker::{
     merge_chunk_outputs as worker_merge_chunk_outputs,
 };
 use crate::processor::{
-    ArtifactProcessorInput, BatchHandle, BatchPollResult, ExtractionBatchSubmitter,
-    ProcessorError, ReconciliationBatchSubmitter, ReconciliationProcessorInput,
+    ArtifactProcessorInput, BatchHandle, BatchPollResult, ExtractionBatchSubmitter, ProcessorError,
+    ReconciliationBatchSubmitter, ReconciliationProcessorInput,
 };
 use crate::shutdown::ShutdownToken;
 use crate::storage::{
     ArtifactExtractPayload, ArtifactExtractionResult, ArtifactReadStore, ArtifactReconcilePayload,
-    ArtifactRetrieveContextPayload, ClaimedJob,
-    DerivedMetadataWriteStore, EnrichmentJobLifecycleStore, EnrichmentStateStore, EnrichmentTier,
-    JobType, LoadedArtifactForEnrichment, NewEnrichmentBatch, NewEnrichmentJob,
-    PersistedEnrichmentBatch, ReconciliationDecision, ReconciliationDecisionKind,
-    RetrievalResultSet, SourceType,
+    ArtifactRetrieveContextPayload, ClaimedJob, DerivedMetadataWriteStore,
+    EnrichmentJobLifecycleStore, EnrichmentStateStore, EnrichmentTier, JobType,
+    LoadedArtifactForEnrichment, NewEnrichmentBatch, NewEnrichmentJob, PersistedEnrichmentBatch,
+    ReconciliationDecision, ReconciliationDecisionKind, RetrievalResultSet, SourceType,
 };
 
 const RETRYABLE_INFERENCE_BACKOFF_SECONDS: i64 = 60;
@@ -827,7 +826,10 @@ impl StageBehavior for ExtractStage {
             }
 
             if !group.deferred_chunk_inputs.is_empty() {
-                let split_at = group.deferred_chunk_inputs.len().min(EXTRACT_CHUNK_WAVE_LIMIT);
+                let split_at = group
+                    .deferred_chunk_inputs
+                    .len()
+                    .min(EXTRACT_CHUNK_WAVE_LIMIT);
                 let remaining = std::mem::take(&mut group.deferred_chunk_inputs);
                 group.pending_chunk_inputs = remaining[..split_at].to_vec();
                 group.deferred_chunk_inputs = remaining[split_at..].to_vec();
@@ -837,7 +839,8 @@ impl StageBehavior for ExtractStage {
             }
 
             let output = if group.successful_chunk_outputs.len() == 1 {
-                group.successful_chunk_outputs
+                group
+                    .successful_chunk_outputs
                     .into_iter()
                     .next()
                     .expect("single chunk output should exist")
@@ -905,7 +908,9 @@ impl StageBehavior for ExtractStage {
                     handle,
                     owner_worker_id: worker_id.to_string(),
                     jobs: next_jobs,
-                    context: InFlightContext::Extract { groups: next_groups },
+                    context: InFlightContext::Extract {
+                        groups: next_groups,
+                    },
                 })),
                 Err(err) => {
                     if matches!(err, ProcessorError::InferenceHttpStatus { status: 413, .. }) {
@@ -956,8 +961,7 @@ impl StageBehavior for ExtractStage {
                 Err(err) => {
                     error!(
                         "[extract] failed to deserialize extract recovery context for {}: {}",
-                        persisted.provider_batch_id,
-                        err
+                        persisted.provider_batch_id, err
                     );
                     return Err(());
                 }
@@ -972,7 +976,8 @@ impl StageBehavior for ExtractStage {
                         return Err(());
                     }
                 };
-                let chunk_inputs = build_extract_chunk_inputs(&parent_input, &payload, &self.chunking);
+                let chunk_inputs =
+                    build_extract_chunk_inputs(&parent_input, &payload, &self.chunking);
                 if chunk_inputs.is_empty() {
                     poller_fail_job_message(
                         job_store,
@@ -1529,15 +1534,15 @@ impl StageBehavior for ReconcileStage {
 
 use crate::domain::SourceTimestamp;
 use crate::processor::{
-    MemoryOutput, ReconciliationDecisionOutput, RelationshipOutput, SummaryOutput,
-    memory_candidate_key_from_fields,
+    memory_candidate_key_from_fields, MemoryOutput, ReconciliationDecisionOutput,
+    RelationshipOutput, SummaryOutput,
 };
 use crate::storage::{
     CandidateRelationship, ClassificationObjectJson, DerivationRunStatus, DerivationRunType,
     DerivedObjectPayload, EvidenceRole, ExtractedMemory, InputScopeType, MemoryObjectJson,
     NewDerivationRun, NewDerivedObject, NewEvidenceLink, ObjectStatus, OriginKind,
-    RelationshipObjectJson, ScopeType, SummaryObjectJson, SupportStrength,
-    WriteDerivationAttempt, WriteDerivedObject,
+    RelationshipObjectJson, ScopeType, SummaryObjectJson, SupportStrength, WriteDerivationAttempt,
+    WriteDerivedObject,
 };
 use rand::random;
 use std::collections::HashSet;
@@ -1664,7 +1669,6 @@ fn poller_mark_retryable(
         }
     }
 }
-
 
 fn complete_reconcile_without_candidates(
     job: &ClaimedJob,

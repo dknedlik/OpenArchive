@@ -161,6 +161,13 @@ pub struct InferenceUsage {
 const MAX_CLASSIFICATIONS: usize = 5;
 const MAX_MEMORIES: usize = 15;
 const MAX_RETRIEVAL_INTENTS: usize = 8;
+const MEMORY_TYPE_VALUES: [&str; 5] = [
+    "personal_fact",
+    "preference",
+    "project_fact",
+    "ongoing_state",
+    "reference",
+];
 
 pub trait ArtifactProcessor {
     fn process(
@@ -620,7 +627,6 @@ impl ConversationEnrichmentStrategy {
             extraction_schema: structured_output_schema_wrapper,
         })
     }
-
 }
 
 impl EnrichmentStrategy for ConversationEnrichmentStrategy {
@@ -1020,11 +1026,11 @@ impl OpenAiClient {
         let body = OpenRouterResponsesRequest {
             model,
             max_output_tokens,
-            reasoning: self
-                .reasoning_effort_for_model(model)
-                .map(|effort| OpenRouterResponsesReasoningConfig {
+            reasoning: self.reasoning_effort_for_model(model).map(|effort| {
+                OpenRouterResponsesReasoningConfig {
                     effort: Some(effort.as_str()),
-                }),
+                }
+            }),
             text: OpenRouterResponsesTextConfig {
                 format: Self::responses_text_format(schema),
             },
@@ -1304,12 +1310,10 @@ impl OpenAiArtifactProcessor {
             &structured_output_schema_wrapper(input),
             max_output_tokens,
         )?;
-        let parsed: ModelArtifactOutput =
-            serde_json::from_str(&inference_result.output_text).map_err(|source| {
-                ProcessorError::ParseModelJson {
-                    source,
-                    body_preview: preview(&inference_result.output_text),
-                }
+        let parsed: ModelArtifactOutput = serde_json::from_str(&inference_result.output_text)
+            .map_err(|source| ProcessorError::ParseModelJson {
+                source,
+                body_preview: preview(&inference_result.output_text),
             })?;
         let parsed = parsed.resolve_evidence_aliases(input);
         let parsed = parsed
@@ -1504,10 +1508,12 @@ impl ReconciliationBatchSubmitter for OpenAiReconciliationSubmitter {
             inputs,
             |result, input| {
                 let parsed: ModelReconciliationOutput = serde_json::from_str(&result.output_text)
-                    .map_err(|source| ProcessorError::ParseModelJson {
+                    .map_err(|source| {
+                    ProcessorError::ParseModelJson {
                         source,
                         body_preview: preview(&result.output_text),
-                    })?;
+                    }
+                })?;
                 parsed.into_validated_outputs(input)
             },
         )
@@ -1588,11 +1594,19 @@ where
         let err = ProcessorError::Message {
             message: "OpenAI batch missing output_file_id".to_string(),
         };
-        return inputs.iter().map(|_| Err(message_processor_error(&err))).collect();
+        return inputs
+            .iter()
+            .map(|_| Err(message_processor_error(&err)))
+            .collect();
     };
     let content = match client.read_file_text(output_file_id) {
         Ok(content) => content,
-        Err(err) => return inputs.iter().map(|_| Err(message_processor_error(&err))).collect(),
+        Err(err) => {
+            return inputs
+                .iter()
+                .map(|_| Err(message_processor_error(&err)))
+                .collect()
+        }
     };
     let mut parsed_by_id = HashMap::new();
     for line in content.lines().filter(|line| !line.trim().is_empty()) {
@@ -1600,10 +1614,13 @@ where
             Ok(item) => item,
             Err(source) => {
                 let err = ProcessorError::ParseInferenceResponse {
-                source,
-                body_preview: preview(line),
+                    source,
+                    body_preview: preview(line),
                 };
-                return inputs.iter().map(|_| Err(message_processor_error(&err))).collect();
+                return inputs
+                    .iter()
+                    .map(|_| Err(message_processor_error(&err)))
+                    .collect();
             }
         };
         let custom_id = item.custom_id.clone();
@@ -1966,7 +1983,10 @@ impl ModelArtifactOutput {
         self
     }
 
-    fn validate_and_salvage(mut self, input: &ArtifactProcessorInput) -> Result<Self, ProcessorError> {
+    fn validate_and_salvage(
+        mut self,
+        input: &ArtifactProcessorInput,
+    ) -> Result<Self, ProcessorError> {
         let valid_segment_ids: HashSet<&str> = input
             .segments
             .iter()
@@ -1992,7 +2012,10 @@ impl ModelArtifactOutput {
         }
 
         self.classifications = retain_valid_items(self.classifications, |index, classification| {
-            validate_text_field(&format!("classifications[{index}].title"), &classification.title)?;
+            validate_text_field(
+                &format!("classifications[{index}].title"),
+                &classification.title,
+            )?;
             validate_text_field(
                 &format!("classifications[{index}].body_text"),
                 &classification.body_text,
@@ -2031,13 +2054,13 @@ impl ModelArtifactOutput {
         self.memories = retain_valid_items(self.memories, |index, memory| {
             validate_text_field(&format!("memories[{index}].title"), &memory.title)?;
             validate_text_field(&format!("memories[{index}].body_text"), &memory.body_text)?;
-            match memory.memory_type.as_str() {
-                "preference" | "project_fact" | "identity_fact" | "ongoing_task" | "reference" => {}
-                other => {
-                    return Err(ProcessorError::InvalidModelOutput {
-                        detail: format!("memories[{index}].memory_type {other:?} is not allowed"),
-                    })
-                }
+            if !MEMORY_TYPE_VALUES.contains(&memory.memory_type.as_str()) {
+                return Err(ProcessorError::InvalidModelOutput {
+                    detail: format!(
+                        "memories[{index}].memory_type {:?} is not allowed",
+                        memory.memory_type
+                    ),
+                });
             }
             if memory.memory_scope_value.trim().is_empty() {
                 return Err(ProcessorError::InvalidModelOutput {
@@ -2210,8 +2233,11 @@ impl ModelArtifactOutput {
                 .map(|memory| {
                     let title = normalize_optional_text(memory.title);
                     let body_text = memory.body_text.trim().to_string();
-                    let memory_type =
-                        canonicalize_memory_type(&memory.memory_type, title.as_deref().unwrap_or_default(), &body_text);
+                    let memory_type = canonicalize_memory_type(
+                        &memory.memory_type,
+                        title.as_deref().unwrap_or_default(),
+                        &body_text,
+                    );
                     let candidate_key = memory_candidate_key_from_fields(
                         &memory_type,
                         memory.memory_scope,
@@ -2316,7 +2342,10 @@ fn sanitize_relationship_outputs(
     relationships: Vec<RelationshipOutput>,
     entities: &[EntityOutput],
 ) -> Vec<RelationshipOutput> {
-    let entity_keys: HashSet<&str> = entities.iter().map(|entity| entity.entity_key.as_str()).collect();
+    let entity_keys: HashSet<&str> = entities
+        .iter()
+        .map(|entity| entity.entity_key.as_str())
+        .collect();
     let mut deduped = Vec::<RelationshipOutput>::new();
     for relationship in relationships {
         if relationship.subject_key == relationship.object_key {
@@ -2327,7 +2356,10 @@ fn sanitize_relationship_outputs(
         {
             continue;
         }
-        if !matches!(relationship.confidence_label.as_str(), "low" | "medium" | "high") {
+        if !matches!(
+            relationship.confidence_label.as_str(),
+            "low" | "medium" | "high"
+        ) {
             continue;
         }
         if let Some(existing) = deduped.iter_mut().find(|existing| {
@@ -2403,7 +2435,10 @@ fn merge_memory_outputs(target: &mut MemoryOutput, incoming: &MemoryOutput) {
     if incoming.body_text.len() > target.body_text.len() {
         target.body_text = incoming.body_text.clone();
     }
-    extend_unique_strings(&mut target.evidence_segment_ids, &incoming.evidence_segment_ids);
+    extend_unique_strings(
+        &mut target.evidence_segment_ids,
+        &incoming.evidence_segment_ids,
+    );
 }
 
 fn merge_entity_outputs(target: &mut EntityOutput, incoming: &EntityOutput) {
@@ -2413,7 +2448,10 @@ fn merge_entity_outputs(target: &mut EntityOutput, incoming: &EntityOutput) {
     if incoming.entity_type.len() > target.entity_type.len() {
         target.entity_type = incoming.entity_type.clone();
     }
-    extend_unique_strings(&mut target.evidence_segment_ids, &incoming.evidence_segment_ids);
+    extend_unique_strings(
+        &mut target.evidence_segment_ids,
+        &incoming.evidence_segment_ids,
+    );
 }
 
 fn merge_relationship_outputs(target: &mut RelationshipOutput, incoming: &RelationshipOutput) {
@@ -2424,7 +2462,10 @@ fn merge_relationship_outputs(target: &mut RelationshipOutput, incoming: &Relati
     if confidence_rank(&incoming.confidence_label) > confidence_rank(&target.confidence_label) {
         target.confidence_label = incoming.confidence_label.clone();
     }
-    extend_unique_strings(&mut target.evidence_segment_ids, &incoming.evidence_segment_ids);
+    extend_unique_strings(
+        &mut target.evidence_segment_ids,
+        &incoming.evidence_segment_ids,
+    );
 }
 
 fn merge_retrieval_intents(target: &mut RetrievalIntent, incoming: &RetrievalIntent) {
@@ -2434,7 +2475,10 @@ fn merge_retrieval_intents(target: &mut RetrievalIntent, incoming: &RetrievalInt
     if incoming.query_text.len() > target.query_text.len() {
         target.query_text = incoming.query_text.clone();
     }
-    extend_unique_strings(&mut target.evidence_segment_ids, &incoming.evidence_segment_ids);
+    extend_unique_strings(
+        &mut target.evidence_segment_ids,
+        &incoming.evidence_segment_ids,
+    );
 }
 
 fn extend_unique_strings(target: &mut Vec<String>, values: &[String]) {
@@ -2490,28 +2534,70 @@ fn canonicalize_memory_type(raw: &str, title: &str, body_text: &str) -> String {
     let body = normalize_candidate_key_text(body_text);
     let combined = format!("{title} {body}");
 
-    if matches!(raw.as_str(), "identity fact" | "identity_fact") {
-        return "identity_fact".to_string();
+    if matches!(
+        raw.as_str(),
+        "personal fact"
+            | "personal_fact"
+            | "identity fact"
+            | "identity_fact"
+            | "fact"
+            | "experience"
+            | "biographical fact"
+            | "health fact"
+    ) {
+        return "personal_fact".to_string();
     }
     if matches!(raw.as_str(), "preference" | "preferences") {
         return "preference".to_string();
     }
-    if matches!(raw.as_str(), "ongoing task" | "ongoing_task" | "ongoing state" | "ongoing_state")
-    {
-        return "ongoing_task".to_string();
+    if matches!(
+        raw.as_str(),
+        "ongoing task"
+            | "ongoing_task"
+            | "ongoing state"
+            | "ongoing_state"
+            | "current state"
+            | "task"
+    ) {
+        return "ongoing_state".to_string();
+    }
+    if matches!(raw.as_str(), "project fact" | "project_fact" | "decision") {
+        return "project_fact".to_string();
+    }
+    if matches!(
+        raw.as_str(),
+        "reference" | "reference material" | "reference_material" | "skill"
+    ) {
+        return "reference".to_string();
     }
 
     if combined.contains("user weigh")
         || combined.contains("body weight")
+        || combined.contains("weight history")
         || combined.contains("user age")
         || combined.contains("cholesterol")
         || combined.contains("ldl")
         || combined.contains("apob")
         || combined.contains("lp a")
         || combined.contains("egfr")
+        || combined.contains("tbi")
+        || combined.contains("concussion")
+        || combined.contains("brain hemorrhage")
+        || combined.contains("hemorrhage")
+        || combined.contains("lung nodule")
+        || combined.contains("smoking history")
+        || combined.contains("pack year")
+        || combined.contains("fracture")
+        || combined.contains("broken back")
+        || combined.contains("broke my back")
+        || combined.contains("injur")
+        || combined.contains("elite cyclist")
+        || combined.contains("cycling history")
+        || combined.contains("racing year")
+        || combined.contains("university of")
         || combined.contains("lab result")
     {
-        return "identity_fact".to_string();
+        return "personal_fact".to_string();
     }
 
     if combined.contains("prefer")
@@ -2540,7 +2626,7 @@ fn canonicalize_memory_type(raw: &str, title: &str, body_text: &str) -> String {
         || combined.contains("week")
         || combined.contains("daily ")
     {
-        return "ongoing_task".to_string();
+        return "ongoing_state".to_string();
     }
 
     if combined.contains("program")
@@ -2549,18 +2635,37 @@ fn canonicalize_memory_type(raw: &str, title: &str, body_text: &str) -> String {
         || combined.contains("architecture")
         || combined.contains("clean engine")
         || combined.contains("project")
+        || combined.contains("decision")
+        || combined.contains("should ")
+        || combined.contains("must ")
     {
         return "project_fact".to_string();
     }
 
+    if combined.contains("reference")
+        || combined.contains("cheatsheet")
+        || combined.contains("cheat sheet")
+        || combined.contains("script")
+        || combined.contains("template")
+        || combined.contains("guide")
+    {
+        return "reference".to_string();
+    }
+
     match raw.as_str() {
-        "project fact" | "project_fact" => "ongoing_task".to_string(),
-        "reference" => "ongoing_task".to_string(),
-        "" => "ongoing_task".to_string(),
+        "" => "personal_fact".to_string(),
         other if other.contains("preference") => "preference".to_string(),
-        other if other.contains("identity") => "identity_fact".to_string(),
-        other if other.contains("ongoing") => "ongoing_task".to_string(),
-        _ => "ongoing_task".to_string(),
+        other if other.contains("personal") || other.contains("identity") => {
+            "personal_fact".to_string()
+        }
+        other if other.contains("project") || other.contains("decision") => {
+            "project_fact".to_string()
+        }
+        other if other.contains("ongoing") || other.contains("state") || other.contains("task") => {
+            "ongoing_state".to_string()
+        }
+        other if other.contains("reference") => "reference".to_string(),
+        _ => "personal_fact".to_string(),
     }
 }
 
@@ -2582,7 +2687,10 @@ fn canonicalize_entity_type(raw: &str) -> String {
     }
 }
 
-fn prefer_richer_optional_text(current: Option<String>, incoming: Option<String>) -> Option<String> {
+fn prefer_richer_optional_text(
+    current: Option<String>,
+    incoming: Option<String>,
+) -> Option<String> {
     match (current, incoming) {
         (Some(current), Some(incoming)) => {
             if incoming.len() > current.len() {
@@ -2908,8 +3016,14 @@ pub(crate) fn build_conversation_user_prompt(
          \n\
          Output guidance:\n\
          - summary: 2-4 compact sentences covering the main topics discussed\n\
+         - summary is not a substitute for memories; memories capture discrete durable facts for retrieval, while the summary is a narrative synthesis\n\
+         - do not mirror the summary into memories or the memories into the summary mechanically\n\
+         - if a durable fact could answer a later retrieval question on its own, emit it as a memory whether or not the summary also mentions it\n\
          - classifications: 1-3 covering the major domains of the conversation\n\
-         - memories: extract every durable personal fact, preference, decision, health detail, biographical event, ongoing state, constraint, or project fact that could be independently retrieved later. A long or rich conversation should produce many memories, not a summary of a few. Categories to look for: preferences, history, decisions made, conclusions reached, ongoing state, goals, constraints, relationships between entities, health and medical context, biographical facts, and named workflows or systems.\n\
+         - classifications are broad topical labels only; do not use them instead of memories for durable facts\n\
+         - memories: extract every durable personal fact, preference, project fact, ongoing state, or reusable reference that could be independently retrieved later. A long or rich conversation should produce many memories, not a summary of a few. Categories to look for: preferences, history, decisions made, conclusions reached, ongoing state, goals, constraints, health and medical context, biographical facts, and named workflows or systems.\n\
+         - choose the closest memory_type from the schema; use the broad available categories and do not invent narrower domain-specific subtypes\n\
+         - biographical and health history belongs in durable memories, not only in summary prose\n\
          - entities: include all explicit named people, projects, systems, organizations, and domain-specific proper nouns with durable retrieval value\n\
          - relationships: include explicit supported links between emitted entities or durable facts\n\
          - retrieval_intents: ask archive-only follow-up questions when duplicate detection, prior-state matching, or contradiction checks matter\n\
@@ -3175,13 +3289,7 @@ pub(crate) fn structured_output_schema_with_allowed_refs(
                     "properties": {
                         "memory_type": {
                             "type": "string",
-                            "enum": [
-                                "preference",
-                                "project_fact",
-                                "identity_fact",
-                                "ongoing_task",
-                                "reference"
-                            ]
+                            "enum": MEMORY_TYPE_VALUES
                         },
                         "memory_scope": {
                             "type": "string",
@@ -3279,7 +3387,8 @@ pub(crate) fn structured_output_schema_with_allowed_refs(
 }
 
 pub(crate) fn openai_structured_output_schema(input: &ArtifactProcessorInput) -> serde_json::Value {
-    let mut schema = structured_output_schema_with_allowed_refs(&allowed_artifact_evidence_refs(input));
+    let mut schema =
+        structured_output_schema_with_allowed_refs(&allowed_artifact_evidence_refs(input));
     if let Some(memories) = schema
         .get_mut("properties")
         .and_then(serde_json::Value::as_object_mut)
@@ -3299,15 +3408,7 @@ pub(crate) fn openai_structured_output_schema(input: &ArtifactProcessorInput) ->
                     .get_mut("memory_type")
                     .and_then(serde_json::Value::as_object_mut)
                 {
-                    memory_type.insert(
-                        "enum".to_string(),
-                        serde_json::json!([
-                            "preference",
-                            "project_fact",
-                            "identity_fact",
-                            "ongoing_task"
-                        ]),
-                    );
+                    memory_type.insert("enum".to_string(), serde_json::json!(MEMORY_TYPE_VALUES));
                 }
             }
         }
@@ -3364,17 +3465,17 @@ pub(crate) fn reconciliation_output_schema() -> serde_json::Value {
     })
 }
 
-const OPENAI_PROMPT_VERSION: &str = "openai-strict-v3";
-pub(crate) const ANTHROPIC_PROMPT_VERSION: &str = "anthropic-strict-v2";
-pub(crate) const GEMINI_PROMPT_VERSION: &str = "gemini-strict-v9";
-pub(crate) const GROK_PROMPT_VERSION: &str = "grok-strict-v3";
-const OPENAI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for OpenAI. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, ongoing state, and personal history that could be independently retrieved later. A rich conversation should produce many memories — not a summary of a few highlights.\n5. Generic how-to advice, recipes, troubleshooting steps, code snippets, and one-off utility answers should produce zero memories unless they reveal a stable user preference or durable personal fact.\n6. If the artifact is primarily generic instructions or reusable advice with no durable user/project state, return `memories: []`.\n7. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, architecture decision, implementation plan, or durable operating model.\n8. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact.\n9. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n10. When uncertain on a low-signal artifact, keep the information in the summary instead of emitting memories.\n11. Use retrieval_intents only for archive lookups that matter for duplicate detection, contradiction checks, or prior-state matching.\n12. Do not guess prior continuity; emit retrieval_intents instead.\n13. Emit relationships only when the artifact explicitly supports the link.\n14. relationship confidence_label must be low, medium, or high.\n15. memory_scope is always artifact and memory_scope_value is the artifact_id.\n16. Low-signal artifacts should usually have low importance and no classifications.\n17. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n18. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+const OPENAI_PROMPT_VERSION: &str = "openai-strict-v5";
+pub(crate) const ANTHROPIC_PROMPT_VERSION: &str = "anthropic-strict-v4";
+pub(crate) const GEMINI_PROMPT_VERSION: &str = "gemini-strict-v11";
+pub(crate) const GROK_PROMPT_VERSION: &str = "grok-strict-v5";
+const OPENAI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for OpenAI. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, ongoing state, and personal history that could be independently retrieved later. A rich conversation should produce many memories, not a summary of a few highlights.\n5. Summary, classifications, and memories are complementary but different. Memories capture discrete durable facts for retrieval; the summary is a narrative synthesis. Do not mirror the summary into memories or the memories into the summary mechanically.\n6. If a durable fact could answer a future retrieval question on its own, emit it as a discrete memory whether or not the summary also mentions it. Classifications are topical labels, not substitutes for memories.\n7. Choose the closest memory_type from the provided schema. Use the broad retrieval-oriented categories already available instead of inventing domain-specific subtypes.\n8. Generic how-to advice, recipes, troubleshooting steps, code snippets, and one-off utility answers should produce zero memories unless they reveal a stable user preference or durable personal fact.\n9. If the artifact is primarily generic instructions or reusable advice with no durable user/project state, return `memories: []`.\n10. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, architecture decision, implementation plan, or durable operating model.\n11. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact.\n12. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n13. When uncertain on a low-signal artifact, keep the information in the summary instead of emitting memories.\n14. Use retrieval_intents only for archive lookups that matter for duplicate detection, contradiction checks, or prior-state matching.\n15. Do not guess prior continuity; emit retrieval_intents instead.\n16. Emit relationships only when the artifact explicitly supports the link.\n17. relationship confidence_label must be low, medium, or high.\n18. memory_scope is always artifact and memory_scope_value is the artifact_id.\n19. Low-signal artifacts should usually have low importance and no classifications.\n20. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n21. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
-pub(crate) const ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Anthropic. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, ongoing state, and personal history that could be independently retrieved later. A rich conversation should produce many memories — not a summary of a few highlights.\n5. Generic how-to advice, recipes, troubleshooting steps, code snippets, and one-off utility answers should produce zero memories unless they reveal a stable user preference or durable personal fact.\n6. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, architecture decision, implementation plan, or durable operating model.\n7. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact.\n8. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n9. When uncertain on a low-signal artifact, keep the information in the summary instead of emitting memories.\n10. Use retrieval_intents only for archive lookups that matter for duplicate detection, contradiction checks, or prior-state matching.\n11. Do not guess prior continuity; emit retrieval_intents instead.\n12. Emit relationships only when the artifact explicitly supports the link.\n13. relationship confidence_label must be low, medium, or high.\n14. memory_scope is always artifact and memory_scope_value is the artifact_id.\n15. Low-signal artifacts should usually have low importance and no classifications.\n16. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n17. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+pub(crate) const ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Anthropic. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, ongoing state, and personal history that could be independently retrieved later. A rich conversation should produce many memories, not a summary of a few highlights.\n5. Summary, classifications, and memories are complementary but different. Memories capture discrete durable facts for retrieval; the summary is a narrative synthesis. Do not mirror the summary into memories or the memories into the summary mechanically.\n6. If a durable fact could answer a future retrieval question on its own, emit it as a discrete memory whether or not the summary also mentions it. Classifications are topical labels, not substitutes for memories.\n7. Choose the closest memory_type from the provided schema. Use the broad retrieval-oriented categories already available instead of inventing domain-specific subtypes.\n8. Generic how-to advice, recipes, troubleshooting steps, code snippets, and one-off utility answers should produce zero memories unless they reveal a stable user preference or durable personal fact.\n9. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, architecture decision, implementation plan, or durable operating model.\n10. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact.\n11. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n12. When uncertain on a low-signal artifact, keep the information in the summary instead of emitting memories.\n13. Use retrieval_intents only for archive lookups that matter for duplicate detection, contradiction checks, or prior-state matching.\n14. Do not guess prior continuity; emit retrieval_intents instead.\n15. Emit relationships only when the artifact explicitly supports the link.\n16. relationship confidence_label must be low, medium, or high.\n17. memory_scope is always artifact and memory_scope_value is the artifact_id.\n18. Low-signal artifacts should usually have low importance and no classifications.\n19. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n20. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
-pub(crate) const GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Gemini. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, and ongoing state that could be independently retrieved later.\n5. Each memory must be one standalone durable item. Do not bundle multiple distinct facts into one memory. Do not emit a memory that merely summarizes the whole artifact.\n6. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n7. Before finalizing memories, ask what future retrieval question each memory would answer. If two memories would answer substantially the same future question, keep only the single best memory.\n8. Do not emit near-duplicate memories, classifications, entities, or relationships. If two candidate items express the same underlying fact at different specificity levels, keep the single best item: prefer the more specific, better grounded, higher-signal version and merge all supporting evidence_segment_ids into it.\n9. Repeated mentions of the same fact, preference, diagnosis, plan, metric, or identity should strengthen one existing item, not create another slightly reworded item.\n10. Prefer fewer unique items over many overlapping paraphrases. A longer list is only better when it adds genuinely new retrievable information.\n11. Do not emit umbrella memories like background, profile, habits, architecture, or overview when the same information is already captured by narrower memories. Prefer concrete facts, diagnoses, findings, decisions, reactions, plans, and stable preferences.\n12. The summary must be one coherent artifact-level synthesis, not a concatenation of chunk summaries or a list of mini-summaries.\n13. Generic how-to advice and one-off utility answers should produce zero memories unless they reveal a stable user preference or durable personal fact.\n14. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n15. Do not guess prior continuity; emit retrieval_intents instead.\n16. Emit relationships only when the artifact explicitly supports the link.\n17. relationship confidence_label must be low, medium, or high.\n18. memory_scope is always artifact and memory_scope_value is the artifact_id.\n19. Low-signal artifacts should usually have low importance and no classifications.\n20. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n21. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+pub(crate) const GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Gemini. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, and ongoing state that could be independently retrieved later.\n5. Summary, classifications, and memories are complementary but different. Memories capture discrete durable facts for retrieval; the summary is a narrative synthesis. Do not mirror the summary into memories or the memories into the summary mechanically.\n6. If a durable fact could answer a future retrieval question on its own, emit it as a discrete memory whether or not the summary also mentions it. Classifications are topical labels, not substitutes for memories.\n7. Choose the closest memory_type from the provided schema. Use the broad retrieval-oriented categories already available instead of inventing domain-specific subtypes.\n8. Each memory must be one standalone durable item. Do not bundle multiple distinct facts into one memory. Do not emit a memory that merely summarizes the whole artifact.\n9. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n10. Before finalizing memories, ask what future retrieval question each memory would answer. If two memories would answer substantially the same future question, keep only the single best memory.\n11. Do not emit near-duplicate memories, classifications, entities, or relationships. If two candidate items express the same underlying fact at different specificity levels, keep the single best item: prefer the more specific, better grounded, higher-signal version and merge all supporting evidence_segment_ids into it.\n12. Repeated mentions of the same fact, preference, diagnosis, plan, metric, or identity should strengthen one existing item, not create another slightly reworded item.\n13. Prefer fewer unique items over many overlapping paraphrases. A longer list is only better when it adds genuinely new retrievable information.\n14. Do not emit umbrella memories like background, profile, habits, architecture, or overview when the same information is already captured by narrower memories. Prefer concrete facts, diagnoses, findings, decisions, reactions, plans, and stable preferences.\n15. The summary must be one coherent artifact-level synthesis, not a concatenation of chunk summaries or a list of mini-summaries.\n16. Generic how-to advice and one-off utility answers should produce zero memories unless they reveal a stable user preference or durable personal fact.\n17. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n18. Do not guess prior continuity; emit retrieval_intents instead.\n19. Emit relationships only when the artifact explicitly supports the link.\n20. relationship confidence_label must be low, medium, or high.\n21. memory_scope is always artifact and memory_scope_value is the artifact_id.\n22. Low-signal artifacts should usually have low importance and no classifications.\n23. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n24. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
-pub(crate) const GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Grok. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, ongoing state, and personal history that could be independently retrieved later. A rich conversation should produce many memories — not a summary of a few highlights.\n5. Generic how-to advice, recipes, troubleshooting steps, and one-off utility answers should produce zero memories unless they reveal a stable user preference, durable personal fact, or ongoing state.\n6. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, architecture decision, implementation plan, or durable operating model.\n7. Named projects, workflows, architecture choices, health protocols, training programs, and repeated operating preferences should be preserved as memories when the artifact provides explicit evidence.\n8. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact or bundles multiple unrelated subtopics together.\n9. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n10. When uncertain on a low-signal artifact, keep the information in the summary instead of emitting memories.\n11. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n12. Do not guess prior continuity; emit retrieval_intents instead.\n13. Emit relationships only when the artifact explicitly supports the link.\n14. relationship confidence_label must be low, medium, or high.\n15. memory_scope is always artifact and memory_scope_value is the artifact_id.\n16. Low-signal artifacts should usually have low importance and no classifications.\n17. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n18. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+pub(crate) const GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Grok. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, ongoing state, and personal history that could be independently retrieved later. A rich conversation should produce many memories, not a summary of a few highlights.\n5. Summary, classifications, and memories are complementary but different. Memories capture discrete durable facts for retrieval; the summary is a narrative synthesis. Do not mirror the summary into memories or the memories into the summary mechanically.\n6. If a durable fact could answer a future retrieval question on its own, emit it as a discrete memory whether or not the summary also mentions it. Classifications are topical labels, not substitutes for memories.\n7. Choose the closest memory_type from the provided schema. Use the broad retrieval-oriented categories already available instead of inventing domain-specific subtypes.\n8. Generic how-to advice, recipes, troubleshooting steps, and one-off utility answers should produce zero memories unless they reveal a stable user preference, durable personal fact, or ongoing state.\n9. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, architecture decision, implementation plan, or durable operating model.\n10. Named projects, workflows, architecture choices, and repeated operating preferences should be preserved as memories when the artifact provides explicit evidence.\n11. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact or bundles multiple unrelated subtopics together.\n12. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n13. When uncertain on a low-signal artifact, keep the information in the summary instead of emitting memories.\n14. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n15. Do not guess prior continuity; emit retrieval_intents instead.\n16. Emit relationships only when the artifact explicitly supports the link.\n17. relationship confidence_label must be low, medium, or high.\n18. memory_scope is always artifact and memory_scope_value is the artifact_id.\n19. Low-signal artifacts should usually have low importance and no classifications.\n20. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n21. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
 
 pub(crate) const RECONCILIATION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict reconciliation engine. Use only the provided extraction candidates, retrieval results, and source evidence. Return ONLY valid JSON.\n\nRules:\n1. Prefer no merge over a weak merge.\n2. Choose create_new when the archive evidence is insufficient.\n3. Use attach_to_existing or strengthen_existing only when the retrieved object clearly matches the candidate.\n4. Use supersede_existing only when the new artifact clearly updates or replaces prior state.\n5. Use contradicts_existing only when the artifact clearly conflicts with retrieved prior state.\n6. Never merge identities, projects, or relationships on vague topical overlap.\n7. Every decision must cite real evidence_segment_ids from the extraction candidates.\n8. Any decision that uses an existing-object action must include the exact matched_object_id from retrieval results.\n9. If you cannot name an exact matched_object_id, choose create_new.\n10. Output valid JSON only.";
 
@@ -3744,7 +3845,10 @@ mod tests {
         let output = processor
             .process(&sample_input())
             .expect("processor should salvage valid objects");
-        assert_eq!(output.summary.body_text, "The artifact prefers the original hash-in-book symbol.");
+        assert_eq!(
+            output.summary.body_text,
+            "The artifact prefers the original hash-in-book symbol."
+        );
         assert_eq!(output.memories.len(), 1);
         assert_eq!(output.memories[0].memory_scope_value, "artifact-1");
     }
@@ -3759,14 +3863,35 @@ mod tests {
         assert!(!prompt.contains("for example s1, s2"));
     }
 
+    #[test]
+    fn conversation_prompt_requires_discrete_personal_history_memories() {
+        let prompt = build_conversation_user_prompt(&sample_input()).expect("prompt should build");
+
+        assert!(prompt.contains("summary is not a substitute for memories"));
+        assert!(prompt.contains("do not mirror the summary into memories"));
+        assert!(prompt.contains("classifications are broad topical labels only"));
+        assert!(prompt.contains("choose the closest memory_type from the schema"));
+        assert!(prompt.contains("biographical and health history belongs in durable memories"));
+    }
+
+    #[test]
+    fn canonicalize_memory_type_maps_health_history_to_personal_fact() {
+        let memory_type = canonicalize_memory_type(
+            "",
+            "TBI and broken back history",
+            "History includes a brain hemorrhage after a car accident, a second concussion, lung nodules, smoking history, and elite cycling background.",
+        );
+
+        assert_eq!(memory_type, "personal_fact");
+    }
+
     fn sample_reconciliation_input() -> ReconciliationProcessorInput {
         ReconciliationProcessorInput {
             artifact_id: "artifact-1".to_string(),
             source_type: SourceType::ChatGptExport,
             summary: SummaryOutput {
                 title: Some("Architecture direction".to_string()),
-                body_text: "The user wants the worker to avoid silent fallback."
-                    .to_string(),
+                body_text: "The user wants the worker to avoid silent fallback.".to_string(),
                 evidence_segment_ids: vec!["seg-1".to_string()],
             },
             memories: vec![MemoryOutput {
@@ -3811,7 +3936,10 @@ mod tests {
             .expect("normalization should preserve the candidate");
 
         assert_eq!(decisions.len(), 1);
-        assert_eq!(decisions[0].decision_kind, ReconciliationDecisionKind::CreateNew);
+        assert_eq!(
+            decisions[0].decision_kind,
+            ReconciliationDecisionKind::CreateNew
+        );
         assert_eq!(decisions[0].matched_object_id, None);
     }
 

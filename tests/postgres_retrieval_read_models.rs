@@ -93,7 +93,11 @@ fn postgres_retrieval_read_models_load_search_detail_and_context_material() {
     let read_store = PostgresRetrievalReadStore::new(harness.0.clone());
 
     let search_hits = read_store
-        .search_candidates("summary", 10)
+        .search_candidates(
+            "summary",
+            10,
+            &open_archive::storage::SearchFilters::default(),
+        )
         .expect("search should succeed");
     assert!(!search_hits.is_empty());
     assert!(search_hits.iter().any(|hit| hit.artifact_id == artifact_id));

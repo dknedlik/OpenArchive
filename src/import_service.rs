@@ -610,10 +610,9 @@ mod tests {
 
         // Verify job payload matches ArtifactExtractPayload v1 contract
         for artifact_set in &import_set.artifact_sets {
-            let payload = crate::storage::ArtifactExtractPayload::from_json(
-                &artifact_set.job.payload_json,
-            )
-            .expect("payload must deserialize to ArtifactExtractPayload");
+            let payload =
+                crate::storage::ArtifactExtractPayload::from_json(&artifact_set.job.payload_json)
+                    .expect("payload must deserialize to ArtifactExtractPayload");
             assert_eq!(payload.schema_version, "1");
             assert_eq!(
                 payload.source_type,

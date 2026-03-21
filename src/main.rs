@@ -224,7 +224,7 @@ mod tests {
     use open_archive::object_store::{NewObject, ObjectStore, PutObjectResult, StoredObject};
     use open_archive::storage::{
         ArchiveRetrievalStore, ArtifactListItem, ArtifactReadStore, ImportStatus,
-        ImportWriteResult, ImportWriteStore, RetrievedContextItem, RetrievalIntent, WriteImportSet,
+        ImportWriteResult, ImportWriteStore, RetrievalIntent, RetrievedContextItem, WriteImportSet,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -430,7 +430,10 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
             object_store,
+            None,
         ))
     }
 }

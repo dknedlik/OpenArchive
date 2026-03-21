@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use crate::error::{OpenArchiveError, Result};
 use crate::storage::{
-    ArtifactContextPackReadStore, DerivedObjectType, EnrichmentStatus, EvidenceRole, ScopeType,
-    SourceType, SupportStrength,
+    ArtifactContextPackReadStore, CrossArtifactReadStore, DerivedObjectType, EnrichmentStatus,
+    EvidenceRole, ScopeType, SourceType, SupportStrength,
 };
 
 /// Maximum characters to include in an evidence text excerpt.
@@ -80,6 +80,16 @@ pub struct PackProvenance {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct RelatedObjectEntry {
+    pub derived_object_id: String,
+    pub artifact_id: String,
+    pub derived_object_type: DerivedObjectType,
+    pub title: Option<String>,
+    pub body_text: Option<String>,
+    pub candidate_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ContextPackResponse {
     pub artifact_id: String,
     pub title: Option<String>,
@@ -89,6 +99,8 @@ pub struct ContextPackResponse {
     pub classifications: Vec<ContextDerivedEntry>,
     pub memories: Vec<ContextDerivedEntry>,
     pub relationships: Vec<ContextDerivedEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub related_objects: Vec<RelatedObjectEntry>,
     pub segment_count: usize,
     pub provenance: PackProvenance,
 }
@@ -99,11 +111,25 @@ pub struct ContextPackResponse {
 
 pub struct ContextPackService {
     read_store: Arc<dyn ArtifactContextPackReadStore + Send + Sync>,
+    cross_artifact_store: Option<Arc<dyn CrossArtifactReadStore + Send + Sync>>,
 }
 
 impl ContextPackService {
     pub fn new(read_store: Arc<dyn ArtifactContextPackReadStore + Send + Sync>) -> Self {
-        Self { read_store }
+        Self {
+            read_store,
+            cross_artifact_store: None,
+        }
+    }
+
+    pub fn with_cross_artifact_store(
+        read_store: Arc<dyn ArtifactContextPackReadStore + Send + Sync>,
+        cross_artifact_store: Arc<dyn CrossArtifactReadStore + Send + Sync>,
+    ) -> Self {
+        Self {
+            read_store,
+            cross_artifact_store: Some(cross_artifact_store),
+        }
     }
 
     pub fn assemble(&self, request: ContextPackRequest) -> Result<Option<ContextPackResponse>> {
@@ -220,6 +246,44 @@ impl ContextPackService {
             omissions,
         };
 
+        // Cross-artifact related objects lookup.
+        let mut related_objects = Vec::new();
+        if let Some(cross_store) = &self.cross_artifact_store {
+            let candidate_keys: Vec<String> = material
+                .derived_objects
+                .iter()
+                .filter_map(|obj| obj.candidate_key.clone())
+                .filter(|k| !k.is_empty())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+
+            if !candidate_keys.is_empty() {
+                match cross_store.find_related_by_candidate_keys(
+                    &request.artifact_id,
+                    &candidate_keys,
+                    30,
+                ) {
+                    Ok(related) => {
+                        related_objects = related
+                            .into_iter()
+                            .map(|r| RelatedObjectEntry {
+                                derived_object_id: r.derived_object_id,
+                                artifact_id: r.artifact_id,
+                                derived_object_type: r.derived_object_type,
+                                title: r.title,
+                                body_text: r.body_text,
+                                candidate_key: r.candidate_key,
+                            })
+                            .collect();
+                    }
+                    Err(e) => {
+                        eprintln!("[context-pack] cross-artifact lookup failed: {e}");
+                    }
+                }
+            }
+        }
+
         Ok(Some(ContextPackResponse {
             artifact_id: material.artifact.artifact_id.clone(),
             title: material.artifact.title.clone(),
@@ -229,6 +293,7 @@ impl ContextPackService {
             classifications,
             memories,
             relationships,
+            related_objects,
             segment_count: total_segments,
             provenance,
         }))
@@ -314,30 +379,20 @@ fn exact_memory_duplicate(left: &ContextDerivedEntry, right: &ContextDerivedEntr
 }
 
 fn merge_context_memory(target: &mut ContextDerivedEntry, incoming: &ContextDerivedEntry) {
-    if incoming
-        .body_text
-        .as_deref()
-        .unwrap_or_default()
-        .len()
+    if incoming.body_text.as_deref().unwrap_or_default().len()
         > target.body_text.as_deref().unwrap_or_default().len()
     {
         target.body_text = incoming.body_text.clone();
     }
-    if incoming
-        .title
-        .as_deref()
-        .unwrap_or_default()
-        .len()
+    if incoming.title.as_deref().unwrap_or_default().len()
         > target.title.as_deref().unwrap_or_default().len()
     {
         target.title = incoming.title.clone();
     }
     for evidence in &incoming.evidence {
-        if !target
-            .evidence
-            .iter()
-            .any(|existing| existing.segment_id == evidence.segment_id && existing.rank == evidence.rank)
-        {
+        if !target.evidence.iter().any(|existing| {
+            existing.segment_id == evidence.segment_id && existing.rank == evidence.rank
+        }) {
             target.evidence.push(evidence.clone());
         }
     }
@@ -433,6 +488,7 @@ mod tests {
             body_text: Some(format!("{id} body")),
             scope_id: "art-1".to_string(),
             scope_type: ScopeType::Artifact,
+            candidate_key: None,
         }
     }
 
