@@ -38,7 +38,6 @@
     "memory_count": { "min": 5, "max": 7 },
     "classification_count": { "min": 0, "max": 2 },
     "importance_score": { "min": 6, "max": 9 },
-    "escalate_to_frontier": false,
     "required_phrases": [
       "tbi",
       "brain hemorrhage",

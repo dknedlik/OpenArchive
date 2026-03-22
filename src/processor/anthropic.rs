@@ -8,12 +8,13 @@ use crate::config::AnthropicConfig;
 use crate::storage::types::EnrichmentTier;
 
 use super::{
-    structured_output_schema_with_allowed_refs, ArtifactProcessor, ArtifactProcessorFactory,
-    BatchHandle, BatchPollResult, ConversationEnrichmentStrategy, ExtractionBatchSubmitter,
-    HostedArtifactProcessor, HostedReconciliationProcessor, InferenceClient, InferenceResult,
-    InferenceUsage, ProcessorError, ReconciliationBatchSubmitter, ReconciliationProcessor,
-    ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, ANTHROPIC_PROMPT_VERSION,
-    RECONCILIATION_SYSTEM_PROMPT,
+    allowed_artifact_evidence_refs, build_two_phase_candidate_user_prompt,
+    candidate_output_schema_with_allowed_refs, parse_candidate_output, ArtifactProcessor,
+    ArtifactProcessorFactory, BatchHandle, BatchPollResult, ConversationEnrichmentStrategy,
+    ExtractionBatchSubmitter, HostedArtifactProcessor, HostedReconciliationProcessor,
+    InferenceClient, InferenceResult, InferenceUsage, ProcessorError, ReconciliationBatchSubmitter,
+    ReconciliationProcessor, ANTHROPIC_PROMPT_VERSION, RECONCILIATION_SYSTEM_PROMPT,
+    TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
 };
 
 pub struct AnthropicProcessorFactory {
@@ -21,6 +22,8 @@ pub struct AnthropicProcessorFactory {
     batch_client: Option<Arc<AnthropicClient>>,
     standard_model: String,
     quality_model: String,
+    reconcile_standard_model: String,
+    reconcile_quality_model: String,
 }
 
 impl AnthropicProcessorFactory {
@@ -30,12 +33,19 @@ impl AnthropicProcessorFactory {
             .quality_model
             .clone()
             .unwrap_or_else(|| config.standard_model.clone());
+        let reconcile_quality_model = config
+            .reconcile_quality_model
+            .clone()
+            .or_else(|| config.quality_model.clone())
+            .unwrap_or_else(|| config.reconcile_standard_model.clone());
 
         Ok(Self {
             client: client.clone(),
             batch_client: Some(client),
             standard_model: config.standard_model,
             quality_model,
+            reconcile_standard_model: config.reconcile_standard_model,
+            reconcile_quality_model,
         })
     }
 }
@@ -61,8 +71,8 @@ impl ArtifactProcessorFactory for AnthropicProcessorFactory {
         tier: EnrichmentTier,
     ) -> Result<Box<dyn ReconciliationProcessor>, ProcessorError> {
         let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
+            EnrichmentTier::Standard => self.reconcile_standard_model.clone(),
+            EnrichmentTier::Quality => self.reconcile_quality_model.clone(),
         };
         Ok(Box::new(HostedReconciliationProcessor {
             client: Arc::clone(&self.client),
@@ -84,7 +94,7 @@ impl ArtifactProcessorFactory for AnthropicProcessorFactory {
         };
         Ok(Some(Box::new(AnthropicExtractionSubmitter {
             client: Arc::clone(client),
-            model,
+            candidate_model: model,
         })))
     }
 
@@ -96,8 +106,8 @@ impl ArtifactProcessorFactory for AnthropicProcessorFactory {
             return Ok(None);
         };
         let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
+            EnrichmentTier::Standard => self.reconcile_standard_model.clone(),
+            EnrichmentTier::Quality => self.reconcile_quality_model.clone(),
         };
         Ok(Some(Box::new(AnthropicReconciliationSubmitter {
             client: Arc::clone(client),
@@ -289,11 +299,49 @@ impl AnthropicClient {
         }
         Ok(response_text)
     }
+
+    #[allow(dead_code)]
+    fn wait_for_message_batch(
+        &self,
+        batch_id: &str,
+    ) -> Result<AnthropicMessageBatch, ProcessorError> {
+        let mut poll_count: u64 = 0;
+        loop {
+            let batch = match self.get_message_batch(batch_id) {
+                Ok(batch) => batch,
+                Err(err) if err.is_retryable() => {
+                    if poll_count == 0 || poll_count % 12 == 0 {
+                        log::warn!(
+                            "anthropic batch id={} poll={} transient poll error={}",
+                            batch_id,
+                            poll_count,
+                            err
+                        );
+                    }
+                    poll_count += 1;
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            match batch.processing_status.as_deref().unwrap_or_default() {
+                "ended" => return Ok(batch),
+                "canceling" => {
+                    poll_count += 1;
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+                _ => {
+                    poll_count += 1;
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+            }
+        }
+    }
 }
 
 struct AnthropicExtractionSubmitter {
     client: Arc<AnthropicClient>,
-    model: String,
+    candidate_model: String,
 }
 
 struct AnthropicReconciliationSubmitter {
@@ -310,18 +358,11 @@ impl ExtractionBatchSubmitter for AnthropicExtractionSubmitter {
         &self,
         inputs: &[super::ArtifactProcessorInput],
     ) -> Result<BatchHandle, ProcessorError> {
-        let requests = build_anthropic_batch_requests(inputs, &self.model, |input| {
+        let requests = build_anthropic_batch_requests(inputs, &self.candidate_model, |input| {
             Ok((
-                ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
-                super::build_conversation_user_prompt(input)?,
-                structured_output_schema_with_allowed_refs(
-                    &input
-                        .segments
-                        .iter()
-                        .enumerate()
-                        .map(|(index, _)| format!("evidence_ref_{}", index + 1))
-                        .collect::<Vec<_>>(),
-                ),
+                TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
+                build_two_phase_candidate_user_prompt(input)?,
+                candidate_output_schema_with_allowed_refs(&allowed_artifact_evidence_refs(input)),
             ))
         })?;
         let batch = self.client.create_message_batch(&requests)?;
@@ -360,24 +401,42 @@ impl ExtractionBatchSubmitter for AnthropicExtractionSubmitter {
                     .collect();
             }
         };
-        parse_anthropic_batch_results(&self.client, &batch, inputs, |result, input| {
-            let parsed: super::ModelArtifactOutput = serde_json::from_str(&result.output_text)
-                .map_err(|source| ProcessorError::ParseModelJson {
-                    source,
-                    body_preview: super::preview(&result.output_text),
-                })?;
-            let parsed = parsed.resolve_evidence_aliases(input);
-            let parsed = parsed
-                .validate_and_salvage(input)
-                .map_err(|err| super::attach_output_preview(err, &result.output_text))?;
-            Ok(parsed.into_processor_output(
-                self.model.clone(),
-                result.usage,
-                "anthropic_enrichment",
-                "anthropic",
-                ANTHROPIC_PROMPT_VERSION,
-            ))
-        })
+        let candidate_results =
+            parse_anthropic_batch_results(&self.client, &batch, inputs, |result, input| {
+                let candidate = parse_candidate_output(&result.output_text, input)
+                    .map_err(|err| super::attach_output_preview(err, &result.output_text))?;
+                Ok((candidate, result.usage))
+            });
+        if candidate_results.iter().any(Result::is_err) {
+            return candidate_results
+                .into_iter()
+                .map(|result| {
+                    result
+                        .map(|_| unreachable!("candidate error already checked"))
+                        .map_err(|err| ProcessorError::Message {
+                            message: err.to_string(),
+                        })
+                })
+                .collect();
+        }
+
+        candidate_results
+            .into_iter()
+            .zip(inputs.iter())
+            .map(|(result, input)| match result {
+                Ok((candidate, usage)) => Ok(candidate.into_processor_output(
+                    input,
+                    self.candidate_model.clone(),
+                    usage,
+                    "anthropic_enrichment",
+                    "anthropic",
+                    ANTHROPIC_PROMPT_VERSION,
+                )),
+                Err(err) => Err(ProcessorError::Message {
+                    message: err.to_string(),
+                }),
+            })
+            .collect()
     }
 }
 
@@ -408,7 +467,7 @@ impl ReconciliationBatchSubmitter for AnthropicReconciliationSubmitter {
     fn poll_batch(&self, handle: &BatchHandle) -> Result<BatchPollResult, ProcessorError> {
         AnthropicExtractionSubmitter {
             client: Arc::clone(&self.client),
-            model: self.model.clone(),
+            candidate_model: self.model.clone(),
         }
         .poll_batch(handle)
     }

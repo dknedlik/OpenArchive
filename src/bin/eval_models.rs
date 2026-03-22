@@ -49,7 +49,6 @@ struct EvalExpectations {
     memory_count: EvalRange,
     classification_count: EvalRange,
     importance_score: EvalRange,
-    escalate_to_frontier: bool,
     required_phrases: Vec<String>,
     forbidden_classification_values: Vec<String>,
 }
@@ -198,6 +197,8 @@ fn run_model(
         reasoning_effort_override: base_config.reasoning_effort_override,
         standard_model: model.to_string(),
         quality_model: Some(model.to_string()),
+        reconcile_standard_model: model.to_string(),
+        reconcile_quality_model: Some(model.to_string()),
     })
     .map_err(|err| anyhow!("failed to build OpenAI factory: {err}"))?;
 
@@ -326,14 +327,6 @@ fn score_case(
         ));
     }
 
-    if output.escalate_to_frontier != fixture.expectations.escalate_to_frontier {
-        score -= 10;
-        notes.push(format!(
-            "escalate_to_frontier expected {}, got {}",
-            fixture.expectations.escalate_to_frontier, output.escalate_to_frontier
-        ));
-    }
-
     if !validate_evidence(&output.summary.evidence_segment_ids, &valid_segment_ids) {
         score -= 20;
         notes.push("summary has invalid evidence ids".to_string());
@@ -431,28 +424,6 @@ fn score_case(
         ));
     }
 
-    if output.escalate_to_frontier {
-        if output
-            .escalation_reason
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .is_empty()
-        {
-            score -= 5;
-            notes.push("escalation_reason empty while escalating".to_string());
-        }
-    } else if !output
-        .escalation_reason
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .is_empty()
-    {
-        score -= 5;
-        notes.push("escalation_reason present while not escalating".to_string());
-    }
-
     score = score.clamp(0, 100);
     let output_summary = summarize_output(output);
     let usage_summary = output.usage.as_ref().map(format_usage_summary);
@@ -489,11 +460,10 @@ fn validate_evidence(evidence_segment_ids: &[String], valid_segment_ids: &HashSe
 
 fn summarize_output(output: &open_archive::processor::ArtifactProcessorOutput) -> String {
     format!(
-        "{} memory(ies), {} classification(s), importance {}, escalate {}",
+        "{} memory(ies), {} classification(s), importance {}",
         output.memories.len(),
         output.classifications.len(),
-        output.importance_score,
-        output.escalate_to_frontier
+        output.importance_score
     )
 }
 

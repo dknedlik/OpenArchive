@@ -1,6 +1,7 @@
 use postgres::Client;
 
 use crate::error::{StorageError, StorageResult};
+use crate::storage::postgres::embedding::vector_literal;
 use crate::storage::retrieval_read_store::{
     ArchiveSearchCandidate, ArtifactContextDerivedObject, ArtifactContextEvidenceLink,
     ArtifactContextPackMaterial, ArtifactDetailDerivedObject, ArtifactDetailRecord,
@@ -12,6 +13,35 @@ use crate::storage::types::{
     ScopeType, SourceType, SupportStrength,
 };
 use crate::ParticipantRole;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchQueryMode {
+    Plain,
+    Operator,
+}
+
+impl SearchQueryMode {
+    fn detect(query: &str) -> Self {
+        let has_symbol_operator = query.contains('"')
+            || query.contains('-')
+            || query.contains('|')
+            || query.contains('&')
+            || query.contains('!')
+            || query.contains('(')
+            || query.contains(')')
+            || query.contains('<')
+            || query.contains('>');
+        if has_symbol_operator
+            || query
+                .split_whitespace()
+                .any(|token| matches!(token, "OR" | "AND" | "NOT" | "or" | "and" | "not"))
+        {
+            Self::Operator
+        } else {
+            Self::Plain
+        }
+    }
+}
 
 fn map_pg_err(connection_string: &str, source: postgres::Error) -> StorageError {
     StorageError::Db(crate::error::DbError::ConnectPostgres {
@@ -35,6 +65,17 @@ fn escape_like_query(input: &str) -> String {
     escaped
 }
 
+fn tsquery_sql(param_idx: usize, mode: SearchQueryMode) -> String {
+    match mode {
+        SearchQueryMode::Operator => {
+            format!("websearch_to_tsquery('english', ${param_idx})")
+        }
+        SearchQueryMode::Plain => format!(
+            "to_tsquery('english', replace(nullif(plainto_tsquery('english', ${param_idx})::text, ''), ' & ', ' | '))"
+        ),
+    }
+}
+
 pub fn search_candidates(
     client: &mut Client,
     connection_string: &str,
@@ -45,6 +86,8 @@ pub fn search_candidates(
     let limit = i64::try_from(limit).map_err(|_| StorageError::InvalidDerivationWrite {
         detail: format!("search limit {limit} exceeds Postgres BIGINT range"),
     })?;
+    let query_mode = SearchQueryMode::detect(query_text);
+    let tsquery = tsquery_sql(1, query_mode);
 
     // Build dynamic params list. $1 is always query_text, $2 is always limit.
     let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> = Vec::new();
@@ -101,9 +144,9 @@ pub fn search_candidates(
                     'artifact_title' AS match_kind,
                     NULL::text AS derived_object_type,
                     COALESCE(a.title, '') AS snippet,
-                    300 AS score_hint
+                    300 + LEAST(99, GREATEST(0, FLOOR(ts_rank_cd(a.title_tsv, {tsquery}) * 100)::int)) AS score_hint
                FROM oa_artifact a
-              WHERE a.title_tsv @@ websearch_to_tsquery('english', $1){source_join}"
+              WHERE a.title_tsv @@ {tsquery}{source_join}"
         ));
     }
 
@@ -124,10 +167,10 @@ pub fn search_candidates(
                     'derived_object' AS match_kind,
                     d.derived_object_type AS derived_object_type,
                     COALESCE(d.title, d.body_text, '') AS snippet,
-                    200 AS score_hint
+                    200 + LEAST(99, GREATEST(0, FLOOR(ts_rank_cd(d.search_tsv, {tsquery}) * 100)::int)) AS score_hint
                FROM oa_derived_object d
               WHERE d.object_status = 'active'
-                AND d.search_tsv @@ websearch_to_tsquery('english', $1){derived_extra}"
+                AND d.search_tsv @@ {tsquery}{derived_extra}"
         ));
     }
 
@@ -146,9 +189,9 @@ pub fn search_candidates(
                     'segment_excerpt' AS match_kind,
                     NULL::text AS derived_object_type,
                     COALESCE(s.text_content, '') AS snippet,
-                    100 AS score_hint
+                    100 + LEAST(99, GREATEST(0, FLOOR(ts_rank_cd(s.text_content_tsv, {tsquery}) * 100)::int)) AS score_hint
                FROM oa_segment s
-              WHERE s.text_content_tsv @@ websearch_to_tsquery('english', $1){source_join}"
+              WHERE s.text_content_tsv @@ {tsquery}{source_join}"
         ));
     }
 
@@ -220,6 +263,8 @@ pub fn retrieve_for_intents(
         if query_text.is_empty() {
             continue;
         }
+        let query_mode = SearchQueryMode::detect(query_text);
+        let tsquery = tsquery_sql(2, query_mode);
 
         let derived_type_filter = match intent.intent_type.as_str() {
             "memory_match" => "AND d.derived_object_type = 'memory'",
@@ -241,15 +286,15 @@ pub fn retrieve_for_intents(
                             d.body_text,
                             COALESCE(array_agg(e.segment_id ORDER BY e.evidence_rank)
                                 FILTER (WHERE e.segment_id IS NOT NULL), ARRAY[]::text[]) AS segment_ids,
-                            (to_tsvector('english', COALESCE(d.title, '')) @@ websearch_to_tsquery('english', $2)) AS title_hit,
-                            (to_tsvector('english', COALESCE(d.body_text, '')) @@ websearch_to_tsquery('english', $2)) AS body_hit,
-                            ts_rank_cd(d.search_tsv, websearch_to_tsquery('english', $2)) AS rank_score
+                            (to_tsvector('english', COALESCE(d.title, '')) @@ {tsquery}) AS title_hit,
+                            (to_tsvector('english', COALESCE(d.body_text, '')) @@ {tsquery}) AS body_hit,
+                            ts_rank_cd(d.search_tsv, {tsquery}) AS rank_score
                      FROM oa_derived_object d
                      LEFT JOIN oa_evidence_link e ON e.derived_object_id = d.derived_object_id
                      WHERE d.artifact_id <> $1
                        AND d.object_status = 'active'
                        {derived_type_filter}
-                       AND d.search_tsv @@ websearch_to_tsquery('english', $2)
+                       AND d.search_tsv @@ {tsquery}
                      GROUP BY d.derived_object_type, d.derived_object_id, d.artifact_id, d.title, d.body_text, d.search_tsv
                      ORDER BY rank_score DESC, d.derived_object_id ASC
                      LIMIT $3"
@@ -556,6 +601,7 @@ pub fn search_objects(
     let limit = i64::try_from(limit).map_err(|_| StorageError::InvalidDerivationWrite {
         detail: format!("search limit {limit} exceeds Postgres BIGINT range"),
     })?;
+    let query_mode = filters.query.as_deref().map(SearchQueryMode::detect);
 
     let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> = Vec::new();
     let mut next_param = 1usize;
@@ -576,9 +622,11 @@ pub fn search_objects(
         let idx = next_param;
         params.push(&query_str);
         next_param += 1;
-        conditions.push(format!(
-            "search_tsv @@ websearch_to_tsquery('english', ${idx})"
-        ));
+        let tsquery = tsquery_sql(
+            idx,
+            query_mode.expect("query mode should exist when query exists"),
+        );
+        conditions.push(format!("search_tsv @@ {tsquery}"));
         Some(idx)
     } else {
         None
@@ -609,18 +657,34 @@ pub fn search_objects(
     params.push(&limit);
 
     let order_by = if let Some(idx) = query_param_idx {
-        format!("ts_rank_cd(search_tsv, websearch_to_tsquery('english', ${idx})) DESC")
+        format!(
+            "ts_rank_cd(search_tsv, {}) DESC",
+            tsquery_sql(
+                idx,
+                query_mode.expect("query mode should exist when query exists")
+            )
+        )
     } else {
         "derived_object_id ASC".to_string()
+    };
+    let score_sql = if let Some(idx) = query_param_idx {
+        let tsquery = tsquery_sql(
+            idx,
+            query_mode.expect("query mode should exist when query exists"),
+        );
+        format!("ts_rank_cd(search_tsv, {tsquery})::real")
+    } else {
+        "NULL::real".to_string()
     };
 
     let sql = format!(
         "SELECT derived_object_id, artifact_id, derived_object_type, title, body_text, \
-                candidate_key, confidence_score::double precision \
+                candidate_key, confidence_score::double precision, {} AS score \
          FROM oa_derived_object \
          WHERE {} \
          ORDER BY {} \
          LIMIT ${limit_idx}",
+        score_sql,
         conditions.join(" AND "),
         order_by
     );
@@ -653,6 +717,108 @@ pub fn search_objects(
                     source,
                 }
             })?,
+            score: row.get(7),
+        });
+    }
+
+    Ok(results)
+}
+
+pub fn search_objects_by_embedding(
+    client: &mut Client,
+    connection_string: &str,
+    filters: &ObjectSearchFilters,
+    query_embedding: &[f32],
+    limit: usize,
+) -> StorageResult<Vec<DerivedObjectSearchResult>> {
+    let limit = i64::try_from(limit).map_err(|_| StorageError::InvalidDerivationWrite {
+        detail: format!("search limit {limit} exceeds Postgres BIGINT range"),
+    })?;
+
+    let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> = Vec::new();
+    let mut next_param = 1usize;
+    let embedding_literal = vector_literal(query_embedding);
+    params.push(&embedding_literal);
+    next_param += 1;
+
+    let object_type_str: String = filters
+        .object_type
+        .as_ref()
+        .map(|ot| ot.as_str().to_string())
+        .unwrap_or_default();
+    let candidate_key_str: String = filters.candidate_key.clone().unwrap_or_default();
+    let artifact_id_str: String = filters.artifact_id.clone().unwrap_or_default();
+
+    let mut conditions = vec![
+        "d.object_status = 'active'".to_string(),
+        "d.derived_object_type IN ('summary', 'memory', 'relationship')".to_string(),
+    ];
+
+    if filters.object_type.is_some() {
+        let idx = next_param;
+        params.push(&object_type_str);
+        next_param += 1;
+        conditions.push(format!("d.derived_object_type = ${idx}"));
+    }
+
+    if filters.candidate_key.is_some() {
+        let idx = next_param;
+        params.push(&candidate_key_str);
+        next_param += 1;
+        conditions.push(format!("d.candidate_key = ${idx}"));
+    }
+
+    if filters.artifact_id.is_some() {
+        let idx = next_param;
+        params.push(&artifact_id_str);
+        next_param += 1;
+        conditions.push(format!("d.artifact_id = ${idx}"));
+    }
+
+    let limit_idx = next_param;
+    params.push(&limit);
+
+    let sql = format!(
+        "SELECT d.derived_object_id, d.artifact_id, d.derived_object_type, d.title, d.body_text,
+                d.candidate_key, d.confidence_score::double precision,
+                GREATEST(0::real, (1 - (e.embedding <=> $1::vector))::real) AS score
+         FROM oa_derived_object_embedding e
+         JOIN oa_derived_object d ON d.derived_object_id = e.derived_object_id
+         WHERE {}
+         ORDER BY e.embedding <=> $1::vector ASC, d.derived_object_id ASC
+         LIMIT ${limit_idx}",
+        conditions.join(" AND "),
+    );
+
+    let rows = client
+        .query(&sql, &params)
+        .map_err(|source| map_pg_err(connection_string, source))?;
+
+    let mut results = Vec::with_capacity(rows.len());
+    for row in rows {
+        let derived_object_id: String = row.get(0);
+        let artifact_id: String = row.get(1);
+        let derived_object_type_str: String = row.get(2);
+        results.push(DerivedObjectSearchResult {
+            derived_object_id: derived_object_id.clone(),
+            artifact_id: artifact_id.clone(),
+            derived_object_type: DerivedObjectType::from_str(&derived_object_type_str).ok_or_else(
+                || StorageError::InvalidDerivedObjectType {
+                    artifact_id: artifact_id.clone(),
+                    value: derived_object_type_str,
+                },
+            )?,
+            title: row.get(3),
+            body_text: row.get(4),
+            candidate_key: row.get(5),
+            confidence_score: row.try_get(6).map_err(|source| {
+                StorageError::ReadDerivedObjectConfidenceScore {
+                    artifact_id: artifact_id.clone(),
+                    derived_object_id: derived_object_id.clone(),
+                    source,
+                }
+            })?,
+            score: row.get(7),
         });
     }
 
@@ -720,10 +886,46 @@ pub fn find_related_by_candidate_keys(
 
 #[cfg(test)]
 mod tests {
-    use super::escape_like_query;
+    use super::{escape_like_query, tsquery_sql, SearchQueryMode};
 
     #[test]
     fn escape_like_query_uses_unicode_lowercase_and_escapes_wildcards() {
         assert_eq!(escape_like_query("Ä_%\\Test"), "ä\\_\\%\\\\test");
+    }
+
+    #[test]
+    fn plain_query_mode_is_default_for_natural_language_search() {
+        assert_eq!(
+            SearchQueryMode::detect("TBI spinal fracture injury"),
+            SearchQueryMode::Plain
+        );
+    }
+
+    #[test]
+    fn operator_query_mode_detects_explicit_search_syntax() {
+        assert_eq!(
+            SearchQueryMode::detect("\"brain injury\" -smoking"),
+            SearchQueryMode::Operator
+        );
+        assert_eq!(
+            SearchQueryMode::detect("tbi OR fracture"),
+            SearchQueryMode::Operator
+        );
+    }
+
+    #[test]
+    fn plain_query_sql_uses_disjunctive_tsquery_expression() {
+        assert_eq!(
+            tsquery_sql(2, SearchQueryMode::Plain),
+            "to_tsquery('english', replace(nullif(plainto_tsquery('english', $2)::text, ''), ' & ', ' | '))"
+        );
+    }
+
+    #[test]
+    fn operator_query_sql_uses_websearch_tsquery() {
+        assert_eq!(
+            tsquery_sql(3, SearchQueryMode::Operator),
+            "websearch_to_tsquery('english', $3)"
+        );
     }
 }

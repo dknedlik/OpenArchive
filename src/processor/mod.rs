@@ -125,8 +125,6 @@ pub struct ArtifactProcessorOutput {
     pub relationships: Vec<RelationshipOutput>,
     pub retrieval_intents: Vec<RetrievalIntent>,
     pub importance_score: u8,
-    pub escalate_to_frontier: bool,
-    pub escalation_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,8 +304,6 @@ impl ArtifactProcessor for StubProcessor {
                 evidence_segment_ids: vec![input.segments[0].segment_id.clone()],
             }],
             importance_score: 1,
-            escalate_to_frontier: false,
-            escalation_reason: None,
         })
     }
 }
@@ -470,8 +466,6 @@ pub trait ReconciliationBatchSubmitter {
 
 trait EnrichmentStrategy: Send + Sync {
     fn prompt_version(&self) -> &'static str;
-    fn system_prompt(&self) -> &'static str;
-    fn extraction_schema(&self, input: &ArtifactProcessorInput) -> serde_json::Value;
     fn process(
         &self,
         processor: &HostedArtifactProcessor,
@@ -550,24 +544,18 @@ impl HostedArtifactProcessor {
         input: &ArtifactProcessorInput,
         user_prompt: &str,
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
-        let inference_result = self.client.complete_json(
+        let candidate_result = self.client.complete_json(
             &self.model,
-            self.strategy.system_prompt(),
+            TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
             user_prompt,
-            &self.strategy.extraction_schema(input),
+            &candidate_output_schema_wrapper(input),
         )?;
-        let parsed: ModelArtifactOutput = serde_json::from_str(&inference_result.output_text)
-            .map_err(|source| ProcessorError::ParseModelJson {
-                source,
-                body_preview: preview(&inference_result.output_text),
-            })?;
-        let parsed = parsed.resolve_evidence_aliases(input);
-        let parsed = parsed
-            .validate_and_salvage(input)
-            .map_err(|err| attach_output_preview(err, &inference_result.output_text))?;
-        Ok(parsed.into_processor_output(
+        let candidate = parse_candidate_output(&candidate_result.output_text, input)
+            .map_err(|err| attach_output_preview(err, &candidate_result.output_text))?;
+        Ok(candidate.into_processor_output(
+            input,
             self.model.clone(),
-            inference_result.usage,
+            candidate_result.usage,
             self.pipeline_name,
             self.provider_name,
             self.strategy.prompt_version(),
@@ -615,16 +603,12 @@ impl ReconciliationProcessor for HostedReconciliationProcessor {
 
 struct ConversationEnrichmentStrategy {
     prompt_version: &'static str,
-    system_prompt: &'static str,
-    extraction_schema: fn(&ArtifactProcessorInput) -> serde_json::Value,
 }
 
 impl ConversationEnrichmentStrategy {
     fn anthropic_default() -> Arc<dyn EnrichmentStrategy> {
         Arc::new(Self {
             prompt_version: ANTHROPIC_PROMPT_VERSION,
-            system_prompt: ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
-            extraction_schema: structured_output_schema_wrapper,
         })
     }
 }
@@ -634,20 +618,12 @@ impl EnrichmentStrategy for ConversationEnrichmentStrategy {
         self.prompt_version
     }
 
-    fn system_prompt(&self) -> &'static str {
-        self.system_prompt
-    }
-
-    fn extraction_schema(&self, input: &ArtifactProcessorInput) -> serde_json::Value {
-        (self.extraction_schema)(input)
-    }
-
     fn process(
         &self,
         processor: &HostedArtifactProcessor,
         input: &ArtifactProcessorInput,
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
-        let prompt = build_conversation_user_prompt(input)?;
+        let prompt = build_two_phase_candidate_user_prompt(input)?;
         processor.run_prompt(input, &prompt)
     }
 }
@@ -659,6 +635,8 @@ pub struct OpenAiProcessorFactory {
     extract_repair_max_output_tokens: u32,
     standard_model: String,
     quality_model: String,
+    reconcile_standard_model: String,
+    reconcile_quality_model: String,
 }
 
 impl OpenAiProcessorFactory {
@@ -668,6 +646,11 @@ impl OpenAiProcessorFactory {
             .quality_model
             .clone()
             .unwrap_or_else(|| config.standard_model.clone());
+        let reconcile_quality_model = config
+            .reconcile_quality_model
+            .clone()
+            .or_else(|| config.quality_model.clone())
+            .unwrap_or_else(|| config.reconcile_standard_model.clone());
 
         Ok(Self {
             client: client.clone(),
@@ -678,6 +661,8 @@ impl OpenAiProcessorFactory {
                 .max(config.max_output_tokens),
             standard_model: config.standard_model,
             quality_model,
+            reconcile_standard_model: config.reconcile_standard_model,
+            reconcile_quality_model,
         })
     }
 
@@ -687,13 +672,17 @@ impl OpenAiProcessorFactory {
         standard_model: impl Into<String>,
         quality_model: impl Into<String>,
     ) -> Self {
+        let standard_model = standard_model.into();
+        let quality_model = quality_model.into();
         Self {
             client: Arc::new(OpenAiClient::for_tests(client)),
             batch_client: None,
             extract_max_output_tokens: 4000,
             extract_repair_max_output_tokens: 8000,
-            standard_model: standard_model.into(),
-            quality_model: quality_model.into(),
+            standard_model: standard_model.clone(),
+            quality_model: quality_model.clone(),
+            reconcile_standard_model: standard_model,
+            reconcile_quality_model: quality_model,
         }
     }
 }
@@ -707,7 +696,7 @@ impl ArtifactProcessorFactory for OpenAiProcessorFactory {
 
         Ok(Box::new(OpenAiArtifactProcessor {
             client: Arc::clone(&self.client),
-            model,
+            candidate_model: model,
             max_output_tokens: self.extract_max_output_tokens,
             repair_max_output_tokens: self.extract_repair_max_output_tokens,
         }))
@@ -718,8 +707,8 @@ impl ArtifactProcessorFactory for OpenAiProcessorFactory {
         tier: EnrichmentTier,
     ) -> Result<Box<dyn ReconciliationProcessor>, ProcessorError> {
         let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
+            EnrichmentTier::Standard => self.reconcile_standard_model.clone(),
+            EnrichmentTier::Quality => self.reconcile_quality_model.clone(),
         };
         let client: Arc<dyn InferenceClient> = self.client.clone();
         Ok(Box::new(HostedReconciliationProcessor {
@@ -742,7 +731,7 @@ impl ArtifactProcessorFactory for OpenAiProcessorFactory {
         };
         Ok(Some(Box::new(OpenAiExtractionSubmitter {
             client: Arc::clone(client),
-            model,
+            candidate_model: model,
         })))
     }
 
@@ -754,8 +743,8 @@ impl ArtifactProcessorFactory for OpenAiProcessorFactory {
             return Ok(None);
         };
         let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
+            EnrichmentTier::Standard => self.reconcile_standard_model.clone(),
+            EnrichmentTier::Quality => self.reconcile_quality_model.clone(),
         };
         Ok(Some(Box::new(OpenAiReconciliationSubmitter {
             client: Arc::clone(client),
@@ -1273,7 +1262,7 @@ impl OpenAiClient {
 
 struct OpenAiArtifactProcessor {
     client: Arc<OpenAiClient>,
-    model: String,
+    candidate_model: String,
     max_output_tokens: u32,
     repair_max_output_tokens: u32,
 }
@@ -1284,7 +1273,7 @@ impl ArtifactProcessor for OpenAiArtifactProcessor {
         input: &ArtifactProcessorInput,
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
         validate_input(input)?;
-        let prompt = build_conversation_user_prompt(input)?;
+        let prompt = build_two_phase_candidate_user_prompt(input)?;
         match self.process_once(input, &prompt, self.max_output_tokens) {
             Ok(output) => Ok(output),
             Err(error) if should_retry_with_repair(&error) => {
@@ -1303,25 +1292,19 @@ impl OpenAiArtifactProcessor {
         user_prompt: &str,
         max_output_tokens: u32,
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
-        let inference_result = self.client.complete_json_with_max_output_tokens(
-            &self.model,
-            OPENAI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+        let candidate_result = self.client.complete_json_with_max_output_tokens(
+            &self.candidate_model,
+            TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
             user_prompt,
-            &structured_output_schema_wrapper(input),
-            max_output_tokens,
+            &candidate_output_schema_wrapper(input),
+            max_output_tokens.max(TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS),
         )?;
-        let parsed: ModelArtifactOutput = serde_json::from_str(&inference_result.output_text)
-            .map_err(|source| ProcessorError::ParseModelJson {
-                source,
-                body_preview: preview(&inference_result.output_text),
-            })?;
-        let parsed = parsed.resolve_evidence_aliases(input);
-        let parsed = parsed
-            .validate_and_salvage(input)
-            .map_err(|err| attach_output_preview(err, &inference_result.output_text))?;
-        Ok(parsed.into_processor_output(
-            self.model.clone(),
-            inference_result.usage,
+        let candidate = parse_candidate_output(&candidate_result.output_text, input)
+            .map_err(|err| attach_output_preview(err, &candidate_result.output_text))?;
+        Ok(candidate.into_processor_output(
+            input,
+            self.candidate_model.clone(),
+            candidate_result.usage,
             "openai_enrichment",
             "openai",
             OPENAI_PROMPT_VERSION,
@@ -1331,7 +1314,7 @@ impl OpenAiArtifactProcessor {
 
 struct OpenAiExtractionSubmitter {
     client: Arc<OpenAiClient>,
-    model: String,
+    candidate_model: String,
 }
 
 struct OpenAiReconciliationSubmitter {
@@ -1350,16 +1333,16 @@ impl ExtractionBatchSubmitter for OpenAiExtractionSubmitter {
     ) -> Result<BatchHandle, ProcessorError> {
         let mut requests = Vec::with_capacity(inputs.len());
         for input in inputs {
-            let user_prompt = build_conversation_user_prompt(input)?;
+            let user_prompt = build_two_phase_candidate_user_prompt(input)?;
             requests.push(OpenAiBatchRequest {
                 custom_id: input.batch_custom_id(),
                 method: "POST".to_string(),
                 url: "/v1/responses".to_string(),
                 body: self.client.build_responses_request(
-                    &self.model,
-                    OPENAI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+                    &self.candidate_model,
+                    TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
                     &user_prompt,
-                    &openai_structured_output_schema(input),
+                    &candidate_output_schema_wrapper(input),
                 ),
             });
         }
@@ -1415,29 +1398,45 @@ impl ExtractionBatchSubmitter for OpenAiExtractionSubmitter {
                     .collect();
             }
         };
-        parse_openai_output_file(
+        let candidate_results = parse_openai_output_file(
             &self.client,
             batch.output_file_id.as_deref(),
             inputs,
             |result, input| {
-                let parsed: ModelArtifactOutput = serde_json::from_str(&result.output_text)
-                    .map_err(|source| ProcessorError::ParseModelJson {
-                        source,
-                        body_preview: preview(&result.output_text),
-                    })?;
-                let parsed = parsed.resolve_evidence_aliases(input);
-                let parsed = parsed
-                    .validate_and_salvage(input)
+                let candidate = parse_candidate_output(&result.output_text, input)
                     .map_err(|err| attach_output_preview(err, &result.output_text))?;
-                Ok(parsed.into_processor_output(
-                    self.model.clone(),
-                    result.usage,
+                Ok((candidate, result.usage))
+            },
+        );
+        if candidate_results.iter().any(Result::is_err) {
+            return candidate_results
+                .into_iter()
+                .map(|result| {
+                    result
+                        .map(|_| unreachable!("candidate error already checked"))
+                        .map_err(|err| ProcessorError::Message {
+                            message: err.to_string(),
+                        })
+                })
+                .collect();
+        }
+        candidate_results
+            .into_iter()
+            .zip(inputs.iter())
+            .map(|(result, input)| match result {
+                Ok((candidate, usage)) => Ok(candidate.into_processor_output(
+                    input,
+                    self.candidate_model.clone(),
+                    usage,
                     "openai_enrichment",
                     "openai",
                     OPENAI_PROMPT_VERSION,
-                ))
-            },
-        )
+                )),
+                Err(err) => Err(ProcessorError::Message {
+                    message: err.to_string(),
+                }),
+            })
+            .collect()
     }
 }
 
@@ -1478,7 +1477,7 @@ impl ReconciliationBatchSubmitter for OpenAiReconciliationSubmitter {
     fn poll_batch(&self, handle: &BatchHandle) -> Result<BatchPollResult, ProcessorError> {
         OpenAiExtractionSubmitter {
             client: Arc::clone(&self.client),
-            model: self.model.clone(),
+            candidate_model: self.model.clone(),
         }
         .poll_batch(handle)
     }
@@ -1843,30 +1842,28 @@ struct OpenRouterOutputTokensDetails {
     reasoning_tokens: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ModelArtifactOutput {
-    summary: ModelSummary,
-    classifications: Vec<ModelClassification>,
-    memories: Vec<ModelMemory>,
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ModelCandidateArtifactOutput {
+    summary_draft: ModelSummary,
+    classification_candidates: Vec<ModelClassification>,
+    memory_candidates: Vec<ModelCandidateMemory>,
     #[serde(default)]
-    entities: Vec<ModelEntity>,
+    entity_candidates: Vec<ModelEntity>,
     #[serde(default)]
-    relationships: Vec<ModelRelationship>,
+    relationship_candidates: Vec<ModelRelationship>,
     #[serde(default)]
-    retrieval_intents: Vec<ModelRetrievalIntent>,
+    retrieval_candidates: Vec<ModelRetrievalIntent>,
     importance_score: u8,
-    escalate_to_frontier: bool,
-    escalation_reason: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ModelSummary {
     title: String,
     body_text: String,
     evidence_segment_ids: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ModelClassification {
     classification_type: String,
     classification_value: String,
@@ -1875,17 +1872,18 @@ struct ModelClassification {
     evidence_segment_ids: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ModelMemory {
-    memory_type: String,
-    memory_scope: ScopeType,
-    memory_scope_value: String,
+#[derive(Debug, Serialize, Deserialize)]
+struct ModelCandidateMemory {
     title: String,
     body_text: String,
     evidence_segment_ids: Vec<String>,
+    durability_label: String,
+    retrieval_value_label: String,
+    consequentiality_label: String,
+    temporal_scope: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ModelEntity {
     entity_key: String,
     display_name: String,
@@ -1893,7 +1891,7 @@ struct ModelEntity {
     evidence_segment_ids: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ModelRelationship {
     relationship_type: String,
     subject_key: String,
@@ -1904,7 +1902,7 @@ struct ModelRelationship {
     evidence_segment_ids: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ModelRetrievalIntent {
     question: String,
     query_text: String,
@@ -1927,6 +1925,7 @@ struct ModelReconciliationDecision {
     evidence_segment_ids: Vec<String>,
 }
 
+#[cfg(any())]
 impl ModelArtifactOutput {
     fn resolve_evidence_aliases(mut self, input: &ArtifactProcessorInput) -> Self {
         let alias_map = build_segment_alias_map(input);
@@ -2172,27 +2171,6 @@ impl ModelArtifactOutput {
             });
         }
 
-        if self.escalate_to_frontier && self.importance_score < 8 {
-            return Err(ProcessorError::InvalidModelOutput {
-                detail: "escalate_to_frontier cannot be true when importance_score is below 8"
-                    .to_string(),
-            });
-        }
-
-        if !self.escalate_to_frontier && !self.escalation_reason.trim().is_empty() {
-            return Err(ProcessorError::InvalidModelOutput {
-                detail: "escalation_reason must be empty when escalate_to_frontier is false"
-                    .to_string(),
-            });
-        }
-
-        if self.escalate_to_frontier && self.escalation_reason.trim().is_empty() {
-            return Err(ProcessorError::InvalidModelOutput {
-                detail: "escalation_reason must be present when escalate_to_frontier is true"
-                    .to_string(),
-            });
-        }
-
         Ok(self)
     }
 
@@ -2292,9 +2270,367 @@ impl ModelArtifactOutput {
                 })
                 .collect(),
             importance_score: self.importance_score,
-            escalate_to_frontier: self.escalate_to_frontier,
-            escalation_reason: normalize_optional_text(self.escalation_reason),
         })
+    }
+}
+
+impl ModelCandidateArtifactOutput {
+    fn resolve_evidence_aliases(mut self, input: &ArtifactProcessorInput) -> Self {
+        let alias_map = build_segment_alias_map(input);
+
+        for segment_id in &mut self.summary_draft.evidence_segment_ids {
+            if let Some(actual) = alias_map.get(segment_id.as_str()) {
+                *segment_id = actual.clone();
+            }
+        }
+
+        for classification in &mut self.classification_candidates {
+            for segment_id in &mut classification.evidence_segment_ids {
+                if let Some(actual) = alias_map.get(segment_id.as_str()) {
+                    *segment_id = actual.clone();
+                }
+            }
+        }
+
+        for memory in &mut self.memory_candidates {
+            for segment_id in &mut memory.evidence_segment_ids {
+                if let Some(actual) = alias_map.get(segment_id.as_str()) {
+                    *segment_id = actual.clone();
+                }
+            }
+        }
+
+        for entity in &mut self.entity_candidates {
+            entity.entity_type = canonicalize_entity_type(&entity.entity_type);
+            for segment_id in &mut entity.evidence_segment_ids {
+                if let Some(actual) = alias_map.get(segment_id.as_str()) {
+                    *segment_id = actual.clone();
+                }
+            }
+        }
+
+        for relationship in &mut self.relationship_candidates {
+            for segment_id in &mut relationship.evidence_segment_ids {
+                if let Some(actual) = alias_map.get(segment_id.as_str()) {
+                    *segment_id = actual.clone();
+                }
+            }
+        }
+
+        for intent in &mut self.retrieval_candidates {
+            for segment_id in &mut intent.evidence_segment_ids {
+                if let Some(actual) = alias_map.get(segment_id.as_str()) {
+                    *segment_id = actual.clone();
+                }
+            }
+        }
+
+        self
+    }
+
+    fn into_processor_output(
+        self,
+        input: &ArtifactProcessorInput,
+        model_name: String,
+        usage: Option<InferenceUsage>,
+        pipeline_name: &str,
+        provider_name: &str,
+        prompt_version: &str,
+    ) -> ArtifactProcessorOutput {
+        let resolved = self.resolve_evidence_aliases(input);
+        cleanup_artifact_processor_output(ArtifactProcessorOutput {
+            pipeline_name: pipeline_name.to_string(),
+            pipeline_version: "v1".to_string(),
+            provider_name: Some(provider_name.to_string()),
+            model_name: Some(model_name),
+            prompt_version: Some(prompt_version.to_string()),
+            usage,
+            summary: SummaryOutput {
+                title: normalize_optional_text(resolved.summary_draft.title),
+                body_text: resolved.summary_draft.body_text.trim().to_string(),
+                evidence_segment_ids: resolved.summary_draft.evidence_segment_ids,
+            },
+            classifications: resolved
+                .classification_candidates
+                .into_iter()
+                .map(|classification| ClassificationOutput {
+                    title: normalize_optional_text(classification.title),
+                    body_text: normalize_optional_text(classification.body_text),
+                    classification_type: classification.classification_type,
+                    classification_value: classification.classification_value,
+                    evidence_segment_ids: classification.evidence_segment_ids,
+                })
+                .collect(),
+            memories: resolved
+                .memory_candidates
+                .into_iter()
+                .map(|memory| {
+                    let title = normalize_optional_text(memory.title);
+                    let body_text = memory.body_text.trim().to_string();
+                    let memory_type = canonicalize_memory_type(
+                        "",
+                        title.as_deref().unwrap_or_default(),
+                        &body_text,
+                    );
+                    let candidate_key = memory_candidate_key_from_fields(
+                        &memory_type,
+                        ScopeType::Artifact,
+                        &input.artifact_id,
+                        title.as_deref(),
+                        &body_text,
+                    );
+                    MemoryOutput {
+                        candidate_key,
+                        title,
+                        body_text,
+                        memory_type,
+                        memory_scope: ScopeType::Artifact,
+                        memory_scope_value: input.artifact_id.clone(),
+                        evidence_segment_ids: memory.evidence_segment_ids,
+                    }
+                })
+                .collect(),
+            entities: resolved
+                .entity_candidates
+                .into_iter()
+                .map(|entity| EntityOutput {
+                    entity_key: entity.entity_key.trim().to_string(),
+                    display_name: entity.display_name.trim().to_string(),
+                    entity_type: canonicalize_entity_type(&entity.entity_type),
+                    evidence_segment_ids: entity.evidence_segment_ids,
+                })
+                .collect(),
+            relationships: resolved
+                .relationship_candidates
+                .into_iter()
+                .map(|relationship| RelationshipOutput {
+                    relationship_type: relationship.relationship_type.trim().to_string(),
+                    subject_key: relationship.subject_key.trim().to_string(),
+                    object_key: relationship.object_key.trim().to_string(),
+                    title: normalize_optional_text(relationship.title),
+                    body_text: relationship.body_text.trim().to_string(),
+                    confidence_label: relationship.confidence_label.trim().to_string(),
+                    evidence_segment_ids: relationship.evidence_segment_ids,
+                })
+                .collect(),
+            retrieval_intents: resolved
+                .retrieval_candidates
+                .into_iter()
+                .enumerate()
+                .map(|(index, intent)| RetrievalIntent {
+                    intent_id: format!("intent-{}", index + 1),
+                    question: intent.question.trim().to_string(),
+                    query_text: intent.query_text.trim().to_string(),
+                    intent_type: intent.intent_type.trim().to_string(),
+                    evidence_segment_ids: intent.evidence_segment_ids,
+                })
+                .collect(),
+            importance_score: resolved.importance_score,
+        })
+    }
+
+    fn validate(mut self, input: &ArtifactProcessorInput) -> Result<Self, ProcessorError> {
+        let valid_segment_ids_owned = allowed_artifact_evidence_refs(input);
+        let valid_segment_ids: HashSet<&str> =
+            valid_segment_ids_owned.iter().map(String::as_str).collect();
+
+        validate_text_field("summary_draft.title", &self.summary_draft.title)?;
+        validate_text_field("summary_draft.body_text", &self.summary_draft.body_text)?;
+        validate_evidence_ids(
+            "summary_draft.evidence_segment_ids",
+            &self.summary_draft.evidence_segment_ids,
+            &valid_segment_ids,
+        )?;
+
+        self.classification_candidates = retain_valid_items(
+            self.classification_candidates,
+            |index, classification| {
+                validate_text_field(
+                    &format!("classification_candidates[{index}].title"),
+                    &classification.title,
+                )?;
+                validate_text_field(
+                    &format!("classification_candidates[{index}].body_text"),
+                    &classification.body_text,
+                )?;
+                validate_text_field(
+                    &format!("classification_candidates[{index}].classification_value"),
+                    &classification.classification_value,
+                )?;
+                match classification.classification_type.as_str() {
+                    "topic" | "intent" => {}
+                    other => {
+                        return Err(ProcessorError::InvalidModelOutput {
+                            detail: format!(
+                                "classification_candidates[{index}].classification_type {other:?} is not allowed"
+                            ),
+                        })
+                    }
+                }
+                validate_evidence_ids(
+                    &format!("classification_candidates[{index}].evidence_segment_ids"),
+                    &classification.evidence_segment_ids,
+                    &valid_segment_ids,
+                )
+            },
+        );
+
+        self.memory_candidates = retain_valid_items(self.memory_candidates, |index, memory| {
+            validate_text_field(&format!("memory_candidates[{index}].title"), &memory.title)?;
+            validate_text_field(
+                &format!("memory_candidates[{index}].body_text"),
+                &memory.body_text,
+            )?;
+            if !matches!(memory.durability_label.as_str(), "low" | "medium" | "high") {
+                return Err(ProcessorError::InvalidModelOutput {
+                    detail: format!(
+                        "memory_candidates[{index}].durability_label {:?} is not allowed",
+                        memory.durability_label
+                    ),
+                });
+            }
+            if !matches!(
+                memory.retrieval_value_label.as_str(),
+                "low" | "medium" | "high"
+            ) {
+                return Err(ProcessorError::InvalidModelOutput {
+                    detail: format!(
+                        "memory_candidates[{index}].retrieval_value_label {:?} is not allowed",
+                        memory.retrieval_value_label
+                    ),
+                });
+            }
+            if !matches!(
+                memory.consequentiality_label.as_str(),
+                "low" | "medium" | "high"
+            ) {
+                return Err(ProcessorError::InvalidModelOutput {
+                    detail: format!(
+                        "memory_candidates[{index}].consequentiality_label {:?} is not allowed",
+                        memory.consequentiality_label
+                    ),
+                });
+            }
+            if !matches!(
+                memory.temporal_scope.as_str(),
+                "ephemeral" | "time_bound" | "ongoing" | "enduring"
+            ) {
+                return Err(ProcessorError::InvalidModelOutput {
+                    detail: format!(
+                        "memory_candidates[{index}].temporal_scope {:?} is not allowed",
+                        memory.temporal_scope
+                    ),
+                });
+            }
+            validate_evidence_ids(
+                &format!("memory_candidates[{index}].evidence_segment_ids"),
+                &memory.evidence_segment_ids,
+                &valid_segment_ids,
+            )
+        });
+
+        self.entity_candidates = retain_valid_items(self.entity_candidates, |index, entity| {
+            validate_text_field(
+                &format!("entity_candidates[{index}].entity_key"),
+                &entity.entity_key,
+            )?;
+            validate_text_field(
+                &format!("entity_candidates[{index}].display_name"),
+                &entity.display_name,
+            )?;
+            validate_text_field(
+                &format!("entity_candidates[{index}].entity_type"),
+                &entity.entity_type,
+            )?;
+            validate_evidence_ids(
+                &format!("entity_candidates[{index}].evidence_segment_ids"),
+                &entity.evidence_segment_ids,
+                &valid_segment_ids,
+            )
+        });
+
+        self.relationship_candidates =
+            retain_valid_items(self.relationship_candidates, |index, relationship| {
+                validate_text_field(
+                    &format!("relationship_candidates[{index}].relationship_type"),
+                    &relationship.relationship_type,
+                )?;
+                validate_text_field(
+                    &format!("relationship_candidates[{index}].subject_key"),
+                    &relationship.subject_key,
+                )?;
+                validate_text_field(
+                    &format!("relationship_candidates[{index}].object_key"),
+                    &relationship.object_key,
+                )?;
+                validate_text_field(
+                    &format!("relationship_candidates[{index}].title"),
+                    &relationship.title,
+                )?;
+                validate_text_field(
+                    &format!("relationship_candidates[{index}].body_text"),
+                    &relationship.body_text,
+                )?;
+                if !matches!(
+                    relationship.confidence_label.as_str(),
+                    "low" | "medium" | "high"
+                ) {
+                    return Err(ProcessorError::InvalidModelOutput {
+                        detail: format!(
+                            "relationship_candidates[{index}].confidence_label {:?} is not allowed",
+                            relationship.confidence_label
+                        ),
+                    });
+                }
+                validate_evidence_ids(
+                    &format!("relationship_candidates[{index}].evidence_segment_ids"),
+                    &relationship.evidence_segment_ids,
+                    &valid_segment_ids,
+                )
+            });
+
+        self.retrieval_candidates =
+            retain_valid_items(self.retrieval_candidates, |index, intent| {
+                validate_text_field(
+                    &format!("retrieval_candidates[{index}].question"),
+                    &intent.question,
+                )?;
+                validate_text_field(
+                    &format!("retrieval_candidates[{index}].query_text"),
+                    &intent.query_text,
+                )?;
+                if !matches!(
+                    intent.intent_type.as_str(),
+                    "topic_lookup"
+                        | "memory_match"
+                        | "entity_lookup"
+                        | "relationship_lookup"
+                        | "contradiction_check"
+                ) {
+                    return Err(ProcessorError::InvalidModelOutput {
+                        detail: format!(
+                            "retrieval_candidates[{index}].intent_type {:?} is not allowed",
+                            intent.intent_type
+                        ),
+                    });
+                }
+                validate_evidence_ids(
+                    &format!("retrieval_candidates[{index}].evidence_segment_ids"),
+                    &intent.evidence_segment_ids,
+                    &valid_segment_ids,
+                )
+            });
+
+        if !(1..=10).contains(&self.importance_score) {
+            return Err(ProcessorError::InvalidModelOutput {
+                detail: format!(
+                    "importance_score {} must be between 1 and 10",
+                    self.importance_score
+                ),
+            });
+        }
+
+        Ok(self)
     }
 }
 
@@ -2978,6 +3314,7 @@ pub fn memory_candidate_key_from_fields(
     format!("mem:{}", hex_prefix(&digest[..16]))
 }
 
+#[cfg(test)]
 pub(crate) fn build_conversation_user_prompt(
     input: &ArtifactProcessorInput,
 ) -> Result<String, ProcessorError> {
@@ -3141,7 +3478,7 @@ fn preview(value: &str) -> String {
     value.chars().take(240).collect()
 }
 
-fn allowed_artifact_evidence_refs(input: &ArtifactProcessorInput) -> Vec<String> {
+pub(crate) fn allowed_artifact_evidence_refs(input: &ArtifactProcessorInput) -> Vec<String> {
     input
         .segments
         .iter()
@@ -3191,6 +3528,324 @@ Previous output problem: {}\n",
     )
 }
 
+pub(crate) const TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS: u32 = 7000;
+#[allow(dead_code)]
+pub(crate) const TWO_PHASE_FINALIZER_MAX_OUTPUT_TOKENS: u32 = 4000;
+
+pub(crate) fn build_two_phase_candidate_user_prompt(
+    input: &ArtifactProcessorInput,
+) -> Result<String, ProcessorError> {
+    #[derive(Serialize)]
+    struct PromptSegment<'a> {
+        evidence_ref: String,
+        participant_role: &'a str,
+        text: &'a str,
+    }
+
+    let prompt_segments: Vec<_> = input
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| PromptSegment {
+            evidence_ref: segment_alias(index),
+            participant_role: segment
+                .participant_role
+                .map(|role| role.as_str())
+                .unwrap_or("unknown"),
+            text: segment.text_content.as_str(),
+        })
+        .collect();
+    let segments_json = serde_json::to_string_pretty(&prompt_segments)
+        .map_err(|source| ProcessorError::SerializePrompt { source })?;
+
+    Ok(format!(
+        "Input artifact:\n\
+         artifact_id: {artifact_id}\n\
+         source_type: {source_type}\n\
+         title: {title}\n\
+         \n\
+         segments:\n\
+         {segments_json}\n\
+         \n\
+         Output guidance:\n\
+         - the artifact text is divided into segments; each segment has an evidence_ref identifier\n\
+         - every emitted item must include evidence_segment_ids using only evidence_ref values shown in segments\n\
+         - preserve evidence_ref values exactly\n\
+         - do not invent unsupported claims; every emitted item must be directly supported or strongly supported by artifact content\n\
+         - be exhaustive on durable, retrieval-worthy content\n\
+         - avoid obvious duplicates and broad rollups when a more specific candidate works\n",
+        artifact_id = input.artifact_id,
+        source_type = input.source_type.as_str(),
+        title = input.title.as_deref().unwrap_or(""),
+        segments_json = segments_json,
+    ))
+}
+
+#[allow(dead_code)]
+pub(crate) fn build_two_phase_finalizer_prompt(
+    artifact_id: &str,
+    candidate: &ModelCandidateArtifactOutput,
+) -> Result<String, ProcessorError> {
+    let candidate_json = serde_json::to_string_pretty(candidate)
+        .map_err(|source| ProcessorError::SerializePrompt { source })?;
+    Ok(format!(
+        "Finalize this extraction candidate bundle into the target schema.\n\
+         artifact_id: {artifact_id}\n\
+         \n\
+         Candidate bundle:\n\
+         {candidate_json}\n\
+         \n\
+         Rules:\n\
+         - Use only facts and evidence refs present in the candidate bundle.\n\
+         - Do not invent new memories, entities, relationships, classifications, or retrieval intents.\n\
+         - Merge overlapping candidates and drop non-durable or redundant items.\n\
+         - Prefer specific, retrieval-worthy memories over broad umbrella memories.\n\
+         - Choose memory_type only from: personal_fact, preference, project_fact, ongoing_state, reference.\n\
+         - Preserve evidence refs exactly as provided.\n\
+         - Fix mistyped or weak candidates where possible.\n\
+         - Output valid JSON only.\n"
+    ))
+}
+
+pub(crate) fn candidate_output_schema_wrapper(input: &ArtifactProcessorInput) -> serde_json::Value {
+    json!({
+        "type": "json_schema",
+        "name": "openarchive_artifact_candidate_extraction",
+        "strict": true,
+        "schema": candidate_output_schema_with_allowed_refs(&allowed_artifact_evidence_refs(input))
+    })
+}
+
+pub(crate) fn candidate_output_schema_with_allowed_refs(
+    allowed_refs: &[String],
+) -> serde_json::Value {
+    let evidence_id_item = if allowed_refs.is_empty() {
+        json!({ "type": "string", "minLength": 1 })
+    } else {
+        json!({ "type": "string", "enum": allowed_refs })
+    };
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "summary_draft",
+            "classification_candidates",
+            "memory_candidates",
+            "entity_candidates",
+            "relationship_candidates",
+            "retrieval_candidates",
+            "importance_score"
+        ],
+        "properties": {
+            "summary_draft": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["title", "body_text", "evidence_segment_ids"],
+                "properties": {
+                    "title": { "type": "string", "minLength": 1 },
+                    "body_text": { "type": "string", "minLength": 1 },
+                    "evidence_segment_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": evidence_id_item.clone()
+                    }
+                }
+            },
+            "classification_candidates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "classification_type",
+                        "classification_value",
+                        "title",
+                        "body_text",
+                        "evidence_segment_ids"
+                    ],
+                    "properties": {
+                        "classification_type": { "type": "string", "enum": ["topic", "intent"] },
+                        "classification_value": { "type": "string", "minLength": 1 },
+                        "title": { "type": "string", "minLength": 1 },
+                        "body_text": { "type": "string", "minLength": 1 },
+                        "evidence_segment_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": evidence_id_item.clone()
+                        }
+                    }
+                }
+            },
+            "memory_candidates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "title",
+                        "body_text",
+                        "evidence_segment_ids",
+                        "durability_label",
+                        "retrieval_value_label",
+                        "consequentiality_label",
+                        "temporal_scope"
+                    ],
+                    "properties": {
+                        "title": { "type": "string", "minLength": 1 },
+                        "body_text": { "type": "string", "minLength": 1 },
+                        "durability_label": { "type": "string", "enum": ["low", "medium", "high"] },
+                        "retrieval_value_label": { "type": "string", "enum": ["low", "medium", "high"] },
+                        "consequentiality_label": { "type": "string", "enum": ["low", "medium", "high"] },
+                        "temporal_scope": { "type": "string", "enum": ["ephemeral", "time_bound", "ongoing", "enduring"] },
+                        "evidence_segment_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": evidence_id_item.clone()
+                        }
+                    }
+                }
+            },
+            "entity_candidates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["entity_key", "display_name", "entity_type", "evidence_segment_ids"],
+                    "properties": {
+                        "entity_key": { "type": "string", "minLength": 1 },
+                        "display_name": { "type": "string", "minLength": 1 },
+                        "entity_type": { "type": "string", "minLength": 1 },
+                        "evidence_segment_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": evidence_id_item.clone()
+                        }
+                    }
+                }
+            },
+            "relationship_candidates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "relationship_type",
+                        "subject_key",
+                        "object_key",
+                        "title",
+                        "body_text",
+                        "confidence_label",
+                        "evidence_segment_ids"
+                    ],
+                    "properties": {
+                        "relationship_type": { "type": "string", "minLength": 1 },
+                        "subject_key": { "type": "string", "minLength": 1 },
+                        "object_key": { "type": "string", "minLength": 1 },
+                        "title": { "type": "string", "minLength": 1 },
+                        "body_text": { "type": "string", "minLength": 1 },
+                        "confidence_label": { "type": "string", "enum": ["low", "medium", "high"] },
+                        "evidence_segment_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": evidence_id_item.clone()
+                        }
+                    }
+                }
+            },
+            "retrieval_candidates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["question", "query_text", "intent_type", "evidence_segment_ids"],
+                    "properties": {
+                        "question": { "type": "string", "minLength": 1 },
+                        "query_text": { "type": "string", "minLength": 1 },
+                        "intent_type": {
+                            "type": "string",
+                            "enum": ["topic_lookup", "memory_match", "entity_lookup", "relationship_lookup", "contradiction_check"]
+                        },
+                        "evidence_segment_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": evidence_id_item.clone()
+                        }
+                    }
+                }
+            },
+            "importance_score": { "type": "integer", "minimum": 1, "maximum": 10 }
+        }
+    })
+}
+
+pub(crate) fn parse_candidate_output(
+    output_text: &str,
+    input: &ArtifactProcessorInput,
+) -> Result<ModelCandidateArtifactOutput, ProcessorError> {
+    let parsed: ModelCandidateArtifactOutput =
+        serde_json::from_str(output_text).map_err(|source| ProcessorError::ParseModelJson {
+            source,
+            body_preview: preview(output_text),
+        })?;
+    parsed.validate(input)
+}
+
+#[cfg(any())]
+pub(crate) fn parse_final_artifact_output(
+    output_text: &str,
+    input: &ArtifactProcessorInput,
+) -> Result<ModelArtifactOutput, ProcessorError> {
+    let parsed: ModelArtifactOutput =
+        serde_json::from_str(output_text).map_err(|source| ProcessorError::ParseModelJson {
+            source,
+            body_preview: preview(output_text),
+        })?;
+    let parsed = parsed.resolve_evidence_aliases(input);
+    parsed.validate_and_salvage(input)
+}
+
+#[allow(dead_code)]
+pub(crate) fn combine_usage(
+    left: Option<InferenceUsage>,
+    right: Option<InferenceUsage>,
+) -> Option<InferenceUsage> {
+    fn add(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+        match (left, right) {
+            (Some(left), Some(right)) => Some(left + right),
+            (Some(left), None) => Some(left),
+            (None, Some(right)) => Some(right),
+            (None, None) => None,
+        }
+    }
+
+    match (left, right) {
+        (None, None) => None,
+        (left, right) => Some(InferenceUsage {
+            input_tokens: add(
+                left.as_ref().and_then(|usage| usage.input_tokens),
+                right.as_ref().and_then(|usage| usage.input_tokens),
+            ),
+            output_tokens: add(
+                left.as_ref().and_then(|usage| usage.output_tokens),
+                right.as_ref().and_then(|usage| usage.output_tokens),
+            ),
+            reasoning_tokens: add(
+                left.as_ref().and_then(|usage| usage.reasoning_tokens),
+                right.as_ref().and_then(|usage| usage.reasoning_tokens),
+            ),
+            total_tokens: add(
+                left.as_ref().and_then(|usage| usage.total_tokens),
+                right.as_ref().and_then(|usage| usage.total_tokens),
+            ),
+            reported_cost_micros: add(
+                left.as_ref().and_then(|usage| usage.reported_cost_micros),
+                right.as_ref().and_then(|usage| usage.reported_cost_micros),
+            ),
+        }),
+    }
+}
+
+#[allow(dead_code)]
 pub(crate) fn structured_output_schema_wrapper(
     input: &ArtifactProcessorInput,
 ) -> serde_json::Value {
@@ -3202,10 +3857,12 @@ pub(crate) fn structured_output_schema_wrapper(
     })
 }
 
+#[allow(dead_code)]
 pub fn structured_output_schema() -> serde_json::Value {
     structured_output_schema_with_allowed_refs(&[])
 }
 
+#[allow(dead_code)]
 pub(crate) fn structured_output_schema_with_allowed_refs(
     allowed_refs: &[String],
 ) -> serde_json::Value {
@@ -3224,9 +3881,7 @@ pub(crate) fn structured_output_schema_with_allowed_refs(
             "entities",
             "relationships",
             "retrieval_intents",
-            "importance_score",
-            "escalate_to_frontier",
-            "escalation_reason"
+            "importance_score"
         ],
         "properties": {
             "summary": {
@@ -3379,13 +4034,12 @@ pub(crate) fn structured_output_schema_with_allowed_refs(
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 10
-            },
-            "escalate_to_frontier": { "type": "boolean" },
-            "escalation_reason": { "type": "string" }
+            }
         }
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn openai_structured_output_schema(input: &ArtifactProcessorInput) -> serde_json::Value {
     let mut schema =
         structured_output_schema_with_allowed_refs(&allowed_artifact_evidence_refs(input));
@@ -3465,17 +4119,15 @@ pub(crate) fn reconciliation_output_schema() -> serde_json::Value {
     })
 }
 
-const OPENAI_PROMPT_VERSION: &str = "openai-strict-v5";
-pub(crate) const ANTHROPIC_PROMPT_VERSION: &str = "anthropic-strict-v4";
-pub(crate) const GEMINI_PROMPT_VERSION: &str = "gemini-strict-v11";
-pub(crate) const GROK_PROMPT_VERSION: &str = "grok-strict-v5";
-const OPENAI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for OpenAI. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, ongoing state, and personal history that could be independently retrieved later. A rich conversation should produce many memories, not a summary of a few highlights.\n5. Summary, classifications, and memories are complementary but different. Memories capture discrete durable facts for retrieval; the summary is a narrative synthesis. Do not mirror the summary into memories or the memories into the summary mechanically.\n6. If a durable fact could answer a future retrieval question on its own, emit it as a discrete memory whether or not the summary also mentions it. Classifications are topical labels, not substitutes for memories.\n7. Choose the closest memory_type from the provided schema. Use the broad retrieval-oriented categories already available instead of inventing domain-specific subtypes.\n8. Generic how-to advice, recipes, troubleshooting steps, code snippets, and one-off utility answers should produce zero memories unless they reveal a stable user preference or durable personal fact.\n9. If the artifact is primarily generic instructions or reusable advice with no durable user/project state, return `memories: []`.\n10. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, architecture decision, implementation plan, or durable operating model.\n11. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact.\n12. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n13. When uncertain on a low-signal artifact, keep the information in the summary instead of emitting memories.\n14. Use retrieval_intents only for archive lookups that matter for duplicate detection, contradiction checks, or prior-state matching.\n15. Do not guess prior continuity; emit retrieval_intents instead.\n16. Emit relationships only when the artifact explicitly supports the link.\n17. relationship confidence_label must be low, medium, or high.\n18. memory_scope is always artifact and memory_scope_value is the artifact_id.\n19. Low-signal artifacts should usually have low importance and no classifications.\n20. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n21. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+const OPENAI_PROMPT_VERSION: &str = "openai-two-phase-v1";
+pub(crate) const ANTHROPIC_PROMPT_VERSION: &str = "anthropic-two-phase-v1";
+pub(crate) const GEMINI_PROMPT_VERSION: &str = "gemini-two-phase-v1";
+pub(crate) const GROK_PROMPT_VERSION: &str = "grok-two-phase-v1";
 
-pub(crate) const ANTHROPIC_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Anthropic. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, ongoing state, and personal history that could be independently retrieved later. A rich conversation should produce many memories, not a summary of a few highlights.\n5. Summary, classifications, and memories are complementary but different. Memories capture discrete durable facts for retrieval; the summary is a narrative synthesis. Do not mirror the summary into memories or the memories into the summary mechanically.\n6. If a durable fact could answer a future retrieval question on its own, emit it as a discrete memory whether or not the summary also mentions it. Classifications are topical labels, not substitutes for memories.\n7. Choose the closest memory_type from the provided schema. Use the broad retrieval-oriented categories already available instead of inventing domain-specific subtypes.\n8. Generic how-to advice, recipes, troubleshooting steps, code snippets, and one-off utility answers should produce zero memories unless they reveal a stable user preference or durable personal fact.\n9. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, architecture decision, implementation plan, or durable operating model.\n10. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact.\n11. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n12. When uncertain on a low-signal artifact, keep the information in the summary instead of emitting memories.\n13. Use retrieval_intents only for archive lookups that matter for duplicate detection, contradiction checks, or prior-state matching.\n14. Do not guess prior continuity; emit retrieval_intents instead.\n15. Emit relationships only when the artifact explicitly supports the link.\n16. relationship confidence_label must be low, medium, or high.\n17. memory_scope is always artifact and memory_scope_value is the artifact_id.\n18. Low-signal artifacts should usually have low importance and no classifications.\n19. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n20. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+pub(crate) const TWO_PHASE_CANDIDATE_SYSTEM_PROMPT: &str = "You are OpenArchive's candidate extraction engine. Read one artifact and return ONLY valid JSON.\n\nReturn these sections:\n- summary_draft\n- classification_candidates\n- memory_candidates\n- entity_candidates\n- relationship_candidates\n- retrieval_candidates\n- importance_score\n\nGeneral rules:\n1. Output valid JSON only.\n2. The artifact text is divided into segments. Every emitted item must include evidence_segment_ids that reference the provided segment identifiers exactly.\n3. Do not invent unsupported claims. Every emitted item must be directly supported or strongly supported by artifact content.\n4. Treat the output families as different jobs. A good summary does not replace memories, classifications, entities, relationships, or retrieval intents.\n5. Prefer recall over concision at this stage. It is acceptable to surface more candidates than the final extraction will keep.\n6. Be exhaustive, not representative.\n7. Avoid obvious duplicates, but do not suppress distinct candidates just because they are related.\n\nObject guidance:\n- summary_draft: Produce a coherent, human-readable synthesis of the artifact's central topics, actors, stakes, and outcomes. Do not turn it into a list of every fact.\n- classification_candidates: Emit useful browse or filter lenses. Do not over-prune.\n- memory_candidates: Emit every distinct durable or reusable fact, state, constraint, decision, preference, background detail, history item, or ongoing condition that could be retrieved independently later. Each candidate must be atomic and standalone. Do not collapse several concrete items into one broad rollup. When in doubt between including and omitting, include. For each memory candidate, assign: durability_label = one of high|medium|low; retrieval_value_label = one of high|medium|low; consequentiality_label = one of high|medium|low; temporal_scope = one of ephemeral|time_bound|ongoing|enduring.\n- entity_candidates: Emit salient entities that could matter as independent retrieval targets later. It is acceptable to include candidates that may later be pruned.\n- relationship_candidates: Emit explicit or strongly supported relationships between emitted entities. It is acceptable to include related candidates that may later be simplified.\n- retrieval_candidates: Emit plausible future questions that a user or system may ask later. They should help retrieval and follow-up reasoning, not just restate the summary.\n- importance_score: Reflect how useful this artifact is likely to be for future retrieval and personalization.";
 
-pub(crate) const GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Gemini. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, and ongoing state that could be independently retrieved later.\n5. Summary, classifications, and memories are complementary but different. Memories capture discrete durable facts for retrieval; the summary is a narrative synthesis. Do not mirror the summary into memories or the memories into the summary mechanically.\n6. If a durable fact could answer a future retrieval question on its own, emit it as a discrete memory whether or not the summary also mentions it. Classifications are topical labels, not substitutes for memories.\n7. Choose the closest memory_type from the provided schema. Use the broad retrieval-oriented categories already available instead of inventing domain-specific subtypes.\n8. Each memory must be one standalone durable item. Do not bundle multiple distinct facts into one memory. Do not emit a memory that merely summarizes the whole artifact.\n9. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n10. Before finalizing memories, ask what future retrieval question each memory would answer. If two memories would answer substantially the same future question, keep only the single best memory.\n11. Do not emit near-duplicate memories, classifications, entities, or relationships. If two candidate items express the same underlying fact at different specificity levels, keep the single best item: prefer the more specific, better grounded, higher-signal version and merge all supporting evidence_segment_ids into it.\n12. Repeated mentions of the same fact, preference, diagnosis, plan, metric, or identity should strengthen one existing item, not create another slightly reworded item.\n13. Prefer fewer unique items over many overlapping paraphrases. A longer list is only better when it adds genuinely new retrievable information.\n14. Do not emit umbrella memories like background, profile, habits, architecture, or overview when the same information is already captured by narrower memories. Prefer concrete facts, diagnoses, findings, decisions, reactions, plans, and stable preferences.\n15. The summary must be one coherent artifact-level synthesis, not a concatenation of chunk summaries or a list of mini-summaries.\n16. Generic how-to advice and one-off utility answers should produce zero memories unless they reveal a stable user preference or durable personal fact.\n17. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n18. Do not guess prior continuity; emit retrieval_intents instead.\n19. Emit relationships only when the artifact explicitly supports the link.\n20. relationship confidence_label must be low, medium, or high.\n21. memory_scope is always artifact and memory_scope_value is the artifact_id.\n22. Low-signal artifacts should usually have low importance and no classifications.\n23. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n24. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
-
-pub(crate) const GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict extraction engine for Grok. Read one artifact and return ONLY valid JSON.\n\nReturn exactly these sections:\n- summary\n- classifications\n- memories\n- entities\n- relationships\n- retrieval_intents\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nRules:\n1. Output valid JSON only. No markdown or extra text.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Be exhaustive, not representative. Extract every distinct durable fact, preference, decision, biographical event, health detail, constraint, ongoing state, and personal history that could be independently retrieved later. A rich conversation should produce many memories, not a summary of a few highlights.\n5. Summary, classifications, and memories are complementary but different. Memories capture discrete durable facts for retrieval; the summary is a narrative synthesis. Do not mirror the summary into memories or the memories into the summary mechanically.\n6. If a durable fact could answer a future retrieval question on its own, emit it as a discrete memory whether or not the summary also mentions it. Classifications are topical labels, not substitutes for memories.\n7. Choose the closest memory_type from the provided schema. Use the broad retrieval-oriented categories already available instead of inventing domain-specific subtypes.\n8. Generic how-to advice, recipes, troubleshooting steps, and one-off utility answers should produce zero memories unless they reveal a stable user preference, durable personal fact, or ongoing state.\n9. Do not create `project_fact` memories for generic instructions or topic summaries. `project_fact` requires a named project, system, architecture decision, implementation plan, or durable operating model.\n10. Named projects, workflows, architecture choices, and repeated operating preferences should be preserved as memories when the artifact provides explicit evidence.\n11. Each memory must represent one standalone durable item that could be retrieved independently later. Do not emit a memory that merely summarizes the whole artifact or bundles multiple unrelated subtopics together.\n12. Do not collapse several concrete durable items into one broad rollup memory. If the artifact discusses injury history AND training preferences AND dietary constraints, emit separate memories for each.\n13. When uncertain on a low-signal artifact, keep the information in the summary instead of emitting memories.\n14. Use retrieval_intents to ask for archive lookups when prior-state matching, contradiction checks, or duplicate detection matter.\n15. Do not guess prior continuity; emit retrieval_intents instead.\n16. Emit relationships only when the artifact explicitly supports the link.\n17. relationship confidence_label must be low, medium, or high.\n18. memory_scope is always artifact and memory_scope_value is the artifact_id.\n19. Low-signal artifacts should usually have low importance and no classifications.\n20. escalate_to_frontier may be true only when importance_score >= 8 and the artifact would materially benefit from a higher-quality pass.\n21. escalation_reason must be empty when escalate_to_frontier is false and one short sentence when true.";
+#[allow(dead_code)]
+pub(crate) const TWO_PHASE_FINALIZER_SYSTEM_PROMPT: &str = "You are OpenArchive's extraction finalizer. Use only the provided candidate bundle and return ONLY valid JSON in the requested final schema.\n\nGeneral rules:\n1. Do not invent facts, evidence refs, or objects not supported by the candidate bundle.\n2. Preserve evidence refs exactly.\n3. Do not treat any count limit as a target. Keep the strongest distinct items that belong; do not pad, and do not collapse unrelated facts merely to be shorter.\n4. When several candidates are individually valid, prefer the set with higher long-term retrieval value, clearer future usefulness, and greater downstream consequence.\n5. The candidate bundle is already a first-pass extraction. Pruning is optional, not required. If the candidate count is already within the schema limit, you do not need to remove anything. Drop or merge only when candidates are genuine duplicates, clear near-duplicates, unsupported by the bundle, or clearly low-value and local to this artifact.\n\nObject guidance:\n- summary: Keep it coherent and central. Preserve the main story of the artifact without turning the summary into a dump of all candidates.\n- classifications: Keep only useful browse or filter lenses. Remove generic, weak, or redundant classifications.\n- memories: Keep distinct, durable, retrieval-worthy memories. Use the candidate labels for durability, retrieval value, consequentiality, and temporal scope as editorial signals, not rigid rules. Candidates marked high on durability, retrieval value, or consequentiality should usually be retained unless they duplicate another stronger candidate. Deprioritize transient logistics, one-off setup details, low-value inventories, and items whose future usefulness is narrowly local to this artifact. Keep separate memories when candidates would answer meaningfully different future retrieval questions, even if they are related or appear close together in the source. Merge only genuine duplicates or near-duplicates. Do not collapse multiple important facts into an umbrella memory when keeping them separate would improve future retrieval.\n- entities: Keep only salient entities that stand on their own as future retrieval targets, but be conservative about dropping supported entities when they anchor retained memories, relationships, or retrieval intents.\n- relationships: Keep semantically clean, well-supported relationships between retained entities. Prefer retaining a supported relationship over dropping it merely for brevity.\n- retrieval_intents: Keep questions that are likely future lookups or follow-ups, not paraphrases of the summary. Prefer preserving intents that map to retained memories or relationships.\n\nSchema guidance:\n- Fix bad type assignments and choose memory_type only from the allowed schema values.\n- Output valid JSON only.";
 
 pub(crate) const RECONCILIATION_SYSTEM_PROMPT: &str = "You are OpenArchive's strict reconciliation engine. Use only the provided extraction candidates, retrieval results, and source evidence. Return ONLY valid JSON.\n\nRules:\n1. Prefer no merge over a weak merge.\n2. Choose create_new when the archive evidence is insufficient.\n3. Use attach_to_existing or strengthen_existing only when the retrieved object clearly matches the candidate.\n4. Use supersede_existing only when the new artifact clearly updates or replaces prior state.\n5. Use contradicts_existing only when the artifact clearly conflicts with retrieved prior state.\n6. Never merge identities, projects, or relationships on vague topical overlap.\n7. Every decision must cite real evidence_segment_ids from the extraction candidates.\n8. Any decision that uses an existing-object action must include the exact matched_object_id from retrieval results.\n9. If you cannot name an exact matched_object_id, choose create_new.\n10. Output valid JSON only.";
 
@@ -3564,7 +4216,7 @@ mod tests {
     use super::*;
 
     struct FixedInferenceClient {
-        response: String,
+        candidate_response: String,
     }
 
     impl InferenceClient for FixedInferenceClient {
@@ -3576,7 +4228,7 @@ mod tests {
             _schema: &serde_json::Value,
         ) -> Result<InferenceResult, ProcessorError> {
             Ok(InferenceResult {
-                output_text: self.response.clone(),
+                output_text: self.candidate_response.clone(),
                 usage: None,
             })
         }
@@ -3637,42 +4289,45 @@ mod tests {
         }
     }
 
+    fn sample_candidate_response() -> String {
+        serde_json::json!({
+            "summary_draft": {
+                "title": "Candidate summary",
+                "body_text": "The artifact discusses hardening worker failure behavior and the next milestone for the real pipeline.",
+                "evidence_segment_ids": ["evidence_ref_1", "evidence_ref_2"]
+            },
+            "classification_candidates": [
+                {
+                    "classification_type": "intent",
+                    "classification_value": "fix_failure_handling",
+                    "title": "Fix failure handling",
+                    "body_text": "The artifact is focused on hardening worker failure behavior.",
+                    "evidence_segment_ids": ["evidence_ref_1"]
+                }
+            ],
+            "memory_candidates": [
+                {
+                    "title": "Task 12 uses hosted inference",
+                    "body_text": "The first real pipeline uses a hosted inference provider.",
+                    "evidence_segment_ids": ["evidence_ref_2"],
+                    "durability_label": "high",
+                    "retrieval_value_label": "high",
+                    "consequentiality_label": "medium",
+                    "temporal_scope": "enduring"
+                }
+            ],
+            "entity_candidates": [],
+            "relationship_candidates": [],
+            "retrieval_candidates": [],
+            "importance_score": 8
+        })
+        .to_string()
+    }
+
     #[test]
     fn openai_processor_parses_and_validates_output() {
         let client = Arc::new(FixedInferenceClient {
-            response: serde_json::json!({
-                "summary": {
-                    "title": "Hardening and next steps",
-                    "body_text": "The worker should fail invalid payloads and the next milestone is the real pipeline.",
-                    "evidence_segment_ids": ["seg-1", "seg-2"]
-                },
-                "classifications": [
-                    {
-                        "classification_type": "intent",
-                        "classification_value": "fix_failure_handling",
-                        "title": "Fix failure handling",
-                        "body_text": "The artifact is focused on hardening worker failure behavior.",
-                        "evidence_segment_ids": ["seg-1"]
-                    }
-                ],
-                "memories": [
-                    {
-                        "memory_type": "project_fact",
-                        "memory_scope": "artifact",
-                        "memory_scope_value": "artifact-1",
-                        "title": "Task 12 uses hosted inference",
-                        "body_text": "The first real pipeline uses a hosted inference provider.",
-                        "evidence_segment_ids": ["seg-2"]
-                    }
-                ],
-                "entities": [],
-                "relationships": [],
-                "retrieval_intents": [],
-                "importance_score": 8,
-                "escalate_to_frontier": true,
-                "escalation_reason": "High-value implementation direction with durable engineering impact."
-            })
-            .to_string(),
+            candidate_response: sample_candidate_response(),
         });
         let factory = OpenAiProcessorFactory::with_client(client, "gpt-4.1-mini", "gpt-5.4");
         let processor = factory
@@ -3688,34 +4343,31 @@ mod tests {
         assert_eq!(output.memories.len(), 1);
         assert_eq!(output.summary.evidence_segment_ids, vec!["seg-1", "seg-2"]);
         assert_eq!(output.importance_score, 8);
-        assert!(output.escalate_to_frontier);
     }
 
     #[test]
     fn openai_processor_rejects_unknown_evidence_segment_ids() {
         let client = Arc::new(FixedInferenceClient {
-            response: serde_json::json!({
-                "summary": {
+            candidate_response: serde_json::json!({
+                "summary_draft": {
                     "title": "Bad evidence",
                     "body_text": "The model referenced an unknown segment.",
-                    "evidence_segment_ids": ["seg-99"]
+                    "evidence_segment_ids": ["evidence_ref_99"]
                 },
-                "classifications": [
+                "classification_candidates": [
                     {
                         "classification_type": "topic",
                         "classification_value": "worker_failure_handling",
                         "title": "Worker hardening",
                         "body_text": "Specific hardening work.",
-                        "evidence_segment_ids": ["seg-1"]
+                        "evidence_segment_ids": ["evidence_ref_1"]
                     }
                 ],
-                "memories": [],
-                "entities": [],
-                "relationships": [],
-                "retrieval_intents": [],
-                "importance_score": 5,
-                "escalate_to_frontier": false,
-                "escalation_reason": ""
+                "memory_candidates": [],
+                "entity_candidates": [],
+                "relationship_candidates": [],
+                "retrieval_candidates": [],
+                "importance_score": 5
             })
             .to_string(),
         });
@@ -3735,52 +4387,49 @@ mod tests {
         let client = Arc::new(SequenceInferenceClient {
             responses: std::sync::Mutex::new(vec![
                 serde_json::json!({
-                    "summary": {
+                    "summary_draft": {
                         "title": "Bad evidence",
                         "body_text": "The model referenced an unknown segment.",
-                        "evidence_segment_ids": ["seg-99"]
+                        "evidence_segment_ids": ["evidence_ref_99"]
                     },
-                    "classifications": [],
-                    "memories": [],
-                    "entities": [],
-                    "relationships": [],
-                    "retrieval_intents": [],
-                    "importance_score": 5,
-                    "escalate_to_frontier": false,
-                    "escalation_reason": ""
+                    "classification_candidates": [],
+                    "memory_candidates": [],
+                    "entity_candidates": [],
+                    "relationship_candidates": [],
+                    "retrieval_candidates": [],
+                    "importance_score": 5
                 })
                 .to_string(),
                 serde_json::json!({
-                    "summary": {
+                    "summary_draft": {
                         "title": "Hardening and next steps",
                         "body_text": "The worker should fail invalid payloads and the next milestone is the real pipeline.",
-                        "evidence_segment_ids": ["seg-1", "seg-2"]
+                        "evidence_segment_ids": ["evidence_ref_1", "evidence_ref_2"]
                     },
-                    "classifications": [
+                    "classification_candidates": [
                         {
                             "classification_type": "intent",
                             "classification_value": "fix_failure_handling",
                             "title": "Fix failure handling",
                             "body_text": "The artifact is focused on hardening worker failure behavior.",
-                            "evidence_segment_ids": ["seg-1"]
+                            "evidence_segment_ids": ["evidence_ref_1"]
                         }
                     ],
-                    "memories": [
+                    "memory_candidates": [
                         {
-                            "memory_type": "project_fact",
-                            "memory_scope": "artifact",
-                            "memory_scope_value": "artifact-1",
                             "title": "Task 12 uses hosted inference",
                             "body_text": "The first real pipeline uses a hosted inference provider.",
-                            "evidence_segment_ids": ["seg-2"]
+                            "evidence_segment_ids": ["evidence_ref_2"],
+                            "durability_label": "high",
+                            "retrieval_value_label": "high",
+                            "consequentiality_label": "medium",
+                            "temporal_scope": "enduring"
                         }
                     ],
-                    "entities": [],
-                    "relationships": [],
-                    "retrieval_intents": [],
-                    "importance_score": 7,
-                    "escalate_to_frontier": false,
-                    "escalation_reason": ""
+                    "entity_candidates": [],
+                    "relationship_candidates": [],
+                    "retrieval_candidates": [],
+                    "importance_score": 7
                 })
                 .to_string(),
             ]),
@@ -3797,43 +4446,42 @@ mod tests {
         assert_eq!(output.classifications.len(), 1);
         assert_eq!(output.memories.len(), 1);
         assert_eq!(output.importance_score, 7);
-        assert!(!output.escalate_to_frontier);
     }
 
     #[test]
     fn openai_processor_drops_invalid_objects_without_rejecting_artifact() {
         let client = Arc::new(FixedInferenceClient {
-            response: serde_json::json!({
-                "summary": {
+            candidate_response: serde_json::json!({
+                "summary_draft": {
                     "title": "Logo symbol preferences",
                     "body_text": "The artifact prefers the original hash-in-book symbol.",
-                    "evidence_segment_ids": ["seg-1"]
+                    "evidence_segment_ids": ["evidence_ref_1"]
                 },
-                "classifications": [],
-                "memories": [
+                "classification_candidates": [],
+                "memory_candidates": [
                     {
-                        "memory_type": "preference",
-                        "memory_scope": "artifact",
-                        "memory_scope_value": "artifact-1-truncated",
                         "title": "Preferred HashBooks Logo Symbol",
                         "body_text": "The original hash-in-book symbol should remain the preferred logo mark.",
-                        "evidence_segment_ids": ["seg-1"]
+                        "evidence_segment_ids": ["evidence_ref_1"],
+                        "durability_label": "high",
+                        "retrieval_value_label": "high",
+                        "consequentiality_label": "medium",
+                        "temporal_scope": "enduring"
                     },
                     {
-                        "memory_type": "preference",
-                        "memory_scope": "artifact",
-                        "memory_scope_value": "artifact-1",
                         "title": "Prefer original logo symbol",
                         "body_text": "The original hash-in-book symbol should remain the preferred logo mark.",
-                        "evidence_segment_ids": ["seg-1"]
+                        "evidence_segment_ids": ["evidence_ref_1"],
+                        "durability_label": "high",
+                        "retrieval_value_label": "high",
+                        "consequentiality_label": "medium",
+                        "temporal_scope": "enduring"
                     }
                 ],
-                "entities": [],
-                "relationships": [],
-                "retrieval_intents": [],
-                "importance_score": 6,
-                "escalate_to_frontier": false,
-                "escalation_reason": ""
+                "entity_candidates": [],
+                "relationship_candidates": [],
+                "retrieval_candidates": [],
+                "importance_score": 6
             })
             .to_string(),
         });

@@ -9,15 +9,18 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use reqwest::blocking::Client;
-use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, ETAG};
 use reqwest::StatusCode;
 use reqwest::Url;
+use rusty_s3::actions::CreateMultipartUpload;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 
 use crate::config::{S3CompatibleObjectStoreConfig, S3UrlStyle};
 use crate::error::{ObjectStoreError, ObjectStoreResult};
 
 const S3_SIGNED_URL_TTL_SECS: u64 = 60 * 15;
+const MULTIPART_THRESHOLD: usize = 50 * 1024 * 1024; // 50 MB
+const MULTIPART_PART_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewObject {
@@ -195,6 +198,238 @@ impl S3CompatibleObjectStore {
     }
 }
 
+impl S3CompatibleObjectStore {
+    fn put_single(
+        &self,
+        remote_key: &str,
+        object: &NewObject,
+    ) -> ObjectStoreResult<()> {
+        let response = self
+            .client
+            .put(self.upload_url(remote_key, &object.mime_type))
+            .header(CONTENT_TYPE, object.mime_type.clone())
+            .header(CONTENT_LENGTH, object.bytes.len())
+            .body(object.bytes.clone())
+            .send()
+            .map_err(|source| ObjectStoreError::SendRequest {
+                operation: "put_object",
+                object_id: object.object_id.clone(),
+                source,
+            })?;
+
+        if response.status() != StatusCode::OK {
+            return Err(ObjectStoreError::UnexpectedStatus {
+                operation: "put_object",
+                object_id: object.object_id.clone(),
+                status: response.status().as_u16(),
+            });
+        }
+        Ok(())
+    }
+
+    fn put_multipart(
+        &self,
+        remote_key: &str,
+        object: &NewObject,
+    ) -> ObjectStoreResult<()> {
+        let ttl = Duration::from_secs(S3_SIGNED_URL_TTL_SECS);
+
+        // 1. Initiate multipart upload
+        let create_action = self
+            .bucket
+            .create_multipart_upload(Some(&self.credentials), remote_key);
+        let create_url = create_action.sign(ttl);
+
+        let create_resp = self
+            .client
+            .post(create_url)
+            .send()
+            .map_err(|source| ObjectStoreError::SendRequest {
+                operation: "create_multipart_upload",
+                object_id: object.object_id.clone(),
+                source,
+            })?;
+
+        if create_resp.status() != StatusCode::OK {
+            return Err(ObjectStoreError::UnexpectedStatus {
+                operation: "create_multipart_upload",
+                object_id: object.object_id.clone(),
+                status: create_resp.status().as_u16(),
+            });
+        }
+
+        let create_body = create_resp
+            .bytes()
+            .map_err(|source| ObjectStoreError::ReadResponseBody {
+                operation: "create_multipart_upload",
+                object_id: object.object_id.clone(),
+                source,
+            })?;
+
+        let parsed = CreateMultipartUpload::parse_response(&create_body).map_err(|e| {
+            ObjectStoreError::ParseMultipartResponse {
+                object_id: object.object_id.clone(),
+                detail: e.to_string(),
+            }
+        })?;
+        let upload_id = parsed.upload_id();
+
+        // 2. Upload parts
+        let chunks: Vec<&[u8]> = object.bytes.chunks(MULTIPART_PART_SIZE).collect();
+        let total_parts = chunks.len();
+        let mut etags: Vec<String> = Vec::with_capacity(total_parts);
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            let part_number = (i + 1) as u16;
+
+            log::info!(
+                "multipart upload: part {}/{} for {}",
+                part_number,
+                total_parts,
+                object.object_id,
+            );
+
+            let part_action = self.bucket.upload_part(
+                Some(&self.credentials),
+                remote_key,
+                part_number,
+                upload_id,
+            );
+            let part_url = part_action.sign(ttl);
+
+            let part_resp = self
+                .client
+                .put(part_url)
+                .header(CONTENT_LENGTH, chunk.len())
+                .body(chunk.to_vec())
+                .send();
+
+            let part_resp = match part_resp {
+                Ok(r) => r,
+                Err(source) => {
+                    let _ = self.abort_multipart(remote_key, upload_id, &object.object_id);
+                    return Err(ObjectStoreError::SendRequest {
+                        operation: "upload_part",
+                        object_id: object.object_id.clone(),
+                        source,
+                    });
+                }
+            };
+
+            if part_resp.status() != StatusCode::OK {
+                let status = part_resp.status().as_u16();
+                let _ = self.abort_multipart(remote_key, upload_id, &object.object_id);
+                return Err(ObjectStoreError::MultipartUploadFailed {
+                    object_id: object.object_id.clone(),
+                    part: part_number,
+                    total_parts,
+                    detail: format!("upload_part returned HTTP {status}"),
+                });
+            }
+
+            let etag = part_resp
+                .headers()
+                .get(ETAG)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim_matches('"').to_string());
+
+            match etag {
+                Some(tag) => etags.push(tag),
+                None => {
+                    let _ = self.abort_multipart(remote_key, upload_id, &object.object_id);
+                    return Err(ObjectStoreError::MultipartUploadFailed {
+                        object_id: object.object_id.clone(),
+                        part: part_number,
+                        total_parts,
+                        detail: "upload_part response missing ETag header".to_string(),
+                    });
+                }
+            }
+        }
+
+        // 3. Complete multipart upload
+        let complete_action = self.bucket.complete_multipart_upload(
+            Some(&self.credentials),
+            remote_key,
+            upload_id,
+            etags.iter().map(|s| s.as_str()),
+        );
+        let complete_url = complete_action.sign(ttl);
+        let complete_body = complete_action.body();
+
+        let complete_resp = self
+            .client
+            .post(complete_url)
+            .header(CONTENT_TYPE, "application/xml")
+            .body(complete_body)
+            .send();
+
+        let complete_resp = match complete_resp {
+            Ok(r) => r,
+            Err(source) => {
+                let _ = self.abort_multipart(remote_key, upload_id, &object.object_id);
+                return Err(ObjectStoreError::SendRequest {
+                    operation: "complete_multipart_upload",
+                    object_id: object.object_id.clone(),
+                    source,
+                });
+            }
+        };
+
+        if complete_resp.status() != StatusCode::OK {
+            let status = complete_resp.status().as_u16();
+            let _ = self.abort_multipart(remote_key, upload_id, &object.object_id);
+            return Err(ObjectStoreError::UnexpectedStatus {
+                operation: "complete_multipart_upload",
+                object_id: object.object_id.clone(),
+                status,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn abort_multipart(
+        &self,
+        remote_key: &str,
+        upload_id: &str,
+        object_id: &str,
+    ) -> ObjectStoreResult<()> {
+        let ttl = Duration::from_secs(S3_SIGNED_URL_TTL_SECS);
+        let abort_action = self.bucket.abort_multipart_upload(
+            Some(&self.credentials),
+            remote_key,
+            upload_id,
+        );
+        let abort_url = abort_action.sign(ttl);
+
+        log::warn!(
+            "aborting multipart upload for object {} (upload_id={})",
+            object_id,
+            upload_id,
+        );
+
+        let resp = self
+            .client
+            .delete(abort_url)
+            .send()
+            .map_err(|source| ObjectStoreError::SendRequest {
+                operation: "abort_multipart_upload",
+                object_id: object_id.to_string(),
+                source,
+            })?;
+
+        match resp.status() {
+            StatusCode::OK | StatusCode::NO_CONTENT => Ok(()),
+            status => Err(ObjectStoreError::UnexpectedStatus {
+                operation: "abort_multipart_upload",
+                object_id: object_id.to_string(),
+                status: status.as_u16(),
+            }),
+        }
+    }
+}
+
 impl ObjectStore for S3CompatibleObjectStore {
     fn put_object(&self, object: NewObject) -> ObjectStoreResult<PutObjectResult> {
         let storage_key = content_addressed_storage_key(&object.namespace, &object.sha256);
@@ -223,25 +458,15 @@ impl ObjectStore for S3CompatibleObjectStore {
         };
 
         if !already_exists {
-            let response = self
-                .client
-                .put(self.upload_url(&remote_key, &object.mime_type))
-                .header(CONTENT_TYPE, object.mime_type.clone())
-                .header(CONTENT_LENGTH, object.bytes.len())
-                .body(object.bytes.clone())
-                .send()
-                .map_err(|source| ObjectStoreError::SendRequest {
-                    operation: "put_object",
-                    object_id: object.object_id.clone(),
-                    source,
-                })?;
-
-            if response.status() != StatusCode::OK {
-                return Err(ObjectStoreError::UnexpectedStatus {
-                    operation: "put_object",
-                    object_id: object.object_id.clone(),
-                    status: response.status().as_u16(),
-                });
+            if object.bytes.len() >= MULTIPART_THRESHOLD {
+                log::info!(
+                    "object {} is {} bytes, using multipart upload",
+                    object.object_id,
+                    object.bytes.len(),
+                );
+                self.put_multipart(&remote_key, &object)?;
+            } else {
+                self.put_single(&remote_key, &object)?;
             }
         }
 

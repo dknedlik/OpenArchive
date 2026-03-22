@@ -150,11 +150,11 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "search_objects",
-            "description": "Search derived objects (memories, entities, relationships, classifications) with structured filters. Use this for precise lookups by object type, candidate key, or artifact scope.",
+            "description": "Search derived objects (memories, entities, relationships, classifications) with structured filters. Uses lexical ranking by default and semantic ranking when embeddings are configured.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "Optional FTS query on object title and body." },
+                    "query": { "type": "string", "description": "Optional query text for lexical and semantic ranking on object title/body." },
                     "object_type": { "type": "string", "enum": ["summary", "classification", "memory", "relationship"], "description": "Filter by derived object type." },
                     "candidate_key": { "type": "string", "description": "Exact match on the object's candidate key (entity key, memory key)." },
                     "artifact_id": { "type": "string", "description": "Scope results to a single artifact." },
@@ -356,6 +356,7 @@ fn call_tool(app: &ArchiveApplication, params: Value) -> std::result::Result<Val
                         "body_text": r.body_text,
                         "candidate_key": r.candidate_key,
                         "confidence_score": r.confidence_score,
+                        "score": r.score,
                     })
                 })
                 .collect();
@@ -491,14 +492,6 @@ fn summarize_tool_result(value: &Value) -> String {
         return format!("{} hits", hits.len());
     }
 
-    if let Some(found) = value.get("found").and_then(Value::as_bool) {
-        return if found {
-            "found".to_string()
-        } else {
-            "not found".to_string()
-        };
-    }
-
     if value
         .get("stored")
         .and_then(Value::as_bool)
@@ -536,6 +529,77 @@ fn summarize_tool_result(value: &Value) -> String {
             "context pack: {} summaries, {} classifications, {} memories, {} relationships",
             summaries, classifications, memories, relationships
         );
+    }
+
+    if let Some(artifact) = value.get("artifact").and_then(Value::as_object) {
+        let segments = artifact
+            .get("segment_count")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                artifact
+                    .get("returned_segment_count")
+                    .and_then(Value::as_u64)
+            })
+            .or_else(|| {
+                artifact
+                    .get("segments")
+                    .and_then(Value::as_array)
+                    .map(|v| v.len() as u64)
+            })
+            .unwrap_or(0);
+        let (summaries, classifications, memories) = artifact
+            .get("derived_objects")
+            .and_then(Value::as_array)
+            .map(|objects| {
+                objects
+                    .iter()
+                    .fold((0_u64, 0_u64, 0_u64), |mut counts, obj| {
+                        match obj
+                            .get("derived_object_type")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                        {
+                            "summary" => counts.0 += 1,
+                            "classification" => counts.1 += 1,
+                            "memory" => counts.2 += 1,
+                            _ => {}
+                        }
+                        counts
+                    })
+            })
+            .unwrap_or_else(|| {
+                let enrichments = artifact
+                    .get("enrichment")
+                    .and_then(Value::as_object)
+                    .and_then(|enrichment| enrichment.get("counts"))
+                    .and_then(Value::as_object);
+                (
+                    enrichments
+                        .and_then(|counts| counts.get("summaries"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    enrichments
+                        .and_then(|counts| counts.get("classifications"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    enrichments
+                        .and_then(|counts| counts.get("memories"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                )
+            });
+        return format!(
+            "artifact: {} summaries, {} classifications, {} memories, {} segments",
+            summaries, classifications, memories, segments
+        );
+    }
+
+    if let Some(found) = value.get("found").and_then(Value::as_bool) {
+        return if found {
+            "found".to_string()
+        } else {
+            "not found".to_string()
+        };
     }
 
     "ok".to_string()
@@ -644,9 +708,10 @@ mod tests {
             MockArtifactDetailStore,
         )));
         let context_pack = Some(ContextPackService::new(Arc::new(MockContextPackStore)));
-        let object_search = Some(crate::app::search::ObjectSearchService::new(Arc::new(
-            MockObjectSearchStore,
-        )));
+        let object_search = Some(crate::app::search::ObjectSearchService::new(
+            Arc::new(MockObjectSearchStore),
+            None,
+        ));
         let writeback = Some(crate::app::writeback::WritebackService::new(Arc::new(
             MockWritebackStore,
         )));
@@ -792,6 +857,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn get_artifact_summary_text_prefers_payload_shape_over_found_flag() {
+        let response = call_tool(
+            &test_app(),
+            json!({
+                "name": "get_artifact",
+                "arguments": {
+                    "artifact_id": "artifact-1"
+                }
+            }),
+        )
+        .expect("tool should succeed");
+
+        assert_ne!(
+            response["content"][0]["text"],
+            Value::String("found".to_string())
+        );
+        assert_eq!(
+            response["content"][0]["text"],
+            Value::String(
+                "artifact: 1 summaries, 1 classifications, 1 memories, 1 segments".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn get_context_pack_summary_text_prefers_payload_shape_over_found_flag() {
+        let response = call_tool(
+            &test_app(),
+            json!({
+                "name": "get_context_pack",
+                "arguments": {
+                    "artifact_id": "artifact-1"
+                }
+            }),
+        )
+        .expect("tool should succeed");
+
+        assert_ne!(
+            response["content"][0]["text"],
+            Value::String("found".to_string())
+        );
+        assert_eq!(
+            response["content"][0]["text"],
+            Value::String(
+                "context pack: 0 summaries, 0 classifications, 0 memories, 0 relationships"
+                    .to_string()
+            )
+        );
+    }
+
     struct MockSearchReadStore;
     impl crate::storage::ArchiveSearchReadStore for MockSearchReadStore {
         fn search_candidates(
@@ -845,7 +961,29 @@ mod tests {
                     sequence_no: 1,
                     text_content: "hello".to_string(),
                 }],
-                derived_objects: vec![],
+                derived_objects: vec![
+                    crate::storage::ArtifactDetailDerivedObject {
+                        derived_object_id: "sum-1".to_string(),
+                        derived_object_type: crate::storage::DerivedObjectType::Summary,
+                        title: Some("Summary".to_string()),
+                        body_text: Some("Summary body".to_string()),
+                        confidence_score: None,
+                    },
+                    crate::storage::ArtifactDetailDerivedObject {
+                        derived_object_id: "cls-1".to_string(),
+                        derived_object_type: crate::storage::DerivedObjectType::Classification,
+                        title: Some("Classification".to_string()),
+                        body_text: Some("Classification body".to_string()),
+                        confidence_score: None,
+                    },
+                    crate::storage::ArtifactDetailDerivedObject {
+                        derived_object_id: "mem-1".to_string(),
+                        derived_object_type: crate::storage::DerivedObjectType::Memory,
+                        title: Some("Memory".to_string()),
+                        body_text: Some("Memory body".to_string()),
+                        confidence_score: None,
+                    },
+                ],
             }))
         }
     }
@@ -879,6 +1017,15 @@ mod tests {
         fn search_objects(
             &self,
             _filters: &crate::storage::ObjectSearchFilters,
+            _limit: usize,
+        ) -> crate::error::StorageResult<Vec<crate::storage::DerivedObjectSearchResult>> {
+            Ok(vec![])
+        }
+
+        fn search_objects_by_embedding(
+            &self,
+            _filters: &crate::storage::ObjectSearchFilters,
+            _query_embedding: &[f32],
             _limit: usize,
         ) -> crate::error::StorageResult<Vec<crate::storage::DerivedObjectSearchResult>> {
             Ok(vec![])

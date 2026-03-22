@@ -200,6 +200,7 @@ pub enum JobType {
     ArtifactExtract,
     ArtifactRetrieveContext,
     ArtifactReconcile,
+    DerivedObjectEmbed,
 }
 
 impl JobType {
@@ -208,6 +209,7 @@ impl JobType {
             JobType::ArtifactExtract => "artifact_extract",
             JobType::ArtifactRetrieveContext => "artifact_retrieve_context",
             JobType::ArtifactReconcile => "artifact_reconcile",
+            JobType::DerivedObjectEmbed => "derived_object_embed",
         }
     }
 }
@@ -218,6 +220,7 @@ impl JobType {
             "artifact_extract" => Some(Self::ArtifactExtract),
             "artifact_retrieve_context" => Some(Self::ArtifactRetrieveContext),
             "artifact_reconcile" => Some(Self::ArtifactReconcile),
+            "derived_object_embed" => Some(Self::DerivedObjectEmbed),
             _ => None,
         }
     }
@@ -357,6 +360,15 @@ impl DerivedObjectType {
             DerivedObjectType::Memory => "memory",
             DerivedObjectType::Relationship => "relationship",
         }
+    }
+
+    pub fn supports_embeddings(&self) -> bool {
+        matches!(
+            self,
+            DerivedObjectType::Summary
+                | DerivedObjectType::Memory
+                | DerivedObjectType::Relationship
+        )
     }
 
     pub fn from_str(value: &str) -> Option<Self> {
@@ -761,6 +773,28 @@ impl DerivedObjectPayload {
             }
         }
     }
+
+    pub fn embedding_text(&self) -> Option<String> {
+        if !self.derived_object_type().supports_embeddings() {
+            return None;
+        }
+
+        let title = self
+            .title()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let body = self
+            .body_text()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        match (title, body) {
+            (Some(title), Some(body)) => Some(format!("{title}\n\n{body}")),
+            (Some(title), None) => Some(title.to_string()),
+            (None, Some(body)) => Some(body.to_string()),
+            (None, None) => None,
+        }
+    }
 }
 
 /// Data required to create one oa_derived_object row.
@@ -777,6 +811,17 @@ pub struct NewDerivedObject {
     pub scope_id: String,
     pub supersedes_derived_object_id: Option<String>,
     pub payload: DerivedObjectPayload,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewDerivedObjectEmbedding {
+    pub derived_object_id: String,
+    pub artifact_id: String,
+    pub derived_object_type: DerivedObjectType,
+    pub provider_name: String,
+    pub model_name: String,
+    pub content_text_hash: String,
+    pub embedding: Vec<f32>,
 }
 
 /// Data required to create one oa_evidence_link row.
@@ -899,6 +944,53 @@ pub struct ArtifactReconcilePayload {
     pub source_type: String,
     pub extraction_result_id: String,
     pub retrieval_result_set_id: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DerivedObjectEmbeddingItem {
+    pub derived_object_id: String,
+    pub derived_object_type: String,
+    pub title: Option<String>,
+    pub body_text: String,
+}
+
+impl DerivedObjectEmbeddingItem {
+    pub fn text_for_embedding(&self) -> String {
+        match self
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(title) => format!("{title}\n\n{}", self.body_text.trim()),
+            None => self.body_text.trim().to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DerivedObjectEmbeddingPayload {
+    pub schema_version: String,
+    pub artifact_id: String,
+    pub objects: Vec<DerivedObjectEmbeddingItem>,
+}
+
+impl DerivedObjectEmbeddingPayload {
+    pub fn new_v1(artifact_id: &str, objects: Vec<DerivedObjectEmbeddingItem>) -> Self {
+        Self {
+            schema_version: "1".to_string(),
+            artifact_id: artifact_id.to_string(),
+            objects,
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("DerivedObjectEmbeddingPayload is serializable")
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
 }
 
 impl ArtifactReconcilePayload {

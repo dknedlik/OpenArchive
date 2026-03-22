@@ -47,7 +47,5 @@
       "evidence_segment_ids": ["seg-7"]
     }
   ],
-  "importance_score": 6,
-  "escalate_to_frontier": false,
-  "escalation_reason": ""
+  "importance_score": 6
 }

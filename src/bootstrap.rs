@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::app::ArchiveApplication;
 use crate::config::{AppConfig, InferenceConfig, ObjectStoreConfig, RelationalStoreConfig};
+use crate::embedding::{build_embedding_provider, EmbeddingProvider};
 use crate::error::{ConfigError, ConfigResult};
 use crate::object_store::{LocalFsObjectStore, ObjectStore, S3CompatibleObjectStore};
 use crate::processor::{
@@ -17,8 +18,9 @@ use crate::storage::{
     ArchiveRetrievalStore, ArchiveSearchReadStore, ArtifactReadStore, EnrichmentJobLifecycleStore,
     EnrichmentStateStore, ImportWriteStore, OracleArchiveRetrievalStore, OracleArtifactReadStore,
     OracleDerivedMetadataStore, OracleEnrichmentJobStore, OracleImportWriteStore,
-    PostgresArtifactReadStore, PostgresDerivedMetadataStore, PostgresEnrichmentJobStore,
-    PostgresImportWriteStore, PostgresRetrievalReadStore, PostgresWritebackStore,
+    PostgresArtifactReadStore, PostgresDerivedMetadataStore, PostgresDerivedObjectEmbeddingStore,
+    PostgresEnrichmentJobStore, PostgresImportWriteStore, PostgresRetrievalReadStore,
+    PostgresWritebackStore,
 };
 
 pub struct ServiceBundle {
@@ -28,6 +30,8 @@ pub struct ServiceBundle {
     pub state_store: Arc<dyn EnrichmentStateStore>,
     pub derived_store: Arc<dyn crate::storage::DerivedMetadataWriteStore>,
     pub processor_factory: Arc<dyn ArtifactProcessorFactory>,
+    pub embedding_store: Option<Arc<dyn crate::storage::DerivedObjectEmbeddingStore>>,
+    pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
 }
 
 struct SplitStageProcessorFactory {
@@ -118,6 +122,8 @@ fn build_processor_factory(
 }
 
 pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
+    let embedding_provider = build_embedding_provider(&config.embeddings)
+        .map_err(|message| ConfigError::InvalidEmbeddingConfig { message })?;
     let object_store: Arc<dyn ObjectStore + Send + Sync> = match &config.object_store {
         ObjectStoreConfig::LocalFs(local_fs) => {
             Arc::new(LocalFsObjectStore::new(local_fs.root.clone()))
@@ -164,6 +170,8 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
             let object_search_store: Arc<
                 dyn crate::storage::DerivedObjectSearchStore + Send + Sync,
             > = retrieval_impl.clone();
+            let embedding_store: Arc<dyn crate::storage::DerivedObjectEmbeddingStore> =
+                Arc::new(PostgresDerivedObjectEmbeddingStore::new(pg_config.clone()));
             let writeback_store: Arc<dyn crate::storage::WritebackStore + Send + Sync> =
                 Arc::new(PostgresWritebackStore::new(pg_config.clone()));
             let app = Arc::new(ArchiveApplication::new(
@@ -175,6 +183,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 Some(context_pack_store),
                 Some(cross_artifact_store),
                 Some(object_search_store),
+                embedding_provider.clone(),
                 Arc::clone(&object_store),
                 Some(writeback_store),
             ));
@@ -185,6 +194,8 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 state_store: Arc::new(PostgresDerivedMetadataStore::new(pg_config.clone())),
                 derived_store: Arc::new(PostgresDerivedMetadataStore::new(pg_config.clone())),
                 processor_factory,
+                embedding_store: Some(embedding_store),
+                embedding_provider,
             })
         }
         RelationalStoreConfig::Oracle(db_config) => {
@@ -213,6 +224,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 None,
                 None,
                 None,
+                None,
                 Arc::clone(&object_store),
                 None,
             ));
@@ -223,6 +235,8 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 state_store: Arc::new(OracleDerivedMetadataStore::new(db_config.clone())),
                 derived_store: Arc::new(OracleDerivedMetadataStore::new(db_config.clone())),
                 processor_factory,
+                embedding_store: None,
+                embedding_provider: None,
             })
         }
     }

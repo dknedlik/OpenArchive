@@ -34,6 +34,9 @@ struct Args {
 
     #[arg(long = "finalizer-max-output", default_value_t = 4000)]
     finalizer_max_output: u32,
+
+    #[arg(long = "print-candidates", default_value_t = false)]
+    print_candidates: bool,
 }
 
 fn main() -> Result<()> {
@@ -81,6 +84,12 @@ fn main() -> Result<()> {
         array_len(&candidate_value, "relationship_candidates"),
         format_usage(candidate_output.usage.as_ref()),
     );
+    if args.print_candidates {
+        println!();
+        println!("Raw candidate JSON:");
+        println!("{}", candidate_output.output_text);
+        println!();
+    }
 
     let finalizer_prompt = build_finalizer_prompt(&loaded.artifact.artifact_id, &candidate_value)?;
     let final_output = client.complete_json(
@@ -206,9 +215,10 @@ fn build_artifact_prompt(
          {segments_json}\n\
          \n\
          Output guidance:\n\
-         - use only evidence_ref values shown in segments\n\
+         - the artifact text is divided into segments; each segment has an evidence_ref identifier\n\
+         - every emitted item must include evidence_segment_ids using only evidence_ref values shown in segments\n\
          - preserve evidence_ref values exactly\n\
-         - do not invent facts\n\
+         - do not invent unsupported claims; every emitted item must be directly supported or strongly supported by artifact content\n\
          - be exhaustive on durable, retrieval-worthy content\n\
          - avoid obvious duplicates and broad rollups when a more specific candidate works\n",
     ))
@@ -250,9 +260,7 @@ fn candidate_schema() -> serde_json::Value {
             "entity_candidates",
             "relationship_candidates",
             "retrieval_candidates",
-            "importance_score",
-            "escalate_to_frontier",
-            "escalation_reason"
+            "importance_score"
         ],
         "properties": {
             "summary_draft": summary_schema(),
@@ -309,9 +317,7 @@ fn candidate_schema() -> serde_json::Value {
                 "type": "array",
                 "items": retrieval_intent_schema()
             },
-            "importance_score": { "type": "integer" },
-            "escalate_to_frontier": { "type": "boolean" },
-            "escalation_reason": { "type": "string" }
+            "importance_score": { "type": "integer" }
         }
     })
 }
@@ -327,9 +333,7 @@ fn final_schema() -> serde_json::Value {
             "entities",
             "relationships",
             "retrieval_intents",
-            "importance_score",
-            "escalate_to_frontier",
-            "escalation_reason"
+            "importance_score"
         ],
         "properties": {
             "summary": summary_schema(),
@@ -382,9 +386,7 @@ fn final_schema() -> serde_json::Value {
                 "type": "array",
                 "items": retrieval_intent_schema()
             },
-            "importance_score": { "type": "integer" },
-            "escalate_to_frontier": { "type": "boolean" },
-            "escalation_reason": { "type": "string" }
+            "importance_score": { "type": "integer" }
         }
     })
 }
@@ -472,9 +474,9 @@ fn evidence_array_schema() -> serde_json::Value {
     })
 }
 
-const CANDIDATE_SYSTEM_PROMPT: &str = "You are OpenArchive's candidate extraction engine. Read one artifact and return ONLY valid JSON.\n\nReturn these sections:\n- summary_draft\n- classification_candidates\n- memory_candidates\n- entity_candidates\n- relationship_candidates\n- retrieval_candidates\n- importance_score\n- escalate_to_frontier\n- escalation_reason\n\nGeneral rules:\n1. Output valid JSON only.\n2. Every emitted item must cite real evidence_segment_ids from the artifact.\n3. Do not invent facts, intentions, preferences, identities, entities, projects, workflows, or commitments.\n4. Treat the output families as different jobs. A good summary does not replace memories, classifications, entities, relationships, or retrieval intents.\n5. Prefer recall over concision at this stage. It is acceptable to surface more candidates than the final extraction will keep.\n6. Be exhaustive, not representative.\n7. Avoid obvious duplicates, but do not suppress distinct candidates just because they are related.\n\nObject guidance:\n- summary_draft: Produce a coherent, human-readable synthesis of the artifact's central topics, actors, stakes, and outcomes. Do not turn it into a list of every fact.\n- classification_candidates: Emit useful browse or filter lenses, but do not spend candidate budget trying to over-prune them.\n- memory_candidates: Emit every distinct durable or reusable fact, state, constraint, decision, preference, background detail, history item, or ongoing condition that could be retrieved independently later. Each candidate must be atomic and standalone. Do not collapse several concrete items into one broad rollup. When in doubt between including and omitting, include. For each memory candidate, assign durability_label, retrieval_value_label, consequentiality_label, and temporal_scope based on future retrieval usefulness.\n- entity_candidates: Emit salient entities that could matter as independent retrieval targets later. It is acceptable to include candidates that may later be pruned.\n- relationship_candidates: Emit explicit or strongly supported relationships between emitted entities. It is acceptable to include related candidates that may later be simplified.\n- retrieval_candidates: Emit plausible future questions that a user or system may ask later. They should help retrieval and follow-up reasoning, not just restate the summary.\n- importance_score: Reflect how useful this artifact is likely to be for future retrieval and personalization.\n- escalate_to_frontier: Set true only when the artifact appears unusually complex, high-stakes, ambiguous, or information-dense.";
+const CANDIDATE_SYSTEM_PROMPT: &str = "You are OpenArchive's candidate extraction engine. Read one artifact and return ONLY valid JSON.\n\nReturn these sections:\n- summary_draft\n- classification_candidates\n- memory_candidates\n- entity_candidates\n- relationship_candidates\n- retrieval_candidates\n- importance_score\n\nGeneral rules:\n1. Output valid JSON only.\n2. The artifact text is divided into segments. Every emitted item must include evidence_segment_ids that reference the provided segment identifiers exactly.\n3. Do not invent unsupported claims. Every emitted item must be directly supported or strongly supported by artifact content.\n4. Treat the output families as different jobs. A good summary does not replace memories, classifications, entities, relationships, or retrieval intents.\n5. Prefer recall over concision at this stage. It is acceptable to surface more candidates than the final extraction will keep.\n6. Be exhaustive, not representative.\n7. Avoid obvious duplicates, but do not suppress distinct candidates just because they are related.\n\nObject guidance:\n- summary_draft: Produce a coherent, human-readable synthesis of the artifact's central topics, actors, stakes, and outcomes. Do not turn it into a list of every fact.\n- classification_candidates: Emit useful browse or filter lenses. Do not over-prune.\n- memory_candidates: Emit every distinct durable or reusable fact, state, constraint, decision, preference, background detail, history item, or ongoing condition that could be retrieved independently later. Each candidate must be atomic and standalone. Do not collapse several concrete items into one broad rollup. When in doubt between including and omitting, include. For each memory candidate, assign: durability_label = one of high|medium|low; retrieval_value_label = one of high|medium|low; consequentiality_label = one of high|medium|low; temporal_scope = one of ephemeral|time_bound|ongoing|enduring.\n- entity_candidates: Emit salient entities that could matter as independent retrieval targets later. It is acceptable to include candidates that may later be pruned.\n- relationship_candidates: Emit explicit or strongly supported relationships between emitted entities. It is acceptable to include related candidates that may later be simplified.\n- retrieval_candidates: Emit plausible future questions that a user or system may ask later. They should help retrieval and follow-up reasoning, not just restate the summary.\n- importance_score: Reflect how useful this artifact is likely to be for future retrieval and personalization.";
 
-const FINALIZER_SYSTEM_PROMPT: &str = "You are OpenArchive's extraction finalizer. Use only the provided candidate bundle and return ONLY valid JSON in the requested final schema.\n\nGeneral rules:\n1. Do not invent facts, evidence refs, or objects not supported by the candidate bundle.\n2. Preserve evidence refs exactly.\n3. Do not treat any count limit as a target. Keep the strongest distinct items that belong; do not pad, and do not collapse unrelated facts merely to be shorter.\n4. When several candidates are individually valid, prefer the set with higher long-term retrieval value, clearer future usefulness, and greater downstream consequence.\n\nObject guidance:\n- summary: Keep it coherent and central. Preserve the main story of the artifact without turning the summary into a dump of all candidates.\n- classifications: Keep only useful browse or filter lenses. Remove generic, weak, or redundant classifications.\n- memories: Keep distinct, durable, retrieval-worthy memories. Use the candidate labels for durability, retrieval value, consequentiality, and temporal scope as editorial signals, not rigid rules. Deprioritize transient logistics, one-off setup details, low-value inventories, and items whose future usefulness is narrowly local to this artifact. Keep separate memories when candidates would answer meaningfully different future retrieval questions, even if they are related or appear close together in the source. Merge only genuine duplicates or near-duplicates. Do not collapse multiple important facts into an umbrella memory when keeping them separate would improve future retrieval.\n- entities: Keep only salient entities that stand on their own as future retrieval targets.\n- relationships: Keep only semantically clean, well-supported relationships between retained entities.\n- retrieval_intents: Keep questions that are likely future lookups or follow-ups, not paraphrases of the summary.\n\nSchema guidance:\n- Fix bad type assignments and choose memory_type only from the allowed schema values.\n- Output valid JSON only.";
+const FINALIZER_SYSTEM_PROMPT: &str = "You are OpenArchive's extraction finalizer. Use only the provided candidate bundle and return ONLY valid JSON in the requested final schema.\n\nGeneral rules:\n1. Do not invent facts, evidence refs, or objects not supported by the candidate bundle.\n2. Preserve evidence refs exactly.\n3. Do not treat any count limit as a target. Keep the strongest distinct items that belong; do not pad, and do not collapse unrelated facts merely to be shorter.\n4. When several candidates are individually valid, prefer the set with higher long-term retrieval value, clearer future usefulness, and greater downstream consequence.\n5. The candidate bundle is already a first-pass extraction. Pruning is optional, not required. If the candidate count is already within the schema limit, you do not need to remove anything. Drop or merge only when candidates are genuine duplicates, clear near-duplicates, unsupported by the bundle, or clearly low-value and local to this artifact.\n\nObject guidance:\n- summary: Keep it coherent and central. Preserve the main story of the artifact without turning the summary into a dump of all candidates.\n- classifications: Keep only useful browse or filter lenses. Remove generic, weak, or redundant classifications.\n- memories: Keep distinct, durable, retrieval-worthy memories. Use the candidate labels for durability, retrieval value, consequentiality, and temporal scope as editorial signals, not rigid rules. Candidates marked high on durability, retrieval value, or consequentiality should usually be retained unless they duplicate another stronger candidate. Deprioritize transient logistics, one-off setup details, low-value inventories, and items whose future usefulness is narrowly local to this artifact. Keep separate memories when candidates would answer meaningfully different future retrieval questions, even if they are related or appear close together in the source. Merge only genuine duplicates or near-duplicates. Do not collapse multiple important facts into an umbrella memory when keeping them separate would improve future retrieval.\n- entities: Keep only salient entities that stand on their own as future retrieval targets, but be conservative about dropping supported entities when they anchor retained memories, relationships, or retrieval intents.\n- relationships: Keep semantically clean, well-supported relationships between retained entities. Prefer retaining a supported relationship over dropping it merely for brevity.\n- retrieval_intents: Keep questions that are likely future lookups or follow-ups, not paraphrases of the summary. Prefer preserving intents that map to retained memories or relationships.\n\nSchema guidance:\n- Fix bad type assignments and choose memory_type only from the allowed schema values.\n- Output valid JSON only.";
 
 struct GeminiProbeClient {
     client: Client,

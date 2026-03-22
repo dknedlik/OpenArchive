@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::embedding::EmbeddingProvider;
 use crate::error::{OpenArchiveError, Result};
 use crate::storage::{
     ArchiveSearchReadStore, DerivedObjectSearchResult, DerivedObjectSearchStore, DerivedObjectType,
@@ -95,29 +96,132 @@ impl ArchiveSearchService {
 
 pub struct ObjectSearchService {
     store: Arc<dyn DerivedObjectSearchStore + Send + Sync>,
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
 }
 
 impl ObjectSearchService {
-    pub fn new(store: Arc<dyn DerivedObjectSearchStore + Send + Sync>) -> Self {
-        Self { store }
+    pub fn new(
+        store: Arc<dyn DerivedObjectSearchStore + Send + Sync>,
+        embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    ) -> Self {
+        Self {
+            store,
+            embedding_provider,
+        }
     }
 
     pub fn search(
         &self,
-        filters: ObjectSearchFilters,
+        mut filters: ObjectSearchFilters,
         limit: usize,
     ) -> Result<Vec<DerivedObjectSearchResult>> {
-        self.store
-            .search_objects(&filters, limit.max(1))
-            .map_err(OpenArchiveError::from)
+        let limit = limit.max(1);
+        filters.query = filters
+            .query
+            .take()
+            .map(|query| query.trim().to_string())
+            .filter(|query| !query.is_empty());
+
+        let fetch_limit = limit.saturating_mul(3).min(100);
+        let lexical = self
+            .store
+            .search_objects(&filters, fetch_limit)
+            .map_err(OpenArchiveError::from)?;
+
+        let Some(query) = filters.query.clone() else {
+            return Ok(truncate_results(lexical, limit));
+        };
+        let Some(provider) = &self.embedding_provider else {
+            return Ok(truncate_results(lexical, limit));
+        };
+
+        let mut query_vectors = provider
+            .embed_texts(&[query])
+            .map_err(OpenArchiveError::from)?;
+        let query_vector = query_vectors.pop().unwrap_or_default();
+        if query_vector.is_empty() {
+            return Ok(truncate_results(lexical, limit));
+        }
+        let semantic = self
+            .store
+            .search_objects_by_embedding(&filters, &query_vector, fetch_limit)
+            .map_err(OpenArchiveError::from)?;
+
+        Ok(merge_results(lexical, semantic, limit))
+    }
+}
+
+fn truncate_results(
+    mut results: Vec<DerivedObjectSearchResult>,
+    limit: usize,
+) -> Vec<DerivedObjectSearchResult> {
+    results.truncate(limit);
+    results
+}
+
+fn merge_results(
+    lexical: Vec<DerivedObjectSearchResult>,
+    semantic: Vec<DerivedObjectSearchResult>,
+    limit: usize,
+) -> Vec<DerivedObjectSearchResult> {
+    use std::collections::HashMap;
+
+    let mut merged: HashMap<String, DerivedObjectSearchResult> = HashMap::new();
+
+    for mut result in lexical {
+        result.score = Some(normalize_lexical_score(result.score.unwrap_or_default()));
+        merged.insert(result.derived_object_id.clone(), result);
+    }
+
+    for mut result in semantic {
+        let semantic_score = result.score.unwrap_or_default().clamp(0.0, 1.0);
+        match merged.get_mut(&result.derived_object_id) {
+            Some(existing) => {
+                let lexical_score = existing.score.unwrap_or_default();
+                existing.score = Some((lexical_score * 0.4) + (semantic_score * 0.6));
+                if existing.title.is_none() {
+                    existing.title = result.title.take();
+                }
+                if existing.body_text.is_none() {
+                    existing.body_text = result.body_text.take();
+                }
+            }
+            None => {
+                result.score = Some(semantic_score);
+                merged.insert(result.derived_object_id.clone(), result);
+            }
+        }
+    }
+
+    let mut results = merged.into_values().collect::<Vec<_>>();
+    results.sort_by(|left, right| {
+        right
+            .score
+            .unwrap_or_default()
+            .total_cmp(&left.score.unwrap_or_default())
+            .then_with(|| left.artifact_id.cmp(&right.artifact_id))
+            .then_with(|| left.derived_object_id.cmp(&right.derived_object_id))
+    });
+    results.truncate(limit);
+    results
+}
+
+fn normalize_lexical_score(score: f32) -> f32 {
+    if score <= 0.0 {
+        0.0
+    } else {
+        score / (score + 1.0)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embedding::StubEmbeddingProvider;
     use crate::error::StorageResult;
-    use crate::storage::{ArchiveSearchCandidate, ArchiveSearchReadStore};
+    use crate::storage::{
+        ArchiveSearchCandidate, ArchiveSearchReadStore, DerivedObjectSearchStore,
+    };
 
     struct MockSearchReadStore {
         candidates: Vec<ArchiveSearchCandidate>,
@@ -131,6 +235,45 @@ mod tests {
             _filters: &SearchFilters,
         ) -> StorageResult<Vec<ArchiveSearchCandidate>> {
             Ok(self.candidates.clone())
+        }
+    }
+
+    struct MockObjectSearchStore;
+
+    impl DerivedObjectSearchStore for MockObjectSearchStore {
+        fn search_objects(
+            &self,
+            _filters: &ObjectSearchFilters,
+            _limit: usize,
+        ) -> StorageResult<Vec<DerivedObjectSearchResult>> {
+            Ok(vec![DerivedObjectSearchResult {
+                derived_object_id: "obj-1".to_string(),
+                artifact_id: "artifact-1".to_string(),
+                derived_object_type: DerivedObjectType::Memory,
+                title: Some("Lexical".to_string()),
+                body_text: Some("lexical match".to_string()),
+                candidate_key: None,
+                confidence_score: None,
+                score: Some(2.0),
+            }])
+        }
+
+        fn search_objects_by_embedding(
+            &self,
+            _filters: &ObjectSearchFilters,
+            _query_embedding: &[f32],
+            _limit: usize,
+        ) -> StorageResult<Vec<DerivedObjectSearchResult>> {
+            Ok(vec![DerivedObjectSearchResult {
+                derived_object_id: "obj-1".to_string(),
+                artifact_id: "artifact-1".to_string(),
+                derived_object_type: DerivedObjectType::Memory,
+                title: Some("Semantic".to_string()),
+                body_text: Some("semantic match".to_string()),
+                candidate_key: None,
+                confidence_score: None,
+                score: Some(0.75),
+            }])
         }
     }
 
@@ -249,5 +392,29 @@ mod tests {
 
         assert_eq!(response.hits.len(), 1);
         assert_eq!(response.hits[0].artifact_id, "artifact-1");
+    }
+
+    #[test]
+    fn object_search_merges_lexical_and_semantic_scores() {
+        let service = ObjectSearchService::new(
+            Arc::new(MockObjectSearchStore),
+            Some(Arc::new(StubEmbeddingProvider::new("stub".to_string(), 8))),
+        );
+
+        let results = service
+            .search(
+                ObjectSearchFilters {
+                    query: Some("memory".to_string()),
+                    object_type: None,
+                    candidate_key: None,
+                    artifact_id: None,
+                },
+                10,
+            )
+            .expect("object search should succeed");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].derived_object_id, "obj-1");
+        assert!(results[0].score.unwrap_or_default() > 0.0);
     }
 }

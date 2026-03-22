@@ -12,6 +12,7 @@ pub struct AppConfig {
     pub relational_store: RelationalStoreConfig,
     pub object_store: ObjectStoreConfig,
     pub inference: InferenceConfig,
+    pub embeddings: EmbeddingConfig,
     pub reconcile_inference: Option<InferenceConfig>,
     pub inference_mode: InferenceExecutionMode,
 }
@@ -23,6 +24,7 @@ impl AppConfig {
             relational_store: RelationalStoreConfig::from_env()?,
             object_store: ObjectStoreConfig::from_env()?,
             inference: InferenceConfig::from_env()?,
+            embeddings: EmbeddingConfig::from_env()?,
             reconcile_inference: InferenceConfig::from_optional_env(
                 "OA_RECONCILE_INFERENCE_PROVIDER",
             )?,
@@ -49,6 +51,67 @@ impl InferenceExecutionMode {
                 expected: "direct, batch",
             }),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmbeddingConfig {
+    Disabled,
+    Stub(StubEmbeddingConfig),
+    OpenAi(OpenAiEmbeddingConfig),
+}
+
+impl EmbeddingConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        let provider = env::var("OA_EMBEDDING_PROVIDER").unwrap_or_else(|_| "disabled".to_string());
+        match provider.as_str() {
+            "disabled" => Ok(Self::Disabled),
+            "stub" => Ok(Self::Stub(StubEmbeddingConfig::from_env()?)),
+            "openai" => Ok(Self::OpenAi(OpenAiEmbeddingConfig::from_env()?)),
+            _ => Err(ConfigError::InvalidEnumEnv {
+                key: "OA_EMBEDDING_PROVIDER",
+                value: provider,
+                expected: "disabled, stub, openai",
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StubEmbeddingConfig {
+    pub model: String,
+    pub dimensions: usize,
+}
+
+impl StubEmbeddingConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        Ok(Self {
+            model: env::var("OA_STUB_EMBEDDING_MODEL")
+                .unwrap_or_else(|_| "stub-embedding-small".to_string()),
+            dimensions: positive_usize_env("OA_STUB_EMBEDDING_DIMENSIONS")?.unwrap_or(8),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAiEmbeddingConfig {
+    pub api_key: String,
+    pub base_url: String,
+    pub embedding_model: String,
+    pub embedding_dimensions: usize,
+}
+
+impl OpenAiEmbeddingConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        Ok(Self {
+            api_key: required_env("OA_OPENAI_API_KEY")?,
+            base_url: env::var("OA_OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            embedding_model: env::var("OA_OPENAI_EMBEDDING_MODEL")
+                .unwrap_or_else(|_| "text-embedding-3-small".to_string()),
+            embedding_dimensions: positive_usize_env("OA_OPENAI_EMBEDDING_DIMENSIONS")?
+                .unwrap_or(1536),
+        })
     }
 }
 
@@ -235,6 +298,8 @@ pub struct GeminiConfig {
     pub repair_max_output_tokens: u32,
     pub standard_model: String,
     pub quality_model: Option<String>,
+    pub reconcile_standard_model: String,
+    pub reconcile_quality_model: Option<String>,
     pub batch_enabled: bool,
     pub batch_max_jobs: usize,
     pub batch_max_bytes: usize,
@@ -257,6 +322,12 @@ impl GeminiConfig {
                 .unwrap_or(8000),
             standard_model: required_env("OA_GEMINI_STANDARD_MODEL")?,
             quality_model: optional_trimmed_env("OA_GEMINI_QUALITY_MODEL"),
+            reconcile_standard_model: required_env_fallback(
+                "OA_GEMINI_RECONCILE_STANDARD_MODEL",
+                "OA_GEMINI_STANDARD_MODEL",
+            )?,
+            reconcile_quality_model: optional_trimmed_env("OA_GEMINI_RECONCILE_QUALITY_MODEL")
+                .or_else(|| optional_trimmed_env("OA_GEMINI_QUALITY_MODEL")),
             batch_enabled: env::var("OA_GEMINI_BATCH_ENABLED")
                 .ok()
                 .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
@@ -278,6 +349,8 @@ pub struct OpenAiConfig {
     pub reasoning_effort_override: OpenAiReasoningEffort,
     pub standard_model: String,
     pub quality_model: Option<String>,
+    pub reconcile_standard_model: String,
+    pub reconcile_quality_model: Option<String>,
 }
 
 impl OpenAiConfig {
@@ -297,6 +370,12 @@ impl OpenAiConfig {
             reasoning_effort_override: OpenAiReasoningEffort::from_env()?,
             standard_model: required_env("OA_OPENAI_STANDARD_MODEL")?,
             quality_model: optional_trimmed_env("OA_OPENAI_QUALITY_MODEL"),
+            reconcile_standard_model: required_env_fallback(
+                "OA_OPENAI_RECONCILE_STANDARD_MODEL",
+                "OA_OPENAI_STANDARD_MODEL",
+            )?,
+            reconcile_quality_model: optional_trimmed_env("OA_OPENAI_RECONCILE_QUALITY_MODEL")
+                .or_else(|| optional_trimmed_env("OA_OPENAI_QUALITY_MODEL")),
         })
     }
 }
@@ -348,6 +427,8 @@ pub struct AnthropicConfig {
     pub max_output_tokens: u32,
     pub standard_model: String,
     pub quality_model: Option<String>,
+    pub reconcile_standard_model: String,
+    pub reconcile_quality_model: Option<String>,
 }
 
 impl AnthropicConfig {
@@ -362,6 +443,12 @@ impl AnthropicConfig {
                 .unwrap_or(4000),
             standard_model: required_env("OA_ANTHROPIC_STANDARD_MODEL")?,
             quality_model: optional_trimmed_env("OA_ANTHROPIC_QUALITY_MODEL"),
+            reconcile_standard_model: required_env_fallback(
+                "OA_ANTHROPIC_RECONCILE_STANDARD_MODEL",
+                "OA_ANTHROPIC_STANDARD_MODEL",
+            )?,
+            reconcile_quality_model: optional_trimmed_env("OA_ANTHROPIC_RECONCILE_QUALITY_MODEL")
+                .or_else(|| optional_trimmed_env("OA_ANTHROPIC_QUALITY_MODEL")),
         })
     }
 }
@@ -374,6 +461,8 @@ pub struct GrokConfig {
     pub repair_max_output_tokens: u32,
     pub standard_model: String,
     pub quality_model: Option<String>,
+    pub reconcile_standard_model: String,
+    pub reconcile_quality_model: Option<String>,
 }
 
 impl GrokConfig {
@@ -392,6 +481,12 @@ impl GrokConfig {
                 .unwrap_or(8000),
             standard_model: required_env("OA_GROK_STANDARD_MODEL")?,
             quality_model: optional_trimmed_env("OA_GROK_QUALITY_MODEL"),
+            reconcile_standard_model: required_env_fallback(
+                "OA_GROK_RECONCILE_STANDARD_MODEL",
+                "OA_GROK_STANDARD_MODEL",
+            )?,
+            reconcile_quality_model: optional_trimmed_env("OA_GROK_RECONCILE_QUALITY_MODEL")
+                .or_else(|| optional_trimmed_env("OA_GROK_QUALITY_MODEL")),
         })
     }
 }
@@ -507,6 +602,12 @@ fn required_env(key: &'static str) -> ConfigResult<String> {
     env::var(key).map_err(|_| ConfigError::MissingEnv { key })
 }
 
+fn required_env_fallback(primary: &'static str, fallback: &'static str) -> ConfigResult<String> {
+    env::var(primary)
+        .or_else(|_| env::var(fallback))
+        .map_err(|_| ConfigError::MissingEnv { key: primary })
+}
+
 fn optional_trimmed_env(key: &'static str) -> Option<String> {
     env::var(key)
         .ok()
@@ -607,6 +708,7 @@ pub struct EnrichmentPipelineConfig {
     pub reconcile_workers: usize,
     pub reconcile: StageConfig,
     pub retrieve_context_workers: usize,
+    pub embedding_workers: usize,
     pub chunking: ExtractionChunkingConfig,
     pub extract_min_coverage_percent: u8,
     pub extract_max_gap_fill_passes: usize,
@@ -634,6 +736,7 @@ impl EnrichmentPipelineConfig {
             },
             retrieve_context_workers: positive_usize_env("OA_RETRIEVE_CONTEXT_WORKERS")?
                 .unwrap_or(2),
+            embedding_workers: positive_usize_env("OA_EMBEDDING_WORKERS")?.unwrap_or(1),
             chunking: ExtractionChunkingConfig {
                 max_segments_per_chunk: positive_usize_env("OA_EXTRACT_CHUNK_SEGMENTS")?
                     .unwrap_or(20),
@@ -674,6 +777,7 @@ mod tests {
             "OA_S3_KEY_PREFIX",
             "OA_S3_URL_STYLE",
             "OA_INFERENCE_PROVIDER",
+            "OA_EMBEDDING_PROVIDER",
             "OA_RECONCILE_INFERENCE_PROVIDER",
             "OA_INFERENCE_MODE",
             "OA_OPENAI_API_KEY",
@@ -682,23 +786,35 @@ mod tests {
             "OA_OPENAI_REASONING_EFFORT",
             "OA_OPENAI_STANDARD_MODEL",
             "OA_OPENAI_QUALITY_MODEL",
+            "OA_OPENAI_RECONCILE_STANDARD_MODEL",
+            "OA_OPENAI_RECONCILE_QUALITY_MODEL",
+            "OA_OPENAI_EMBEDDING_MODEL",
+            "OA_OPENAI_EMBEDDING_DIMENSIONS",
+            "OA_STUB_EMBEDDING_MODEL",
+            "OA_STUB_EMBEDDING_DIMENSIONS",
             "OA_GEMINI_API_KEY",
             "OA_GEMINI_BASE_URL",
             "OA_GEMINI_MAX_OUTPUT_TOKENS",
             "OA_GEMINI_REPAIR_MAX_OUTPUT_TOKENS",
             "OA_GEMINI_STANDARD_MODEL",
             "OA_GEMINI_QUALITY_MODEL",
+            "OA_GEMINI_RECONCILE_STANDARD_MODEL",
+            "OA_GEMINI_RECONCILE_QUALITY_MODEL",
             "OA_ANTHROPIC_API_KEY",
             "OA_ANTHROPIC_BASE_URL",
             "OA_ANTHROPIC_MAX_OUTPUT_TOKENS",
             "OA_ANTHROPIC_STANDARD_MODEL",
             "OA_ANTHROPIC_QUALITY_MODEL",
+            "OA_ANTHROPIC_RECONCILE_STANDARD_MODEL",
+            "OA_ANTHROPIC_RECONCILE_QUALITY_MODEL",
             "OA_GROK_API_KEY",
             "OA_GROK_BASE_URL",
             "OA_GROK_MAX_OUTPUT_TOKENS",
             "OA_GROK_REPAIR_MAX_OUTPUT_TOKENS",
             "OA_GROK_STANDARD_MODEL",
             "OA_GROK_QUALITY_MODEL",
+            "OA_GROK_RECONCILE_STANDARD_MODEL",
+            "OA_GROK_RECONCILE_QUALITY_MODEL",
             "OA_ORACLE_CONNECT_STRING",
             "OA_ORACLE_USERNAME",
             "OA_ORACLE_PASSWORD",
@@ -712,6 +828,7 @@ mod tests {
             "OA_HTTP_BIND",
             "OA_HTTP_REQUEST_WORKERS",
             "OA_ENRICHMENT_WORKERS",
+            "OA_EMBEDDING_WORKERS",
             "OA_ENRICHMENT_POLL_INTERVAL_MS",
             "OA_EXTRACT_CHUNK_SEGMENTS",
             "OA_EXTRACT_CHUNK_OVERLAP",
@@ -742,6 +859,7 @@ mod tests {
         ));
         assert!(matches!(config.object_store, ObjectStoreConfig::LocalFs(_)));
         assert_eq!(config.inference, InferenceConfig::Stub);
+        assert_eq!(config.embeddings, EmbeddingConfig::Disabled);
         assert_eq!(config.reconcile_inference, None);
         assert_eq!(config.inference_mode, InferenceExecutionMode::Batch);
     }
@@ -863,6 +981,30 @@ mod tests {
         assert_eq!(config.repair_max_output_tokens, 8000);
         assert_eq!(config.standard_model, "gpt-4.1-mini");
         assert_eq!(config.quality_model, None);
+        assert_eq!(config.reconcile_standard_model, "gpt-4.1-mini");
+        assert_eq!(config.reconcile_quality_model, None);
+    }
+
+    #[test]
+    fn openai_embedding_provider_loads_when_configured() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
+        std::env::set_var("OA_EMBEDDING_PROVIDER", "openai");
+        std::env::set_var("OA_OPENAI_API_KEY", "test-key");
+
+        let config = AppConfig::from_env().expect("embedding config should load");
+        let EmbeddingConfig::OpenAi(config) = config.embeddings else {
+            panic!("expected openai embedding config");
+        };
+
+        assert_eq!(config.api_key, "test-key");
+        assert_eq!(config.base_url, "https://api.openai.com/v1");
+        assert_eq!(config.embedding_model, "text-embedding-3-small");
+        assert_eq!(config.embedding_dimensions, 1536);
     }
 
     #[test]
@@ -882,6 +1024,7 @@ mod tests {
         assert_eq!(config.chunking.max_chars_per_chunk, 25_000);
         assert_eq!(config.extract_min_coverage_percent, 60);
         assert_eq!(config.extract_max_gap_fill_passes, 1);
+        assert_eq!(config.embedding_workers, 1);
     }
 
     #[test]
@@ -924,6 +1067,8 @@ mod tests {
         assert_eq!(config.repair_max_output_tokens, 8000);
         assert_eq!(config.standard_model, "gemini-2.5-flash-lite");
         assert_eq!(config.quality_model, None);
+        assert_eq!(config.reconcile_standard_model, "gemini-2.5-flash-lite");
+        assert_eq!(config.reconcile_quality_model, None);
     }
 
     #[test]
@@ -948,6 +1093,8 @@ mod tests {
         assert_eq!(config.max_output_tokens, 4000);
         assert_eq!(config.standard_model, "claude-sonnet-4-20250514");
         assert_eq!(config.quality_model, None);
+        assert_eq!(config.reconcile_standard_model, "claude-sonnet-4-20250514");
+        assert_eq!(config.reconcile_quality_model, None);
     }
 
     #[test]
@@ -973,6 +1120,8 @@ mod tests {
         assert_eq!(config.repair_max_output_tokens, 8000);
         assert_eq!(config.standard_model, "grok-4-fast-reasoning");
         assert_eq!(config.quality_model, None);
+        assert_eq!(config.reconcile_standard_model, "grok-4-fast-reasoning");
+        assert_eq!(config.reconcile_quality_model, None);
     }
 
     #[test]
@@ -998,5 +1147,34 @@ mod tests {
         };
         assert_eq!(reconcile.api_key, "gemini-key");
         assert_eq!(reconcile.standard_model, "gemini-2.5-flash-lite");
+        assert_eq!(reconcile.reconcile_standard_model, "gemini-2.5-flash-lite");
+    }
+
+    #[test]
+    fn provider_reconcile_model_override_loads_when_configured() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
+        std::env::set_var("OA_INFERENCE_PROVIDER", "gemini");
+        std::env::set_var("OA_GEMINI_API_KEY", "gemini-key");
+        std::env::set_var("OA_GEMINI_STANDARD_MODEL", "gemini-3-flash-preview");
+        std::env::set_var(
+            "OA_GEMINI_RECONCILE_STANDARD_MODEL",
+            "gemini-3.1-flash-lite-preview",
+        );
+
+        let config = AppConfig::from_env().expect("config should load reconcile model override");
+        let InferenceConfig::Gemini(config) = config.inference else {
+            panic!("expected gemini config");
+        };
+
+        assert_eq!(config.standard_model, "gemini-3-flash-preview");
+        assert_eq!(
+            config.reconcile_standard_model,
+            "gemini-3.1-flash-lite-preview"
+        );
     }
 }

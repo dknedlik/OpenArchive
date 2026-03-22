@@ -24,7 +24,6 @@ struct EvalExpectations {
     memory_count: EvalRange,
     classification_count: EvalRange,
     importance_score: EvalRange,
-    escalate_to_frontier: bool,
     required_phrases: Vec<String>,
     forbidden_classification_values: Vec<String>,
 }
@@ -41,8 +40,6 @@ struct EvalOutput {
     classifications: Vec<EvalClassification>,
     memories: Vec<EvalMemory>,
     importance_score: u8,
-    escalate_to_frontier: bool,
-    escalation_reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,22 +147,6 @@ fn evaluate_fixture(case_name: &str, fixture: &EvalFixture, output: &EvalOutput)
         output.importance_score as usize,
         &fixture.expectations.importance_score,
     );
-    assert_eq!(
-        output.escalate_to_frontier, fixture.expectations.escalate_to_frontier,
-        "{case_name}: escalate_to_frontier mismatch"
-    );
-
-    if output.escalate_to_frontier {
-        assert!(
-            !output.escalation_reason.trim().is_empty(),
-            "{case_name}: escalation_reason must be present when escalating"
-        );
-    } else {
-        assert!(
-            output.escalation_reason.trim().is_empty(),
-            "{case_name}: escalation_reason must be empty when not escalating"
-        );
-    }
 
     let mut seen_memory_titles = HashSet::new();
     for (index, classification) in output.classifications.iter().enumerate() {

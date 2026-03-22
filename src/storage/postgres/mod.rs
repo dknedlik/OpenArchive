@@ -1,5 +1,6 @@
 pub mod artifact;
 pub mod derivation;
+pub mod embedding;
 pub mod import;
 pub mod job;
 pub mod retrieval;
@@ -14,6 +15,7 @@ use crate::storage::archive_retrieval_store::ArchiveRetrievalStore;
 use crate::storage::derivation_store::{
     DerivationWriteResult, DerivedMetadataWriteStore, WriteDerivationAttempt,
 };
+use crate::storage::embedding_store::DerivedObjectEmbeddingStore;
 use crate::storage::enrichment_state_store::EnrichmentStateStore;
 use crate::storage::job_store::EnrichmentJobLifecycleStore;
 use crate::storage::retrieval_read_store::{
@@ -253,9 +255,21 @@ pub struct PostgresDerivedMetadataStore {
     config: PostgresConfig,
 }
 
+pub struct PostgresDerivedObjectEmbeddingStore {
+    client: SharedPostgresClient,
+}
+
 impl PostgresDerivedMetadataStore {
     pub fn new(config: PostgresConfig) -> Self {
         Self { config }
+    }
+}
+
+impl PostgresDerivedObjectEmbeddingStore {
+    pub fn new(config: PostgresConfig) -> Self {
+        Self {
+            client: SharedPostgresClient::new(config),
+        }
     }
 }
 
@@ -347,6 +361,23 @@ impl DerivedObjectSearchStore for PostgresRetrievalReadStore {
     ) -> StorageResult<Vec<DerivedObjectSearchResult>> {
         self.client.with_client(|client| {
             retrieval::search_objects(client, self.client.connection_string(), filters, limit)
+        })
+    }
+
+    fn search_objects_by_embedding(
+        &self,
+        filters: &ObjectSearchFilters,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> StorageResult<Vec<DerivedObjectSearchResult>> {
+        self.client.with_client(|client| {
+            retrieval::search_objects_by_embedding(
+                client,
+                self.client.connection_string(),
+                filters,
+                query_embedding,
+                limit,
+            )
         })
     }
 }
@@ -702,6 +733,17 @@ impl PostgresWritebackStore {
         Self {
             client: SharedPostgresClient::new(config),
         }
+    }
+}
+
+impl DerivedObjectEmbeddingStore for PostgresDerivedObjectEmbeddingStore {
+    fn upsert_embeddings(
+        &self,
+        embeddings: &[crate::storage::types::NewDerivedObjectEmbedding],
+    ) -> StorageResult<()> {
+        self.client.with_client(|client| {
+            embedding::upsert_embeddings(client, self.client.connection_string(), embeddings)
+        })
     }
 }
 

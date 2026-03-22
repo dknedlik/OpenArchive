@@ -55,7 +55,5 @@
       "evidence_segment_ids": ["seg-5", "seg-6"]
     }
   ],
-  "importance_score": 7,
-  "escalate_to_frontier": false,
-  "escalation_reason": ""
+  "importance_score": 7
 }

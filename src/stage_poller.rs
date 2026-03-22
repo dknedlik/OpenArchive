@@ -19,8 +19,10 @@ use log::{debug, error, info, warn};
 
 use crate::config::ExtractionChunkingConfig;
 use crate::enrichment_worker::{
-    build_extract_chunk_inputs, build_extraction_result as worker_build_extraction_result,
+    build_embedding_job as worker_build_embedding_job, build_extract_chunk_inputs,
+    build_extraction_result as worker_build_extraction_result,
     merge_chunk_outputs as worker_merge_chunk_outputs,
+    try_enqueue_embedding_job as worker_try_enqueue_embedding_job,
 };
 use crate::processor::{
     ArtifactProcessorInput, BatchHandle, BatchPollResult, ExtractionBatchSubmitter, ProcessorError,
@@ -1025,6 +1027,7 @@ pub struct ReconcileStage {
     tier: EnrichmentTier,
     batch_size: usize,
     max_concurrent: usize,
+    enqueue_embedding_jobs: bool,
 }
 
 impl ReconcileStage {
@@ -1033,12 +1036,14 @@ impl ReconcileStage {
         tier: EnrichmentTier,
         batch_size: usize,
         max_concurrent: usize,
+        enqueue_embedding_jobs: bool,
     ) -> Self {
         Self {
             submitter,
             tier,
             batch_size,
             max_concurrent,
+            enqueue_embedding_jobs,
         }
     }
 }
@@ -1177,6 +1182,7 @@ impl StageBehavior for ReconcileStage {
                     job_store,
                     state_store,
                     derived_store,
+                    self.enqueue_embedding_jobs,
                     worker_id,
                 ) {
                     continue;
@@ -1333,6 +1339,16 @@ impl StageBehavior for ReconcileStage {
                         &extraction_result,
                         &decisions,
                     );
+                    let embedding_job = self
+                        .enqueue_embedding_jobs
+                        .then(|| {
+                            worker_build_embedding_job(
+                                &job,
+                                &loaded.artifact.artifact_id,
+                                &attempt.objects,
+                            )
+                        })
+                        .flatten();
                     if let Err(err) = derived_store.write_derivation_attempt(attempt) {
                         poller_fail_job_message(
                             job_store,
@@ -1344,6 +1360,9 @@ impl StageBehavior for ReconcileStage {
                             ),
                         );
                         continue;
+                    }
+                    if let Some(embedding_job) = embedding_job.as_ref() {
+                        worker_try_enqueue_embedding_job(job_store, &job.job_id, embedding_job);
                     }
                     if let Err(msg) = poller_complete_job(job_store, worker_id, &job.job_id) {
                         error!("[reconcile] {}", msg);
@@ -1678,6 +1697,7 @@ fn complete_reconcile_without_candidates(
     job_store: &dyn EnrichmentJobLifecycleStore,
     state_store: &dyn EnrichmentStateStore,
     derived_store: &dyn DerivedMetadataWriteStore,
+    enqueue_embedding_jobs: bool,
     worker_id: &str,
 ) -> Result<(), ()> {
     let decisions = vec![ReconciliationDecision {
@@ -1714,6 +1734,9 @@ fn complete_reconcile_without_candidates(
         extraction_result,
         &decisions,
     );
+    let embedding_job = enqueue_embedding_jobs
+        .then(|| worker_build_embedding_job(job, &loaded.artifact.artifact_id, &attempt.objects))
+        .flatten();
     if let Err(err) = derived_store.write_derivation_attempt(attempt) {
         poller_fail_job(
             job_store,
@@ -1723,6 +1746,9 @@ fn complete_reconcile_without_candidates(
             err,
         );
         return Err(());
+    }
+    if let Some(embedding_job) = embedding_job.as_ref() {
+        worker_try_enqueue_embedding_job(job_store, &job.job_id, embedding_job);
     }
     if let Err(msg) = poller_complete_job(job_store, worker_id, &job.job_id) {
         error!("{msg}");

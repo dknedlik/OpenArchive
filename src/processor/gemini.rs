@@ -12,14 +12,16 @@ use crate::config::GeminiConfig;
 use crate::storage::types::EnrichmentTier;
 
 use super::{
-    build_conversation_user_prompt, build_reconciliation_prompt, reconciliation_output_schema,
-    should_shape_conversation_input, structured_output_schema_with_allowed_refs,
-    structured_output_schema_wrapper, ArtifactBatchProcessor, ArtifactProcessor,
+    allowed_artifact_evidence_refs, build_reconciliation_prompt,
+    build_two_phase_candidate_user_prompt, candidate_output_schema_with_allowed_refs,
+    candidate_output_schema_wrapper, parse_candidate_output, reconciliation_output_schema,
+    should_shape_conversation_input, ArtifactBatchProcessor, ArtifactProcessor,
     ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput, BatchHandle,
     BatchPollResult, ExtractionBatchSubmitter, HostedReconciliationProcessor, InferenceClient,
     InferenceResult, InferenceUsage, ProcessorError, ReconciliationBatchProcessor,
     ReconciliationBatchSubmitter, ReconciliationProcessor, ReconciliationProcessorInput,
-    GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, RECONCILIATION_SYSTEM_PROMPT,
+    RECONCILIATION_SYSTEM_PROMPT, TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS,
+    TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
 };
 
 pub struct GeminiProcessorFactory {
@@ -29,6 +31,8 @@ pub struct GeminiProcessorFactory {
     extract_repair_max_output_tokens: u32,
     standard_model: String,
     quality_model: String,
+    reconcile_standard_model: String,
+    reconcile_quality_model: String,
 }
 
 impl GeminiProcessorFactory {
@@ -38,6 +42,11 @@ impl GeminiProcessorFactory {
             .quality_model
             .clone()
             .unwrap_or_else(|| config.standard_model.clone());
+        let reconcile_quality_model = config
+            .reconcile_quality_model
+            .clone()
+            .or_else(|| config.quality_model.clone())
+            .unwrap_or_else(|| config.reconcile_standard_model.clone());
 
         Ok(Self {
             client: Arc::new(client),
@@ -54,6 +63,8 @@ impl GeminiProcessorFactory {
                 .max(config.max_output_tokens),
             standard_model: config.standard_model,
             quality_model,
+            reconcile_standard_model: config.reconcile_standard_model,
+            reconcile_quality_model,
         })
     }
 }
@@ -67,7 +78,7 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
 
         Ok(Box::new(GeminiArtifactProcessor {
             client: Arc::clone(&self.client),
-            model,
+            candidate_model: model,
             max_output_tokens: self.extract_max_output_tokens,
             repair_max_output_tokens: self.extract_repair_max_output_tokens,
         }))
@@ -78,8 +89,8 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
         tier: EnrichmentTier,
     ) -> Result<Box<dyn ReconciliationProcessor>, ProcessorError> {
         let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
+            EnrichmentTier::Standard => self.reconcile_standard_model.clone(),
+            EnrichmentTier::Quality => self.reconcile_quality_model.clone(),
         };
         let client: Arc<dyn InferenceClient> = self.client.clone();
         Ok(Box::new(HostedReconciliationProcessor {
@@ -102,7 +113,7 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
         };
         Ok(Some(Box::new(GeminiBatchProcessor {
             client: Arc::clone(batch_client),
-            model,
+            candidate_model: model,
         })))
     }
 
@@ -114,8 +125,8 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
             return Ok(None);
         };
         let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
+            EnrichmentTier::Standard => self.reconcile_standard_model.clone(),
+            EnrichmentTier::Quality => self.reconcile_quality_model.clone(),
         };
         Ok(Some(Box::new(GeminiReconciliationBatchProcessor {
             client: Arc::clone(batch_client),
@@ -136,7 +147,7 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
         };
         Ok(Some(Box::new(GeminiExtractionSubmitter {
             client: Arc::clone(batch_client),
-            model,
+            candidate_model: model,
         })))
     }
 
@@ -148,8 +159,8 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
             return Ok(None);
         };
         let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
+            EnrichmentTier::Standard => self.reconcile_standard_model.clone(),
+            EnrichmentTier::Quality => self.reconcile_quality_model.clone(),
         };
         Ok(Some(Box::new(GeminiReconciliationSubmitter {
             client: Arc::clone(batch_client),
@@ -160,12 +171,12 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
 
 struct GeminiBatchProcessor {
     client: Arc<GeminiBatchClient>,
-    model: String,
+    candidate_model: String,
 }
 
 struct GeminiArtifactProcessor {
     client: Arc<GeminiClient>,
-    model: String,
+    candidate_model: String,
     max_output_tokens: u32,
     repair_max_output_tokens: u32,
 }
@@ -181,7 +192,7 @@ impl ArtifactProcessor for GeminiArtifactProcessor {
         input: &ArtifactProcessorInput,
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
         super::validate_input(input)?;
-        let prompt = build_conversation_user_prompt(input)?;
+        let prompt = build_two_phase_candidate_user_prompt(input)?;
         match self.process_once(input, &prompt, self.max_output_tokens) {
             Ok(output) => Ok(output),
             Err(error) if super::should_retry_with_repair(&error) => {
@@ -200,27 +211,19 @@ impl GeminiArtifactProcessor {
         user_prompt: &str,
         max_output_tokens: u32,
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
-        let inference_result = self.client.complete_json_with_max_output_tokens(
-            &self.model,
-            GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+        let candidate_result = self.client.complete_json_with_max_output_tokens(
+            &self.candidate_model,
+            TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
             user_prompt,
-            &structured_output_schema_wrapper(input),
-            max_output_tokens,
+            &candidate_output_schema_wrapper(input),
+            max_output_tokens.max(TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS),
         )?;
-        let parsed: super::ModelArtifactOutput =
-            serde_json::from_str(&inference_result.output_text).map_err(|source| {
-                ProcessorError::ParseModelJson {
-                    source,
-                    body_preview: super::preview(&inference_result.output_text),
-                }
-            })?;
-        let parsed = parsed.resolve_evidence_aliases(input);
-        let parsed = parsed
-            .validate_and_salvage(input)
-            .map_err(|err| super::attach_output_preview(err, &inference_result.output_text))?;
-        Ok(parsed.into_processor_output(
-            self.model.clone(),
-            inference_result.usage,
+        let candidate = parse_candidate_output(&candidate_result.output_text, input)
+            .map_err(|err| super::attach_output_preview(err, &candidate_result.output_text))?;
+        Ok(candidate.into_processor_output(
+            input,
+            self.candidate_model.clone(),
+            candidate_result.usage,
             "gemini_enrichment",
             "gemini",
             super::GEMINI_PROMPT_VERSION,
@@ -242,8 +245,8 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
     }
 
     fn estimate_size_bytes(&self, input: &ArtifactProcessorInput) -> Result<usize, ProcessorError> {
-        let user_prompt = build_conversation_user_prompt(input)?;
-        Ok(GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT.len() + user_prompt.len())
+        let user_prompt = build_two_phase_candidate_user_prompt(input)?;
+        Ok(TWO_PHASE_CANDIDATE_SYSTEM_PROMPT.len() + user_prompt.len())
     }
 
     fn process_batch(
@@ -256,20 +259,15 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
 
         let mut requests = Vec::with_capacity(inputs.len());
         for input in inputs {
-            match build_conversation_user_prompt(input) {
+            match build_two_phase_candidate_user_prompt(input) {
                 Ok(user_prompt) => requests.push(GeminiBatchEnrichmentRequest {
                     key: input.artifact_id.clone(),
-                    system_prompt: GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT.to_string(),
+                    system_prompt: TWO_PHASE_CANDIDATE_SYSTEM_PROMPT.to_string(),
                     user_prompt,
-                    response_json_schema: structured_output_schema_with_allowed_refs(
-                        &input
-                            .segments
-                            .iter()
-                            .enumerate()
-                            .map(|(index, _)| format!("evidence_ref_{}", index + 1))
-                            .collect::<Vec<_>>(),
+                    response_json_schema: candidate_output_schema_with_allowed_refs(
+                        &allowed_artifact_evidence_refs(input),
                     ),
-                    max_output_tokens: None,
+                    max_output_tokens: Some(TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS),
                 }),
                 Err(err) => {
                     return inputs
@@ -285,7 +283,7 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
         }
 
         let job = match self.client.submit_inline_batch(
-            &self.model,
+            &self.candidate_model,
             Some("openarchive-enrichment"),
             &requests,
         ) {
@@ -322,25 +320,17 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
             Ok(results) => results
                 .into_iter()
                 .map(|result| {
-                    let parsed: super::ModelArtifactOutput =
-                        serde_json::from_str(&result.output_text).map_err(|source| {
-                            ProcessorError::ParseModelJson {
-                                source,
-                                body_preview: super::preview(&result.output_text),
-                            }
-                        })?;
                     let input = inputs
                         .iter()
                         .find(|input| input.artifact_id == result.key)
                         .ok_or_else(|| ProcessorError::Message {
                             message: format!("Gemini batch returned unknown key {}", result.key),
                         })?;
-                    let parsed = parsed.resolve_evidence_aliases(input);
-                    let parsed = parsed
-                        .validate_and_salvage(input)
+                    let candidate = parse_candidate_output(&result.output_text, input)
                         .map_err(|err| super::attach_output_preview(err, &result.output_text))?;
-                    Ok(parsed.into_processor_output(
-                        self.model.clone(),
+                    Ok(candidate.into_processor_output(
+                        input,
+                        self.candidate_model.clone(),
                         result.usage,
                         "gemini_enrichment",
                         "gemini",
@@ -487,7 +477,7 @@ impl ReconciliationBatchProcessor for GeminiReconciliationBatchProcessor {
 
 struct GeminiExtractionSubmitter {
     client: Arc<GeminiBatchClient>,
-    model: String,
+    candidate_model: String,
 }
 
 struct GeminiReconciliationSubmitter {
@@ -510,25 +500,20 @@ impl ExtractionBatchSubmitter for GeminiExtractionSubmitter {
     ) -> Result<BatchHandle, ProcessorError> {
         let mut requests = Vec::with_capacity(inputs.len());
         for input in inputs {
-            let user_prompt = build_conversation_user_prompt(input)?;
+            let user_prompt = build_two_phase_candidate_user_prompt(input)?;
             requests.push(GeminiBatchEnrichmentRequest {
                 key: super::artifact_processor_batch_custom_id(input),
-                system_prompt: GEMINI_ARTIFACT_EXTRACTION_SYSTEM_PROMPT.to_string(),
+                system_prompt: TWO_PHASE_CANDIDATE_SYSTEM_PROMPT.to_string(),
                 user_prompt,
-                response_json_schema: structured_output_schema_with_allowed_refs(
-                    &input
-                        .segments
-                        .iter()
-                        .enumerate()
-                        .map(|(index, _)| format!("evidence_ref_{}", index + 1))
-                        .collect::<Vec<_>>(),
+                response_json_schema: candidate_output_schema_with_allowed_refs(
+                    &allowed_artifact_evidence_refs(input),
                 ),
-                max_output_tokens: None,
+                max_output_tokens: Some(TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS),
             });
         }
 
         let job = self.client.submit_inline_batch(
-            &self.model,
+            &self.candidate_model,
             Some("openarchive-enrichment"),
             &requests,
         )?;
@@ -614,17 +599,11 @@ impl ExtractionBatchSubmitter for GeminiExtractionSubmitter {
                 let result = by_key.remove(&key).ok_or_else(|| ProcessorError::Message {
                     message: format!("Gemini batch returned no result for key {}", key),
                 })?;
-                let parsed: super::ModelArtifactOutput = serde_json::from_str(&result.output_text)
-                    .map_err(|source| ProcessorError::ParseModelJson {
-                        source,
-                        body_preview: super::preview(&result.output_text),
-                    })?;
-                let parsed = parsed.resolve_evidence_aliases(input);
-                let parsed = parsed
-                    .validate_and_salvage(input)
+                let candidate = parse_candidate_output(&result.output_text, input)
                     .map_err(|err| super::attach_output_preview(err, &result.output_text))?;
-                Ok(parsed.into_processor_output(
-                    self.model.clone(),
+                Ok(candidate.into_processor_output(
+                    input,
+                    self.candidate_model.clone(),
                     result.usage,
                     "gemini_enrichment",
                     "gemini",
@@ -1168,7 +1147,23 @@ impl GeminiBatchClient {
     pub fn wait_for_batch(&self, name: &str) -> Result<GeminiBatchJob, ProcessorError> {
         let mut poll_count: u64 = 0;
         loop {
-            let job = self.get_batch(name)?;
+            let job = match self.get_batch(name) {
+                Ok(job) => job,
+                Err(err) if err.is_retryable() => {
+                    if poll_count == 0 || poll_count % 12 == 0 {
+                        log::warn!(
+                            "gemini batch name={} poll={} transient poll error={}",
+                            name,
+                            poll_count,
+                            err
+                        );
+                    }
+                    poll_count += 1;
+                    thread::sleep(self.poll_interval);
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             let state = job.state.as_deref().unwrap_or_default();
             if poll_count == 0 || poll_count % 12 == 0 {
                 info!(

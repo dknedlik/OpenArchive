@@ -8,14 +8,15 @@ use crate::config::GrokConfig;
 use crate::storage::types::EnrichmentTier;
 
 use super::{
-    structured_output_schema_with_allowed_refs, structured_output_schema_wrapper,
-    ArtifactProcessor, ArtifactProcessorFactory, ArtifactProcessorInput, ArtifactProcessorOutput,
-    BatchHandle, BatchPollResult, ExtractionBatchSubmitter, HostedReconciliationProcessor,
-    InferenceClient, InferenceResult, InferenceUsage, OpenRouterResponsesContentItem,
-    OpenRouterResponsesInputItem, OpenRouterResponsesRequest, OpenRouterResponsesResponse,
-    OpenRouterResponsesTextConfig, ProcessorError, ReconciliationBatchSubmitter,
-    ReconciliationProcessor, GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT, GROK_PROMPT_VERSION,
-    RECONCILIATION_SYSTEM_PROMPT,
+    allowed_artifact_evidence_refs, build_two_phase_candidate_user_prompt,
+    candidate_output_schema_with_allowed_refs, candidate_output_schema_wrapper,
+    parse_candidate_output, ArtifactProcessor, ArtifactProcessorFactory, ArtifactProcessorInput,
+    ArtifactProcessorOutput, BatchHandle, BatchPollResult, ExtractionBatchSubmitter,
+    HostedReconciliationProcessor, InferenceClient, InferenceResult, InferenceUsage,
+    OpenRouterResponsesContentItem, OpenRouterResponsesInputItem, OpenRouterResponsesRequest,
+    OpenRouterResponsesResponse, OpenRouterResponsesTextConfig, ProcessorError,
+    ReconciliationBatchSubmitter, ReconciliationProcessor, RECONCILIATION_SYSTEM_PROMPT,
+    TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS, TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
 };
 
 pub struct GrokProcessorFactory {
@@ -25,6 +26,8 @@ pub struct GrokProcessorFactory {
     extract_repair_max_output_tokens: u32,
     standard_model: String,
     quality_model: String,
+    reconcile_standard_model: String,
+    reconcile_quality_model: String,
 }
 
 impl GrokProcessorFactory {
@@ -34,6 +37,11 @@ impl GrokProcessorFactory {
             .quality_model
             .clone()
             .unwrap_or_else(|| config.standard_model.clone());
+        let reconcile_quality_model = config
+            .reconcile_quality_model
+            .clone()
+            .or_else(|| config.quality_model.clone())
+            .unwrap_or_else(|| config.reconcile_standard_model.clone());
 
         Ok(Self {
             client: client.clone(),
@@ -44,6 +52,8 @@ impl GrokProcessorFactory {
                 .max(config.max_output_tokens),
             standard_model: config.standard_model,
             quality_model,
+            reconcile_standard_model: config.reconcile_standard_model,
+            reconcile_quality_model,
         })
     }
 }
@@ -57,7 +67,7 @@ impl ArtifactProcessorFactory for GrokProcessorFactory {
 
         Ok(Box::new(GrokArtifactProcessor {
             client: Arc::clone(&self.client),
-            model,
+            candidate_model: model,
             max_output_tokens: self.extract_max_output_tokens,
             repair_max_output_tokens: self.extract_repair_max_output_tokens,
         }))
@@ -68,8 +78,8 @@ impl ArtifactProcessorFactory for GrokProcessorFactory {
         tier: EnrichmentTier,
     ) -> Result<Box<dyn ReconciliationProcessor>, ProcessorError> {
         let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
+            EnrichmentTier::Standard => self.reconcile_standard_model.clone(),
+            EnrichmentTier::Quality => self.reconcile_quality_model.clone(),
         };
         let client: Arc<dyn InferenceClient> = self.client.clone();
         Ok(Box::new(HostedReconciliationProcessor {
@@ -92,7 +102,7 @@ impl ArtifactProcessorFactory for GrokProcessorFactory {
         };
         Ok(Some(Box::new(GrokExtractionSubmitter {
             client: Arc::clone(client),
-            model,
+            candidate_model: model,
         })))
     }
 
@@ -104,8 +114,8 @@ impl ArtifactProcessorFactory for GrokProcessorFactory {
             return Ok(None);
         };
         let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
+            EnrichmentTier::Standard => self.reconcile_standard_model.clone(),
+            EnrichmentTier::Quality => self.reconcile_quality_model.clone(),
         };
         Ok(Some(Box::new(GrokReconciliationSubmitter {
             client: Arc::clone(client),
@@ -122,7 +132,7 @@ struct GrokClient {
 
 struct GrokArtifactProcessor {
     client: Arc<GrokClient>,
-    model: String,
+    candidate_model: String,
     max_output_tokens: u32,
     repair_max_output_tokens: u32,
 }
@@ -289,6 +299,35 @@ impl GrokClient {
         parse_grok_json_response(response)
     }
 
+    #[allow(dead_code)]
+    fn wait_for_batch(&self, batch_id: &str) -> Result<GrokBatch, ProcessorError> {
+        let mut poll_count: u64 = 0;
+        loop {
+            let batch = match self.get_batch(batch_id) {
+                Ok(batch) => batch,
+                Err(err) if err.is_retryable() => {
+                    if poll_count == 0 || poll_count % 12 == 0 {
+                        log::warn!(
+                            "grok batch id={} poll={} transient poll error={}",
+                            batch_id,
+                            poll_count,
+                            err
+                        );
+                    }
+                    poll_count += 1;
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            if batch.state.num_pending == 0 {
+                return Ok(batch);
+            }
+            poll_count += 1;
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+    }
+
     fn list_results(&self, batch_id: &str) -> Result<Vec<GrokBatchResultItem>, ProcessorError> {
         let mut all = Vec::new();
         let mut page_token: Option<String> = None;
@@ -346,7 +385,7 @@ impl ArtifactProcessor for GrokArtifactProcessor {
         input: &ArtifactProcessorInput,
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
         super::validate_input(input)?;
-        let prompt = super::build_conversation_user_prompt(input)?;
+        let prompt = build_two_phase_candidate_user_prompt(input)?;
         match self.process_once(input, &prompt, self.max_output_tokens) {
             Ok(output) => Ok(output),
             Err(error) if super::should_retry_with_repair(&error) => {
@@ -365,37 +404,29 @@ impl GrokArtifactProcessor {
         user_prompt: &str,
         max_output_tokens: u32,
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
-        let inference_result = self.client.complete_json_with_max_output_tokens(
-            &self.model,
-            GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
+        let candidate_result = self.client.complete_json_with_max_output_tokens(
+            &self.candidate_model,
+            TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
             user_prompt,
-            &structured_output_schema_wrapper(input),
-            max_output_tokens,
+            &candidate_output_schema_wrapper(input),
+            max_output_tokens.max(TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS),
         )?;
-        let parsed: super::ModelArtifactOutput =
-            serde_json::from_str(&inference_result.output_text).map_err(|source| {
-                ProcessorError::ParseModelJson {
-                    source,
-                    body_preview: super::preview(&inference_result.output_text),
-                }
-            })?;
-        let parsed = parsed.resolve_evidence_aliases(input);
-        let parsed = parsed
-            .validate_and_salvage(input)
-            .map_err(|err| super::attach_output_preview(err, &inference_result.output_text))?;
-        Ok(parsed.into_processor_output(
-            self.model.clone(),
-            inference_result.usage,
+        let candidate = parse_candidate_output(&candidate_result.output_text, input)
+            .map_err(|err| super::attach_output_preview(err, &candidate_result.output_text))?;
+        Ok(candidate.into_processor_output(
+            input,
+            self.candidate_model.clone(),
+            candidate_result.usage,
             "grok_enrichment",
             "grok",
-            GROK_PROMPT_VERSION,
+            super::GROK_PROMPT_VERSION,
         ))
     }
 }
 
 struct GrokExtractionSubmitter {
     client: Arc<GrokClient>,
-    model: String,
+    candidate_model: String,
 }
 
 struct GrokReconciliationSubmitter {
@@ -413,20 +444,15 @@ impl ExtractionBatchSubmitter for GrokExtractionSubmitter {
         inputs: &[super::ArtifactProcessorInput],
     ) -> Result<BatchHandle, ProcessorError> {
         let batch = self.client.create_batch("openarchive-enrichment")?;
-        let requests = build_grok_requests(inputs, &self.model, |input| {
+        let requests = build_grok_requests(inputs, &self.candidate_model, |input| {
             Ok(self.client.build_chat_completion_body(
-                &self.model,
-                GROK_ARTIFACT_EXTRACTION_SYSTEM_PROMPT,
-                &super::build_conversation_user_prompt(input)?,
-                &structured_output_schema_with_allowed_refs(
-                    &input
-                        .segments
-                        .iter()
-                        .enumerate()
-                        .map(|(index, _)| format!("evidence_ref_{}", index + 1))
-                        .collect::<Vec<_>>(),
-                ),
-                self.client.max_output_tokens,
+                &self.candidate_model,
+                TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
+                &build_two_phase_candidate_user_prompt(input)?,
+                &candidate_output_schema_with_allowed_refs(&allowed_artifact_evidence_refs(input)),
+                self.client
+                    .max_output_tokens
+                    .max(TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS),
             ))
         })?;
         self.client.add_batch_requests(&batch.id, &requests)?;
@@ -463,24 +489,42 @@ impl ExtractionBatchSubmitter for GrokExtractionSubmitter {
                     .collect();
             }
         };
-        parse_grok_results(&self.client, &batch.id, inputs, |result, input| {
-            let parsed: super::ModelArtifactOutput = serde_json::from_str(&result.output_text)
-                .map_err(|source| ProcessorError::ParseModelJson {
-                    source,
-                    body_preview: super::preview(&result.output_text),
-                })?;
-            let parsed = parsed.resolve_evidence_aliases(input);
-            let parsed = parsed
-                .validate_and_salvage(input)
-                .map_err(|err| super::attach_output_preview(err, &result.output_text))?;
-            Ok(parsed.into_processor_output(
-                self.model.clone(),
-                result.usage,
-                "grok_enrichment",
-                "grok",
-                GROK_PROMPT_VERSION,
-            ))
-        })
+        let candidate_results =
+            parse_grok_results(&self.client, &batch.id, inputs, |result, input| {
+                let candidate = parse_candidate_output(&result.output_text, input)
+                    .map_err(|err| super::attach_output_preview(err, &result.output_text))?;
+                Ok((candidate, result.usage))
+            });
+        if candidate_results.iter().any(Result::is_err) {
+            return candidate_results
+                .into_iter()
+                .map(|result| {
+                    result
+                        .map(|_| unreachable!("candidate error already checked"))
+                        .map_err(|err| ProcessorError::Message {
+                            message: err.to_string(),
+                        })
+                })
+                .collect();
+        }
+
+        candidate_results
+            .into_iter()
+            .zip(inputs.iter())
+            .map(|(result, input)| match result {
+                Ok((candidate, usage)) => Ok(candidate.into_processor_output(
+                    input,
+                    self.candidate_model.clone(),
+                    usage,
+                    "grok_enrichment",
+                    "grok",
+                    super::GROK_PROMPT_VERSION,
+                )),
+                Err(err) => Err(ProcessorError::Message {
+                    message: err.to_string(),
+                }),
+            })
+            .collect()
     }
 }
 
@@ -514,7 +558,7 @@ impl ReconciliationBatchSubmitter for GrokReconciliationSubmitter {
     fn poll_batch(&self, handle: &BatchHandle) -> Result<BatchPollResult, ProcessorError> {
         GrokExtractionSubmitter {
             client: Arc::clone(&self.client),
-            model: self.model.clone(),
+            candidate_model: self.model.clone(),
         }
         .poll_batch(handle)
     }

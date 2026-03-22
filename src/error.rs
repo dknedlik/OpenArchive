@@ -10,6 +10,7 @@ pub type MigrationsResult<T> = std::result::Result<T, MigrationsError>;
 pub type ObjectStoreResult<T> = std::result::Result<T, ObjectStoreError>;
 pub type StorageResult<T> = std::result::Result<T, StorageError>;
 pub type ParserResult<T> = std::result::Result<T, ParserError>;
+pub type EmbeddingResult<T> = std::result::Result<T, EmbeddingError>;
 
 #[derive(Debug, Error)]
 pub enum OpenArchiveError {
@@ -30,6 +31,9 @@ pub enum OpenArchiveError {
 
     #[error(transparent)]
     Parser(#[from] ParserError),
+
+    #[error(transparent)]
+    Embedding(#[from] EmbeddingError),
 
     #[error("internal invariant violated: {0}")]
     Invariant(String),
@@ -88,7 +92,7 @@ pub enum ObjectStoreError {
         source: reqwest::Error,
     },
 
-    #[error("failed to send {operation} request for object {object_id}")]
+    #[error("failed to send {operation} request for object {object_id}: {source}")]
     SendRequest {
         operation: &'static str,
         object_id: String,
@@ -109,6 +113,17 @@ pub enum ObjectStoreError {
         object_id: String,
         #[source]
         source: reqwest::Error,
+    },
+
+    #[error("failed to parse multipart upload response for object {object_id}: {detail}")]
+    ParseMultipartResponse { object_id: String, detail: String },
+
+    #[error("multipart upload failed for object {object_id} at part {part}/{total_parts}: {detail}")]
+    MultipartUploadFailed {
+        object_id: String,
+        part: u16,
+        total_parts: usize,
+        detail: String,
     },
 }
 
@@ -135,6 +150,9 @@ pub enum ConfigError {
 
     #[error("invalid inference configuration: {message}")]
     InvalidInferenceConfig { message: String },
+
+    #[error("invalid embedding configuration: {message}")]
+    InvalidEmbeddingConfig { message: String },
 }
 
 #[derive(Debug, Error)]
@@ -546,6 +564,40 @@ pub enum ParserError {
 
     #[error("conversation {conversation_id} has a cyclic node graph")]
     CyclicTree { conversation_id: String },
+}
+
+#[derive(Debug, Error)]
+pub enum EmbeddingError {
+    #[error("failed to serialize embedding request")]
+    SerializeRequest {
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("failed to send embedding request")]
+    SendRequest {
+        #[source]
+        source: reqwest::Error,
+    },
+
+    #[error("failed to read embedding response")]
+    ReadResponse {
+        #[source]
+        source: reqwest::Error,
+    },
+
+    #[error("embedding provider returned unexpected HTTP status {status}")]
+    HttpStatus { status: u16, body_preview: String },
+
+    #[error("failed to parse embedding response")]
+    ParseResponse {
+        #[source]
+        source: serde_json::Error,
+        body_preview: String,
+    },
+
+    #[error("embedding response returned dimension {actual}; expected {expected}")]
+    UnexpectedDimensions { expected: usize, actual: usize },
 }
 
 pub fn preview_sql_statement(statement: &str) -> String {

@@ -3,6 +3,7 @@ pub mod bootstrap;
 pub mod config;
 pub mod db;
 pub mod domain;
+pub mod embedding;
 pub mod enrichment_worker;
 pub mod error;
 pub mod extraction_chunking;
@@ -20,6 +21,6 @@ pub mod storage;
 
 pub use domain::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 pub use error::{
-    ConfigError, DbError, MigrationsError, ObjectStoreError, OpenArchiveError, ParserError, Result,
-    StorageError,
+    ConfigError, DbError, EmbeddingError, MigrationsError, ObjectStoreError, OpenArchiveError,
+    ParserError, Result, StorageError,
 };

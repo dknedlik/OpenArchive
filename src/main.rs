@@ -120,7 +120,9 @@ fn serve() -> Result<(), anyhow::Error> {
                     Arc::clone(&services.app.retrieval),
                     Arc::clone(&services.state_store),
                     Arc::clone(&services.derived_store),
+                    services.embedding_store.clone(),
                     shutdown.clone(),
+                    services.embedding_provider.clone(),
                     Arc::clone(&services.processor_factory),
                 )?
             }
@@ -136,7 +138,9 @@ fn serve() -> Result<(), anyhow::Error> {
                     Arc::clone(&services.app.retrieval),
                     Arc::clone(&services.state_store),
                     Arc::clone(&services.derived_store),
+                    services.embedding_store.clone(),
                     shutdown.clone(),
+                    services.embedding_provider.clone(),
                     Arc::clone(&services.processor_factory),
                 )?
             }
@@ -427,6 +431,7 @@ mod tests {
             import_store,
             read_store,
             retrieval_store,
+            None,
             None,
             None,
             None,

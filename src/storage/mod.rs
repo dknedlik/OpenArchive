@@ -23,6 +23,7 @@
 pub mod archive_retrieval_store;
 pub mod artifact_store;
 pub mod derivation_store;
+pub mod embedding_store;
 pub mod enrichment_state_store;
 pub mod import_store;
 pub mod job_store;
@@ -40,6 +41,7 @@ pub use derivation_store::{
     DerivationStore, DerivationWriteResult, DerivedMetadataWriteStore, WriteDerivationAttempt,
     WriteDerivedObject,
 };
+pub use embedding_store::DerivedObjectEmbeddingStore;
 pub use enrichment_state_store::EnrichmentStateStore;
 pub use import_store::{ImportPayloadStore, ImportStore};
 pub use job_store::{EnrichmentJobLifecycleStore, EnrichmentJobStore};
@@ -49,8 +51,8 @@ pub use oracle::{
 };
 pub use postgres::{
     PostgresArchiveRetrievalStore, PostgresArtifactReadStore, PostgresDerivedMetadataStore,
-    PostgresEnrichmentJobStore, PostgresImportWriteStore, PostgresRetrievalReadStore,
-    PostgresWritebackStore,
+    PostgresDerivedObjectEmbeddingStore, PostgresEnrichmentJobStore, PostgresImportWriteStore,
+    PostgresRetrievalReadStore, PostgresWritebackStore,
 };
 pub use retrieval_read_store::{
     ArchiveSearchCandidate, ArchiveSearchReadStore, ArtifactContextDerivedObject,
@@ -65,16 +67,17 @@ pub use types::{
     ArtifactClass, ArtifactExtractPayload, ArtifactExtractionResult, ArtifactIngestResult,
     ArtifactListItem, ArtifactReconcilePayload, ArtifactRetrieveContextPayload, ArtifactStatus,
     CandidateEntity, CandidateRelationship, ClaimedJob, ClassificationObjectJson,
-    ConversationWindowRef, DerivationRunStatus, DerivationRunType, DerivedObjectPayload,
-    DerivedObjectType, EnrichmentStatus, EnrichmentTier, EvidenceRole, ExtractedClassification,
-    ExtractedMemory, ImportStatus, InputScopeType, JobStatus, JobType, LoadedArtifactForEnrichment,
-    LoadedArtifactRecord, LoadedParticipant, LoadedSegment, MemoryObjectJson, NewArtifact,
-    NewDerivationRun, NewDerivedObject, NewEnrichmentBatch, NewEnrichmentJob, NewEvidenceLink,
-    NewImport, NewImportObjectRef, NewParticipant, NewSegment, ObjectStatus, OriginKind,
-    PayloadFormat, PersistedEnrichmentBatch, ReconciliationDecision, ReconciliationDecisionKind,
-    RelationshipObjectJson, RetrievalIntent, RetrievalResultSet, RetrievedContextItem,
-    RetryOutcome, ScopeType, SegmentSpanRef, SegmentType, SourceType, SummaryObjectJson,
-    SupportStrength, TopicThreadRef,
+    ConversationWindowRef, DerivationRunStatus, DerivationRunType, DerivedObjectEmbeddingItem,
+    DerivedObjectEmbeddingPayload, DerivedObjectPayload, DerivedObjectType, EnrichmentStatus,
+    EnrichmentTier, EvidenceRole, ExtractedClassification, ExtractedMemory, ImportStatus,
+    InputScopeType, JobStatus, JobType, LoadedArtifactForEnrichment, LoadedArtifactRecord,
+    LoadedParticipant, LoadedSegment, MemoryObjectJson, NewArtifact, NewDerivationRun,
+    NewDerivedObject, NewDerivedObjectEmbedding, NewEnrichmentBatch, NewEnrichmentJob,
+    NewEvidenceLink, NewImport, NewImportObjectRef, NewParticipant, NewSegment, ObjectStatus,
+    OriginKind, PayloadFormat, PersistedEnrichmentBatch, ReconciliationDecision,
+    ReconciliationDecisionKind, RelationshipObjectJson, RetrievalIntent, RetrievalResultSet,
+    RetrievedContextItem, RetryOutcome, ScopeType, SegmentSpanRef, SegmentType, SourceType,
+    SummaryObjectJson, SupportStrength, TopicThreadRef,
 };
 pub use writeback_store::{NewAgentMemory, NewArchiveLink, WritebackStore};
 

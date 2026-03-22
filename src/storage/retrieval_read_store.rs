@@ -125,12 +125,20 @@ pub struct DerivedObjectSearchResult {
     pub body_text: Option<String>,
     pub candidate_key: Option<String>,
     pub confidence_score: Option<f64>,
+    pub score: Option<f32>,
 }
 
 pub trait DerivedObjectSearchStore: Send + Sync {
     fn search_objects(
         &self,
         filters: &ObjectSearchFilters,
+        limit: usize,
+    ) -> StorageResult<Vec<DerivedObjectSearchResult>>;
+
+    fn search_objects_by_embedding(
+        &self,
+        filters: &ObjectSearchFilters,
+        query_embedding: &[f32],
         limit: usize,
     ) -> StorageResult<Vec<DerivedObjectSearchResult>>;
 }

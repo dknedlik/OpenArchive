@@ -151,13 +151,12 @@ fn main() -> Result<()> {
             match processor.process(&input) {
                 Ok(output) => {
                     println!(
-                        "  budget {:>4}: ok ({:.2}s) | memories {} | classifications {} | importance {} | escalate {}{}",
+                        "  budget {:>4}: ok ({:.2}s) | memories {} | classifications {} | importance {}{}",
                         budget,
                         started.elapsed().as_secs_f64(),
                         output.memories.len(),
                         output.classifications.len(),
                         output.importance_score,
-                        output.escalate_to_frontier,
                         output
                             .usage
                             .as_ref()

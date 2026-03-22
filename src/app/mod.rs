@@ -8,6 +8,7 @@ pub mod writeback;
 
 use std::sync::Arc;
 
+use crate::embedding::EmbeddingProvider;
 use crate::object_store::ObjectStore;
 use crate::storage::{
     ArchiveRetrievalStore, ArchiveSearchReadStore, ArtifactContextPackReadStore,
@@ -36,6 +37,7 @@ impl ArchiveApplication {
         context_pack_store: Option<Arc<dyn ArtifactContextPackReadStore + Send + Sync>>,
         cross_artifact_store: Option<Arc<dyn CrossArtifactReadStore + Send + Sync>>,
         object_search_store: Option<Arc<dyn DerivedObjectSearchStore + Send + Sync>>,
+        object_search_embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
         object_store: Arc<dyn ObjectStore + Send + Sync>,
         writeback_store: Option<Arc<dyn WritebackStore + Send + Sync>>,
     ) -> Self {
@@ -53,7 +55,9 @@ impl ArchiveApplication {
             search: search_read_store.map(search::ArchiveSearchService::new),
             artifact_detail: artifact_detail_store.map(artifact_detail::ArtifactDetailService::new),
             context_pack,
-            object_search: object_search_store.map(search::ObjectSearchService::new),
+            object_search: object_search_store.map(|store| {
+                search::ObjectSearchService::new(store, object_search_embedding_provider.clone())
+            }),
             writeback: writeback_store.map(writeback::WritebackService::new),
         }
     }

@@ -38,7 +38,6 @@
     "memory_count": { "min": 4, "max": 5 },
     "classification_count": { "min": 1, "max": 2 },
     "importance_score": { "min": 6, "max": 9 },
-    "escalate_to_frontier": false,
     "required_phrases": [
       "docker compose",
       "s3",

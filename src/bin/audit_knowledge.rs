@@ -50,7 +50,6 @@ struct AuditRun {
     model_name: String,
     prompt_version: String,
     importance_score: Option<u64>,
-    escalate_to_frontier: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -100,7 +99,6 @@ struct BucketAggregate {
     total_summaries: usize,
     artifacts_with_memories: usize,
     artifacts_with_classifications: usize,
-    artifacts_with_escalation: usize,
     issue_counts: BTreeMap<String, usize>,
     worst_artifacts: Vec<ArtifactAuditScore>,
 }
@@ -322,10 +320,6 @@ fn load_completed_runs(
                 .as_ref()
                 .and_then(|json| json.get("importance_score"))
                 .and_then(Value::as_u64),
-            escalate_to_frontier: parsed_scope
-                .as_ref()
-                .and_then(|json| json.get("escalate_to_frontier"))
-                .and_then(Value::as_bool),
         };
 
         runs.insert(run.derivation_run_id.clone(), run);
@@ -671,11 +665,6 @@ fn score_importance(run: &AuditRun, artifact: &AuditArtifact, notes: &mut Vec<St
         notes.push("importance_too_low_for_large_artifact".to_string());
         result -= 2.0;
     }
-    if run.escalate_to_frontier.unwrap_or(false) && score < 8 {
-        notes.push("escalation_without_importance".to_string());
-        result -= 3.0;
-    }
-
     result.clamp(0.0, 10.0)
 }
 
@@ -719,7 +708,7 @@ fn normalize_phrase(value: &str) -> String {
 
 fn accumulate_bucket(
     bucket: &mut BucketAggregate,
-    run: &AuditRun,
+    _run: &AuditRun,
     objects: &[AuditObject],
     score: ArtifactAuditScore,
     worst_limit: usize,
@@ -756,10 +745,6 @@ fn accumulate_bucket(
     if classification_count > 0 {
         bucket.artifacts_with_classifications += 1;
     }
-    if run.escalate_to_frontier.unwrap_or(false) {
-        bucket.artifacts_with_escalation += 1;
-    }
-
     for note in &score.notes {
         *bucket.issue_counts.entry(note.clone()).or_insert(0) += 1;
     }
@@ -793,13 +778,12 @@ fn print_bucket(signature: &RunSignature, aggregate: &BucketAggregate) {
         aggregate.duplication_penalty_sum / count,
     );
     println!(
-        "  output mix: summaries {}, classifications {}, memories {} | memory coverage {:.0}% | classification coverage {:.0}% | escalations {}",
+        "  output mix: summaries {}, classifications {}, memories {} | memory coverage {:.0}% | classification coverage {:.0}%",
         aggregate.total_summaries,
         aggregate.total_classifications,
         aggregate.total_memories,
         100.0 * aggregate.artifacts_with_memories as f32 / count,
         100.0 * aggregate.artifacts_with_classifications as f32 / count,
-        aggregate.artifacts_with_escalation,
     );
 
     if !aggregate.issue_counts.is_empty() {
