@@ -281,9 +281,7 @@ impl ContextPackService {
                             })
                             .collect();
                     }
-                    Err(e) => {
-                        eprintln!("[context-pack] cross-artifact lookup failed: {e}");
-                    }
+                    Err(err) => return Err(OpenArchiveError::from(err)),
                 }
             }
         }

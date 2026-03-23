@@ -57,7 +57,6 @@ impl DerivedMetadataHarness for OracleHarness {
                     object_id: fixture.write_set.payload_object.object_id.clone(),
                     payload_format: fixture.write_set.payload_object.payload_format,
                     mime_type: fixture.write_set.payload_object.mime_type.clone(),
-                    copied_bytes: fixture.write_set.payload_object.copied_bytes.clone(),
                     size_bytes: fixture.write_set.payload_object.size_bytes,
                     sha256: fixture.write_set.payload_object.sha256.clone(),
                     stored_object: fixture.write_set.payload_object.stored_object.clone(),

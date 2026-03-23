@@ -1,3 +1,4 @@
+use std::error::Error as StdError;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -11,6 +12,7 @@ pub type ObjectStoreResult<T> = std::result::Result<T, ObjectStoreError>;
 pub type StorageResult<T> = std::result::Result<T, StorageError>;
 pub type ParserResult<T> = std::result::Result<T, ParserError>;
 pub type EmbeddingResult<T> = std::result::Result<T, EmbeddingError>;
+pub type WorkerResult<T> = std::result::Result<T, WorkerError>;
 
 #[derive(Debug, Error)]
 pub enum OpenArchiveError {
@@ -311,28 +313,14 @@ pub enum StorageError {
     InsertPayload {
         payload_id: String,
         #[source]
-        source: oracle::Error,
+        source: Box<dyn StdError + Send + Sync>,
     },
 
     #[error("failed to insert import {import_id}")]
     InsertImport {
         import_id: String,
         #[source]
-        source: oracle::Error,
-    },
-
-    #[error("failed to insert import payload {payload_id}")]
-    InsertPayloadPostgres {
-        payload_id: String,
-        #[source]
-        source: postgres::Error,
-    },
-
-    #[error("failed to insert import {import_id}")]
-    InsertImportPostgres {
-        import_id: String,
-        #[source]
-        source: postgres::Error,
+        source: Box<dyn StdError + Send + Sync>,
     },
 
     #[error("failed to update import counts for {import_id}")]
@@ -525,6 +513,12 @@ pub enum StorageError {
         #[source]
         source: postgres::Error,
     },
+
+    #[error("{store} storage does not support {operation}")]
+    UnsupportedOperation {
+        store: &'static str,
+        operation: &'static str,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -598,6 +592,22 @@ pub enum EmbeddingError {
 
     #[error("embedding response returned dimension {actual}; expected {expected}")]
     UnexpectedDimensions { expected: usize, actual: usize },
+}
+
+#[derive(Debug, Error)]
+pub enum WorkerError {
+    #[error(transparent)]
+    Processor(#[from] crate::processor::ProcessorError),
+
+    #[error("batch execution mode requires {stage} batch submitter support")]
+    MissingBatchSubmitter { stage: &'static str },
+
+    #[error("failed to spawn {worker_kind} thread")]
+    SpawnThread {
+        worker_kind: String,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 pub fn preview_sql_statement(statement: &str) -> String {

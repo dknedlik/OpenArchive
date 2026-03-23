@@ -2,6 +2,7 @@ use crate::app::retrieval::ArchiveRetrievalServiceApi;
 use crate::config::{EnrichmentPipelineConfig, ExtractionChunkingConfig, InferenceExecutionMode};
 use crate::domain::SourceTimestamp;
 use crate::embedding::EmbeddingProvider;
+use crate::error::{WorkerError, WorkerResult};
 use crate::extraction_chunking::{
     build_chunk_inputs, build_coverage_windows, build_topic_thread_inputs,
 };
@@ -27,7 +28,6 @@ use crate::storage::{
     RetrievalResultSet, ScopeType, SummaryObjectJson, SupportStrength, WriteDerivationAttempt,
     WriteDerivedObject,
 };
-use anyhow::Result;
 use log::{debug, error, info, warn};
 use rand::random;
 use sha2::{Digest, Sha256};
@@ -1631,12 +1631,12 @@ pub(crate) fn build_extract_chunk_inputs(
     }
 }
 
-fn build_reconciliation_input(
+pub(crate) fn build_reconciliation_input(
     artifact_id: &str,
     source_type: &str,
     extraction_result: &ArtifactExtractionResult,
     retrieval_result_set: &RetrievalResultSet,
-) -> Result<ReconciliationProcessorInput, serde_json::Error> {
+) -> std::result::Result<ReconciliationProcessorInput, serde_json::Error> {
     Ok(ReconciliationProcessorInput {
         artifact_id: artifact_id.to_string(),
         source_type: crate::storage::SourceType::from_str(source_type)
@@ -1686,7 +1686,7 @@ fn build_reconciliation_input(
     })
 }
 
-fn build_reconciliation_decisions(
+pub(crate) fn build_reconciliation_decisions(
     claimed_job: &ClaimedJob,
     extraction_result: &ArtifactExtractionResult,
     retrieval_result_set: &RetrievalResultSet,
@@ -1714,7 +1714,7 @@ fn build_reconciliation_decisions(
         .collect()
 }
 
-fn memory_target_key(memory: &ExtractedMemory) -> String {
+pub(crate) fn memory_target_key(memory: &ExtractedMemory) -> String {
     if memory.candidate_key.is_empty() {
         memory_candidate_key_from_fields(
             &memory.memory_type,
@@ -1732,7 +1732,7 @@ fn memory_target_key_from_output(memory: &MemoryOutput) -> String {
     memory.candidate_key.clone()
 }
 
-fn relationship_target_key(relationship: &CandidateRelationship) -> String {
+pub(crate) fn relationship_target_key(relationship: &CandidateRelationship) -> String {
     format!(
         "{}:{}:{}",
         relationship.relationship_type, relationship.subject_key, relationship.object_key
@@ -1842,7 +1842,7 @@ fn confidence_rank(label: &str) -> i32 {
     }
 }
 
-fn build_derivation_attempt(
+pub(crate) fn build_derivation_attempt(
     claimed_job: &ClaimedJob,
     artifact_id: &str,
     extraction_result: &ArtifactExtractionResult,
@@ -2062,7 +2062,10 @@ fn build_derivation_attempt(
     }
 }
 
-fn build_evidence_links(derived_object_id: &str, segment_ids: &[String]) -> Vec<NewEvidenceLink> {
+pub(crate) fn build_evidence_links(
+    derived_object_id: &str,
+    segment_ids: &[String],
+) -> Vec<NewEvidenceLink> {
     segment_ids
         .iter()
         .enumerate()
@@ -2117,7 +2120,7 @@ fn handle_processor_error(
     )
 }
 
-fn complete_job(
+pub(crate) fn complete_job(
     job_store: &dyn EnrichmentJobLifecycleStore,
     worker_id: &str,
     job_id: &str,
@@ -2158,7 +2161,7 @@ fn mark_job_retryable_message(
     }
 }
 
-fn new_id(prefix: &str) -> String {
+pub(crate) fn new_id(prefix: &str) -> String {
     static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2178,7 +2181,7 @@ pub fn start_enrichment_workers(
     state_store: Arc<dyn EnrichmentStateStore>,
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     shutdown: ShutdownToken,
-) -> Result<Vec<thread::JoinHandle<()>>, anyhow::Error> {
+) -> WorkerResult<Vec<thread::JoinHandle<()>>> {
     start_enrichment_workers_with_factory(
         config,
         job_store,
@@ -2201,7 +2204,7 @@ pub fn start_enrichment_workers_with_factory(
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     shutdown: ShutdownToken,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
-) -> Result<Vec<thread::JoinHandle<()>>, anyhow::Error> {
+) -> WorkerResult<Vec<thread::JoinHandle<()>>> {
     let pid = std::process::id();
     let poll_interval = Duration::from_millis(config.enrichment_poll_interval_ms);
 
@@ -2244,9 +2247,12 @@ pub fn start_enrichment_workers_with_factory(
                         shutdown,
                     );
                 })
-                .map_err(|e| anyhow::anyhow!("Failed to spawn enrichment worker thread: {}", e))
+                .map_err(|source| WorkerError::SpawnThread {
+                    worker_kind: format!("enrichment worker {}", worker_index),
+                    source,
+                })
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<WorkerResult<Vec<_>>>()?;
 
     Ok(workers)
 }
@@ -2278,7 +2284,7 @@ pub fn start_enrichment_pipeline(
     shutdown: ShutdownToken,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
-) -> Result<Vec<thread::JoinHandle<()>>> {
+) -> WorkerResult<Vec<thread::JoinHandle<()>>> {
     if execution_mode == InferenceExecutionMode::Batch {
         validate_batch_execution_support(processor_factory.as_ref())?;
     }
@@ -2382,7 +2388,10 @@ pub fn start_enrichment_pipeline(
                     shutdown,
                 );
             })
-            .map_err(|e| anyhow::anyhow!("Failed to spawn retrieve-context worker: {}", e))?;
+            .map_err(|source| WorkerError::SpawnThread {
+                worker_kind: format!("retrieve-context worker {}", i),
+                source,
+            })?;
         handles.push(h);
     }
 
@@ -2420,24 +2429,24 @@ pub fn start_enrichment_pipeline(
 
 fn validate_batch_execution_support(
     processor_factory: &dyn ArtifactProcessorFactory,
-) -> Result<()> {
+) -> WorkerResult<()> {
     use crate::storage::EnrichmentTier;
 
     if processor_factory
         .build_extraction_submitter(EnrichmentTier::Standard)?
         .is_none()
     {
-        return Err(anyhow::anyhow!(
-            "batch execution mode requires extraction batch submitter support"
-        ));
+        return Err(WorkerError::MissingBatchSubmitter {
+            stage: "extraction",
+        });
     }
     if processor_factory
         .build_reconciliation_submitter(EnrichmentTier::Standard)?
         .is_none()
     {
-        return Err(anyhow::anyhow!(
-            "batch execution mode requires reconciliation batch submitter support"
-        ));
+        return Err(WorkerError::MissingBatchSubmitter {
+            stage: "reconciliation",
+        });
     }
     Ok(())
 }
@@ -2455,7 +2464,7 @@ fn spawn_reconcile_batch_workers(
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
-) -> Result<Vec<thread::JoinHandle<()>>> {
+) -> WorkerResult<Vec<thread::JoinHandle<()>>> {
     (0..worker_count)
         .map(|i| {
             let worker_id = format!("enrichment:{}:reconcile:{}", pid, i);
@@ -2496,7 +2505,10 @@ fn spawn_reconcile_batch_workers(
                         shutdown,
                     );
                 })
-                .map_err(|e| anyhow::anyhow!("Failed to spawn reconcile poller: {}", e))
+                .map_err(|source| WorkerError::SpawnThread {
+                    worker_kind: format!("reconcile poller {}", i),
+                    source,
+                })
         })
         .collect()
 }
@@ -2514,7 +2526,7 @@ fn spawn_extract_batch_workers(
     chunking: Arc<ExtractionChunkingConfig>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
-) -> Result<Vec<thread::JoinHandle<()>>> {
+) -> WorkerResult<Vec<thread::JoinHandle<()>>> {
     (0..worker_count)
         .map(|i| {
             let worker_id = format!("enrichment:{}:extract:{}", pid, i);
@@ -2554,7 +2566,10 @@ fn spawn_extract_batch_workers(
                         shutdown,
                     );
                 })
-                .map_err(|e| anyhow::anyhow!("Failed to spawn extract poller: {}", e))
+                .map_err(|source| WorkerError::SpawnThread {
+                    worker_kind: format!("extract poller {}", i),
+                    source,
+                })
         })
         .collect()
 }
@@ -2576,7 +2591,7 @@ fn spawn_direct_stage_workers(
     coverage_policy: Arc<ExtractCoveragePolicy>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
-) -> Result<Vec<thread::JoinHandle<()>>> {
+) -> WorkerResult<Vec<thread::JoinHandle<()>>> {
     (0..worker_count)
         .map(|i| {
             let worker_id = format!("enrichment:{}:{}:{}", pid, stage_name, i);
@@ -2611,7 +2626,10 @@ fn spawn_direct_stage_workers(
                         shutdown,
                     );
                 })
-                .map_err(|e| anyhow::anyhow!("Failed to spawn direct {} worker: {}", stage_name, e))
+                .map_err(|source| WorkerError::SpawnThread {
+                    worker_kind: format!("direct {stage_name} worker {i}"),
+                    source,
+                })
         })
         .collect()
 }
@@ -2698,7 +2716,7 @@ fn spawn_embedding_workers(
     embedding_provider: Arc<dyn EmbeddingProvider>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
-) -> Result<Vec<thread::JoinHandle<()>>> {
+) -> WorkerResult<Vec<thread::JoinHandle<()>>> {
     (0..worker_count)
         .map(|i| {
             let worker_id = format!("enrichment:{}:embed:{}", pid, i);
@@ -2719,7 +2737,10 @@ fn spawn_embedding_workers(
                         shutdown,
                     );
                 })
-                .map_err(|e| anyhow::anyhow!("Failed to spawn embedding worker: {}", e))
+                .map_err(|source| WorkerError::SpawnThread {
+                    worker_kind: format!("embedding worker {}", i),
+                    source,
+                })
         })
         .collect()
 }

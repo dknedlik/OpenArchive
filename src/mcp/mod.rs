@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use log::{error, info, warn};
 use rand::random;
 use serde_json::{json, Value};
 
@@ -25,22 +26,22 @@ pub fn run_stdio_server(app: Arc<ArchiveApplication>) -> io::Result<()> {
     let mut reader = io::BufReader::new(stdin.lock());
     let mut writer = io::BufWriter::new(stdout.lock());
 
-    eprintln!("[open-archive-mcp] stdio loop started");
+    info!("[open-archive-mcp] stdio loop started");
 
     loop {
         let request = match read_jsonrpc_message(&mut reader) {
             Ok(Some(request)) => request,
             Ok(None) => {
-                eprintln!("[open-archive-mcp] stdin closed");
+                info!("[open-archive-mcp] stdin closed");
                 break;
             }
             Err(err) => {
-                eprintln!("[open-archive-mcp] failed to read request: {err}");
+                error!("[open-archive-mcp] failed to read request: {err}");
                 return Err(err);
             }
         };
 
-        eprintln!(
+        info!(
             "[open-archive-mcp] received method={} id={}",
             request.method,
             request
@@ -57,14 +58,14 @@ pub fn run_stdio_server(app: Arc<ArchiveApplication>) -> io::Result<()> {
                 .unwrap_or(Value::Null)
                 .to_string();
             if let Err(err) = write_jsonrpc_message(&mut writer, &response) {
-                eprintln!("[open-archive-mcp] failed to write response id={response_id}: {err}");
+                error!("[open-archive-mcp] failed to write response id={response_id}: {err}");
                 return Err(err);
             }
             if let Err(err) = writer.flush() {
-                eprintln!("[open-archive-mcp] failed to flush response id={response_id}: {err}");
+                error!("[open-archive-mcp] failed to flush response id={response_id}: {err}");
                 return Err(err);
             }
-            eprintln!("[open-archive-mcp] responded id={response_id}");
+            info!("[open-archive-mcp] responded id={response_id}");
         }
     }
 
@@ -73,7 +74,7 @@ pub fn run_stdio_server(app: Arc<ArchiveApplication>) -> io::Result<()> {
 
 fn handle_request(app: &ArchiveApplication, request: JsonRpcRequest) -> Option<Value> {
     if request.id.is_none() {
-        eprintln!(
+        warn!(
             "[open-archive-mcp] ignoring notification method={}",
             request.method
         );
@@ -511,7 +512,7 @@ fn call_tool(app: &ArchiveApplication, params: Value) -> Value {
                     let artifacts_json = serde_json::to_value(&artifacts).expect("artifact list serializable");
                     tool_success(json!({ "artifacts": artifacts_json }))
                 }
-                Err(err) => tool_error("internal_error", &err.to_string()),
+                Err(err) => tool_storage_error(&err),
             }
         }
         "update_object" => {
@@ -613,7 +614,7 @@ fn call_tool(app: &ArchiveApplication, params: Value) -> Value {
                     let entries_json = serde_json::to_value(&entries).expect("timeline serializable");
                     tool_success(json!({ "entries": entries_json }))
                 }
-                Err(err) => tool_error("internal_error", &err.to_string()),
+                Err(err) => tool_storage_error(&err),
             }
         }
         _ => tool_error("invalid_params", &format!("unknown tool: {name}")),
@@ -690,7 +691,7 @@ fn tool_error(code: &str, message: &str) -> Value {
 }
 
 fn tool_success(value: Value) -> Value {
-    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+    let text = summarize_tool_result(&value);
     json!({
         "content": [
             {
@@ -698,8 +699,18 @@ fn tool_success(value: Value) -> Value {
                 "text": text
             }
         ],
+        "structuredContent": value,
         "isError": false
     })
+}
+
+fn tool_storage_error(err: &crate::error::StorageError) -> Value {
+    match err {
+        crate::error::StorageError::UnsupportedOperation { .. } => {
+            tool_error("service_unavailable", &err.to_string())
+        }
+        _ => tool_error("internal_error", &err.to_string()),
+    }
 }
 
 fn summarize_tool_result(value: &Value) -> String {

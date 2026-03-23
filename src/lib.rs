@@ -22,5 +22,5 @@ pub mod storage;
 pub use domain::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 pub use error::{
     ConfigError, DbError, EmbeddingError, MigrationsError, ObjectStoreError, OpenArchiveError,
-    ParserError, Result, StorageError,
+    ParserError, Result, StorageError, WorkerError, WorkerResult,
 };

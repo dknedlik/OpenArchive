@@ -76,7 +76,10 @@ impl ArtifactReadStore for OracleArtifactReadStore {
         _limit: usize,
         _offset: usize,
     ) -> StorageResult<Vec<crate::storage::types::ArtifactListItem>> {
-        unimplemented!("list_artifacts_filtered not yet implemented for Oracle")
+        Err(StorageError::UnsupportedOperation {
+            store: "oracle",
+            operation: "list_artifacts_filtered",
+        })
     }
 
     fn get_timeline(
@@ -85,7 +88,10 @@ impl ArtifactReadStore for OracleArtifactReadStore {
         _limit: usize,
         _offset: usize,
     ) -> StorageResult<Vec<crate::storage::types::TimelineEntry>> {
-        unimplemented!("get_timeline not yet implemented for Oracle")
+        Err(StorageError::UnsupportedOperation {
+            store: "oracle",
+            operation: "get_timeline",
+        })
     }
 
     fn load_artifact_for_enrichment(

@@ -33,7 +33,7 @@ pub fn insert_payload_object(conn: &Connection, p: &NewImportObjectRef) -> Stora
     )
     .map_err(|source| StorageError::InsertPayload {
         payload_id: p.object_id.clone(),
-        source,
+        source: Box::new(source),
     })?;
     Ok(())
 }
@@ -57,7 +57,7 @@ pub fn insert_import(conn: &Connection, i: &NewImport) -> StorageResult<()> {
     )
     .map_err(|source| StorageError::InsertImport {
         import_id: i.import_id.clone(),
-        source,
+        source: Box::new(source),
     })?;
     Ok(())
 }

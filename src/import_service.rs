@@ -187,7 +187,6 @@ fn build_import_set(
                 object_id: payload_object_id.clone(),
                 payload_format: spec.payload_format,
                 mime_type: "application/json".to_string(),
-                copied_bytes: payload_bytes.to_vec(),
                 size_bytes: payload_bytes.len() as i64,
                 sha256: payload_sha256.clone(),
                 stored_object: payload_put.stored_object.clone(),
@@ -247,8 +246,6 @@ fn is_safe_precommit_import_failure(error: &crate::error::StorageError) -> bool 
         error,
         crate::error::StorageError::InsertPayload { .. }
             | crate::error::StorageError::InsertImport { .. }
-            | crate::error::StorageError::InsertPayloadPostgres { .. }
-            | crate::error::StorageError::InsertImportPostgres { .. }
     )
 }
 
@@ -501,16 +498,9 @@ mod tests {
             &self,
             import_set: WriteImportSet,
         ) -> crate::error::StorageResult<ImportWriteResult> {
-            let source = match postgres::Client::connect(
-                "postgres://invalid:invalid@127.0.0.1:1/invalid",
-                postgres::NoTls,
-            ) {
-                Ok(_) => panic!("expected postgres connection failure"),
-                Err(source) => source,
-            };
-            Err(crate::error::StorageError::InsertImportPostgres {
+            Err(crate::error::StorageError::InsertImport {
                 import_id: import_set.import.import_id,
-                source,
+                source: Box::new(std::io::Error::other("synthetic precommit failure")),
             })
         }
     }

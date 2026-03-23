@@ -207,12 +207,12 @@ fn run_http_worker_loop(
             Ok(Some(mut request)) => {
                 let response = http::build_response(&mut request, app);
                 if let Err(err) = request.respond(response) {
-                    eprintln!("http_respond_error={err}");
+                    log::error!("http_respond_error={err}");
                 }
             }
             Ok(None) => continue,
             Err(err) => {
-                eprintln!("http_worker_error={err}");
+                log::error!("http_worker_error={err}");
                 shutdown.signal();
                 break;
             }

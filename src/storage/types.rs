@@ -525,15 +525,10 @@ pub struct NewImportObjectRef {
     pub object_id: String,
     pub payload_format: PayloadFormat,
     pub mime_type: String,
-    /// Transitional field used only by the legacy Oracle adapter until all
-    /// relational providers read from the object store directly.
-    pub copied_bytes: Vec<u8>,
     pub size_bytes: i64,
     /// SHA-256 hex digest. Unique constraint enforces payload-level deduplication.
     pub sha256: String,
-    /// Object-store metadata for the copied raw payload. Oracle still writes the
-    /// bytes inline today, but the application boundary now treats this as the
-    /// durable payload reference.
+    /// Object-store metadata for the copied raw payload.
     pub stored_object: StoredObject,
 }
 

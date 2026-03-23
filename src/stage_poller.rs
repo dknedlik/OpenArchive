@@ -8,9 +8,6 @@
 // loop iterations, and processes completed results. No thread ever blocks
 // waiting for batch completion.
 //
-// Helper functions (new_id, build_extraction_result, etc.) are duplicated
-// from enrichment_worker.rs below. TODO: consolidate via pub(crate).
-
 use std::collections::HashMap;
 use std::thread;
 use std::time::Duration;
@@ -19,9 +16,13 @@ use log::{debug, error, info, warn};
 
 use crate::config::ExtractionChunkingConfig;
 use crate::enrichment_worker::{
+    build_derivation_attempt as worker_build_derivation_attempt,
     build_embedding_job as worker_build_embedding_job, build_extract_chunk_inputs,
     build_extraction_result as worker_build_extraction_result,
-    merge_chunk_outputs as worker_merge_chunk_outputs,
+    build_reconciliation_decisions as worker_build_reconciliation_decisions,
+    build_reconciliation_input as worker_build_reconciliation_input,
+    complete_job as worker_complete_job,
+    merge_chunk_outputs as worker_merge_chunk_outputs, new_id as worker_new_id,
     try_enqueue_embedding_job as worker_try_enqueue_embedding_job,
 };
 use crate::processor::{
@@ -867,7 +868,7 @@ impl StageBehavior for ExtractStage {
                 continue;
             }
             let retrieve_job = NewEnrichmentJob {
-                job_id: new_id("job"),
+                job_id: worker_new_id("job"),
                 artifact_id: job.artifact_id.clone(),
                 job_type: JobType::ArtifactRetrieveContext,
                 enrichment_tier: job.enrichment_tier,
@@ -894,7 +895,7 @@ impl StageBehavior for ExtractStage {
                 );
                 continue;
             }
-            if let Err(msg) = poller_complete_job(job_store, worker_id, &job.job_id) {
+            if let Err(msg) = worker_complete_job(job_store, worker_id, &job.job_id) {
                 error!("[extract] {}", msg);
             }
         }
@@ -1189,7 +1190,7 @@ impl StageBehavior for ReconcileStage {
                 }
                 continue;
             }
-            let input = match build_reconciliation_input(
+            let input = match worker_build_reconciliation_input(
                 &job.artifact_id,
                 &payload.source_type,
                 &extraction_result,
@@ -1293,7 +1294,7 @@ impl StageBehavior for ReconcileStage {
                         && extraction_result.relationships.is_empty()
                     {
                         vec![ReconciliationDecision {
-                            reconciliation_decision_id: new_id("reconcile"),
+                            reconciliation_decision_id: worker_new_id("reconcile"),
                             artifact_id: extraction_result.artifact_id.clone(),
                             job_id: job.job_id.clone(),
                             extraction_result_id: extraction_result.extraction_result_id.clone(),
@@ -1316,7 +1317,7 @@ impl StageBehavior for ReconcileStage {
                             error_message: None,
                         }]
                     } else {
-                        build_reconciliation_decisions(
+                        worker_build_reconciliation_decisions(
                             &job,
                             &extraction_result,
                             &retrieval_result_set,
@@ -1333,7 +1334,7 @@ impl StageBehavior for ReconcileStage {
                         );
                         continue;
                     }
-                    let attempt = build_derivation_attempt(
+                    let attempt = worker_build_derivation_attempt(
                         &job,
                         &loaded.artifact.artifact_id,
                         &extraction_result,
@@ -1364,7 +1365,7 @@ impl StageBehavior for ReconcileStage {
                     if let Some(embedding_job) = embedding_job.as_ref() {
                         worker_try_enqueue_embedding_job(job_store, &job.job_id, embedding_job);
                     }
-                    if let Err(msg) = poller_complete_job(job_store, worker_id, &job.job_id) {
+                    if let Err(msg) = worker_complete_job(job_store, worker_id, &job.job_id) {
                         error!("[reconcile] {}", msg);
                     }
                 }
@@ -1499,7 +1500,7 @@ impl StageBehavior for ReconcileStage {
                         return Err(());
                     }
                 };
-            let input = match build_reconciliation_input(
+            let input = match worker_build_reconciliation_input(
                 &job.artifact_id,
                 &payload.source_type,
                 &extraction_result,
@@ -1541,52 +1542,6 @@ impl StageBehavior for ReconcileStage {
             },
         })
     }
-}
-
-// ===========================================================================
-// Helper functions — local equivalents of enrichment_worker helpers.
-//
-// These duplicate the helpers from enrichment_worker.rs because those are
-// currently private. TODO: Once visibility is changed to pub(crate) in
-// enrichment_worker.rs, replace these with re-exports.
-// ===========================================================================
-
-use crate::domain::SourceTimestamp;
-use crate::processor::{
-    memory_candidate_key_from_fields, MemoryOutput, ReconciliationDecisionOutput,
-    RelationshipOutput, SummaryOutput,
-};
-use crate::storage::{
-    CandidateRelationship, ClassificationObjectJson, DerivationRunStatus, DerivationRunType,
-    DerivedObjectPayload, EvidenceRole, ExtractedMemory, InputScopeType, MemoryObjectJson,
-    NewDerivationRun, NewDerivedObject, NewEvidenceLink, ObjectStatus, OriginKind,
-    RelationshipObjectJson, ScopeType, SummaryObjectJson, SupportStrength, WriteDerivationAttempt,
-    WriteDerivedObject,
-};
-use rand::random;
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-fn new_id(prefix: &str) -> String {
-    static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let counter = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let entropy = random::<u64>();
-    format!("{prefix}-{nanos:x}-{counter:x}-{entropy:x}")
-}
-
-fn poller_complete_job(
-    job_store: &dyn EnrichmentJobLifecycleStore,
-    worker_id: &str,
-    job_id: &str,
-) -> Result<(), String> {
-    job_store
-        .complete_job(worker_id, job_id)
-        .map_err(|err| format!("failed to complete job {}: {}", job_id, err))
 }
 
 fn poller_fail_job(
@@ -1701,7 +1656,7 @@ fn complete_reconcile_without_candidates(
     worker_id: &str,
 ) -> Result<(), ()> {
     let decisions = vec![ReconciliationDecision {
-        reconciliation_decision_id: new_id("reconcile"),
+        reconciliation_decision_id: worker_new_id("reconcile"),
         artifact_id: extraction_result.artifact_id.clone(),
         job_id: job.job_id.clone(),
         extraction_result_id: extraction_result.extraction_result_id.clone(),
@@ -1728,7 +1683,7 @@ fn complete_reconcile_without_candidates(
         );
         return Err(());
     }
-    let attempt = build_derivation_attempt(
+    let attempt = worker_build_derivation_attempt(
         job,
         &loaded.artifact.artifact_id,
         extraction_result,
@@ -1750,355 +1705,9 @@ fn complete_reconcile_without_candidates(
     if let Some(embedding_job) = embedding_job.as_ref() {
         worker_try_enqueue_embedding_job(job_store, &job.job_id, embedding_job);
     }
-    if let Err(msg) = poller_complete_job(job_store, worker_id, &job.job_id) {
+    if let Err(msg) = worker_complete_job(job_store, worker_id, &job.job_id) {
         error!("{msg}");
         return Err(());
     }
     Ok(())
-}
-
-fn build_reconciliation_input(
-    artifact_id: &str,
-    source_type: &str,
-    extraction_result: &ArtifactExtractionResult,
-    retrieval_result_set: &RetrievalResultSet,
-) -> Result<ReconciliationProcessorInput, serde_json::Error> {
-    Ok(ReconciliationProcessorInput {
-        artifact_id: artifact_id.to_string(),
-        source_type: SourceType::from_str(source_type)
-            .expect("validated source_type during payload parsing"),
-        summary: SummaryOutput {
-            title: extraction_result.summary_title.clone(),
-            body_text: extraction_result.summary_body_text.clone(),
-            evidence_segment_ids: extraction_result.summary_evidence_segment_ids.clone(),
-        },
-        memories: extraction_result
-            .memories
-            .iter()
-            .map(|m| MemoryOutput {
-                candidate_key: if m.candidate_key.is_empty() {
-                    memory_candidate_key_from_fields(
-                        &m.memory_type,
-                        m.memory_scope,
-                        &m.memory_scope_value,
-                        m.title.as_deref(),
-                        &m.body_text,
-                    )
-                } else {
-                    m.candidate_key.clone()
-                },
-                title: m.title.clone(),
-                body_text: m.body_text.clone(),
-                memory_type: m.memory_type.clone(),
-                memory_scope: m.memory_scope,
-                memory_scope_value: m.memory_scope_value.clone(),
-                evidence_segment_ids: m.evidence_segment_ids.clone(),
-            })
-            .collect(),
-        relationships: extraction_result
-            .relationships
-            .iter()
-            .map(|r| RelationshipOutput {
-                relationship_type: r.relationship_type.clone(),
-                subject_key: r.subject_key.clone(),
-                object_key: r.object_key.clone(),
-                title: r.title.clone(),
-                body_text: r.body_text.clone(),
-                confidence_label: r.confidence_label.clone(),
-                evidence_segment_ids: r.evidence_segment_ids.clone(),
-            })
-            .collect(),
-        retrieval_results_json: serde_json::to_string_pretty(retrieval_result_set)?,
-    })
-}
-
-fn build_reconciliation_decisions(
-    claimed_job: &ClaimedJob,
-    extraction_result: &ArtifactExtractionResult,
-    retrieval_result_set: &RetrievalResultSet,
-    outputs: Vec<ReconciliationDecisionOutput>,
-) -> Vec<ReconciliationDecision> {
-    outputs
-        .into_iter()
-        .map(|output| ReconciliationDecision {
-            reconciliation_decision_id: new_id("reconcile"),
-            artifact_id: extraction_result.artifact_id.clone(),
-            job_id: claimed_job.job_id.clone(),
-            extraction_result_id: extraction_result.extraction_result_id.clone(),
-            retrieval_result_set_id: retrieval_result_set.retrieval_result_set_id.clone(),
-            pipeline_name: "artifact_reconciliation".to_string(),
-            pipeline_version: "v1".to_string(),
-            decision_kind: output.decision_kind,
-            target_kind: output.target_kind,
-            target_key: output.target_key,
-            matched_object_id: output.matched_object_id,
-            rationale: output.rationale,
-            evidence_segment_ids: output.evidence_segment_ids,
-            status: "completed".to_string(),
-            error_message: None,
-        })
-        .collect()
-}
-
-fn memory_target_key(memory: &ExtractedMemory) -> String {
-    if memory.candidate_key.is_empty() {
-        memory_candidate_key_from_fields(
-            &memory.memory_type,
-            memory.memory_scope,
-            &memory.memory_scope_value,
-            memory.title.as_deref(),
-            &memory.body_text,
-        )
-    } else {
-        memory.candidate_key.clone()
-    }
-}
-
-fn relationship_target_key(relationship: &CandidateRelationship) -> String {
-    format!(
-        "{}:{}:{}",
-        relationship.relationship_type, relationship.subject_key, relationship.object_key
-    )
-}
-
-fn build_evidence_links(derived_object_id: &str, segment_ids: &[String]) -> Vec<NewEvidenceLink> {
-    segment_ids
-        .iter()
-        .enumerate()
-        .map(|(index, segment_id)| NewEvidenceLink {
-            evidence_link_id: new_id("evidence"),
-            derived_object_id: derived_object_id.to_string(),
-            segment_id: segment_id.clone(),
-            evidence_role: if index == 0 {
-                EvidenceRole::PrimarySupport
-            } else {
-                EvidenceRole::SecondarySupport
-            },
-            evidence_rank: (index + 1) as i64,
-            support_strength: SupportStrength::Strong,
-        })
-        .collect()
-}
-
-fn build_derivation_attempt(
-    claimed_job: &ClaimedJob,
-    artifact_id: &str,
-    extraction_result: &ArtifactExtractionResult,
-    decisions: &[ReconciliationDecision],
-) -> WriteDerivationAttempt {
-    let derivation_run_id = new_id("drvrun");
-    let started_at = SourceTimestamp::from(chrono::Utc::now());
-    let completed_at = started_at.clone();
-    let mut objects = Vec::with_capacity(
-        1 + extraction_result.classifications.len() + extraction_result.memories.len(),
-    );
-
-    // Summary object
-    let summary_object_id = new_id("dobj");
-    objects.push(WriteDerivedObject {
-        object: NewDerivedObject {
-            derived_object_id: summary_object_id.clone(),
-            artifact_id: artifact_id.to_string(),
-            derivation_run_id: derivation_run_id.clone(),
-            origin_kind: OriginKind::Deterministic,
-            object_status: ObjectStatus::Active,
-            confidence_score: None,
-            confidence_label: None,
-            scope_type: ScopeType::Artifact,
-            scope_id: artifact_id.to_string(),
-            supersedes_derived_object_id: None,
-            payload: DerivedObjectPayload::Summary {
-                title: extraction_result.summary_title.clone(),
-                body_text: extraction_result.summary_body_text.clone(),
-                object_json: Some(SummaryObjectJson {
-                    summary_kind: Some("artifact".to_string()),
-                    summary_version: Some(extraction_result.pipeline_version.clone()),
-                }),
-            },
-        },
-        evidence_links: build_evidence_links(
-            &summary_object_id,
-            &extraction_result.summary_evidence_segment_ids,
-        ),
-    });
-
-    // Classification objects
-    for classification in &extraction_result.classifications {
-        let derived_object_id = new_id("dobj");
-        objects.push(WriteDerivedObject {
-            object: NewDerivedObject {
-                derived_object_id: derived_object_id.clone(),
-                artifact_id: artifact_id.to_string(),
-                derivation_run_id: derivation_run_id.clone(),
-                origin_kind: OriginKind::Deterministic,
-                object_status: ObjectStatus::Active,
-                confidence_score: None,
-                confidence_label: None,
-                scope_type: ScopeType::Artifact,
-                scope_id: artifact_id.to_string(),
-                supersedes_derived_object_id: None,
-                payload: DerivedObjectPayload::Classification {
-                    title: classification.title.clone(),
-                    body_text: classification.body_text.clone(),
-                    object_json: ClassificationObjectJson {
-                        classification_type: classification.classification_type.clone(),
-                        classification_value: classification.classification_value.clone(),
-                    },
-                },
-            },
-            evidence_links: build_evidence_links(
-                &derived_object_id,
-                &classification.evidence_segment_ids,
-            ),
-        });
-    }
-
-    // Memory objects (with reconciliation decisions)
-    let mut attached_existing = HashSet::new();
-    for memory in &extraction_result.memories {
-        let decision = decisions
-            .iter()
-            .find(|d| d.target_kind == "memory" && d.target_key == memory_target_key(memory));
-        if let Some(decision) = decision {
-            if matches!(
-                decision.decision_kind,
-                ReconciliationDecisionKind::AttachToExisting
-                    | ReconciliationDecisionKind::StrengthenExisting
-            ) {
-                if let Some(existing_id) = &decision.matched_object_id {
-                    attached_existing.insert(existing_id.clone());
-                }
-                continue;
-            }
-        }
-
-        let derived_object_id = new_id("dobj");
-        let supersedes_derived_object_id = decision.and_then(|d| {
-            matches!(
-                d.decision_kind,
-                ReconciliationDecisionKind::SupersedeExisting
-            )
-            .then(|| d.matched_object_id.clone())
-            .flatten()
-        });
-        objects.push(WriteDerivedObject {
-            object: NewDerivedObject {
-                derived_object_id: derived_object_id.clone(),
-                artifact_id: artifact_id.to_string(),
-                derivation_run_id: derivation_run_id.clone(),
-                origin_kind: OriginKind::Inferred,
-                object_status: ObjectStatus::Active,
-                confidence_score: None,
-                confidence_label: None,
-                scope_type: memory.memory_scope,
-                scope_id: memory.memory_scope_value.clone(),
-                supersedes_derived_object_id,
-                payload: DerivedObjectPayload::Memory {
-                    title: memory.title.clone(),
-                    body_text: memory.body_text.clone(),
-                    object_json: MemoryObjectJson {
-                        candidate_key: memory_target_key(memory),
-                        memory_type: memory.memory_type.clone(),
-                        memory_scope: memory.memory_scope,
-                        memory_scope_value: memory.memory_scope_value.clone(),
-                    },
-                },
-            },
-            evidence_links: build_evidence_links(&derived_object_id, &memory.evidence_segment_ids),
-        });
-    }
-
-    // Relationship objects (with reconciliation decisions)
-    for relationship in &extraction_result.relationships {
-        let decision = decisions.iter().find(|d| {
-            d.target_kind == "relationship" && d.target_key == relationship_target_key(relationship)
-        });
-        let Some(decision) = decision else {
-            continue;
-        };
-        if matches!(
-            decision.decision_kind,
-            ReconciliationDecisionKind::AttachToExisting
-                | ReconciliationDecisionKind::StrengthenExisting
-                | ReconciliationDecisionKind::InsufficientEvidence
-        ) {
-            if let Some(existing_id) = &decision.matched_object_id {
-                attached_existing.insert(existing_id.clone());
-            }
-            continue;
-        }
-
-        let derived_object_id = new_id("dobj");
-        let supersedes_derived_object_id = matches!(
-            decision.decision_kind,
-            ReconciliationDecisionKind::SupersedeExisting
-        )
-        .then(|| decision.matched_object_id.clone())
-        .flatten();
-        let contradicts_relationship_object_id = matches!(
-            decision.decision_kind,
-            ReconciliationDecisionKind::ContradictsExisting
-        )
-        .then(|| decision.matched_object_id.clone())
-        .flatten();
-        objects.push(WriteDerivedObject {
-            object: NewDerivedObject {
-                derived_object_id: derived_object_id.clone(),
-                artifact_id: artifact_id.to_string(),
-                derivation_run_id: derivation_run_id.clone(),
-                origin_kind: OriginKind::Inferred,
-                object_status: ObjectStatus::Active,
-                confidence_score: None,
-                confidence_label: Some(relationship.confidence_label.clone()),
-                scope_type: ScopeType::Artifact,
-                scope_id: artifact_id.to_string(),
-                supersedes_derived_object_id,
-                payload: DerivedObjectPayload::Relationship {
-                    title: relationship.title.clone(),
-                    body_text: relationship.body_text.clone(),
-                    object_json: RelationshipObjectJson {
-                        relationship_type: relationship.relationship_type.clone(),
-                        subject_key: relationship.subject_key.clone(),
-                        object_key: relationship.object_key.clone(),
-                        support_label: relationship.confidence_label.clone(),
-                        supersedes_relationship_object_id: None,
-                        contradicts_relationship_object_id,
-                    },
-                },
-            },
-            evidence_links: build_evidence_links(
-                &derived_object_id,
-                &relationship.evidence_segment_ids,
-            ),
-        });
-    }
-
-    let input_scope_json = serde_json::json!({
-        "artifact_id": artifact_id,
-        "extraction_result_id": extraction_result.extraction_result_id,
-        "reconciled_decision_count": decisions.len(),
-        "attached_existing_count": attached_existing.len()
-    })
-    .to_string();
-
-    WriteDerivationAttempt {
-        run: NewDerivationRun {
-            derivation_run_id,
-            artifact_id: artifact_id.to_string(),
-            job_id: Some(claimed_job.job_id.clone()),
-            run_type: DerivationRunType::ArtifactReconciliation,
-            pipeline_name: "artifact_reconciliation".to_string(),
-            pipeline_version: "v1".to_string(),
-            provider_name: Some("deterministic".to_string()),
-            model_name: None,
-            prompt_version: None,
-            run_status: DerivationRunStatus::Completed,
-            input_scope_type: InputScopeType::Artifact,
-            input_scope_json,
-            started_at,
-            completed_at: Some(completed_at),
-            error_message: None,
-        },
-        objects,
-    }
 }

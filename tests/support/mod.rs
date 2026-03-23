@@ -95,7 +95,6 @@ pub fn make_test_import_fixture_with_max_attempts(
             object_id: payload_object_id.clone(),
             payload_format: PayloadFormat::ChatGptExportJson,
             mime_type: "application/json".to_string(),
-            copied_bytes: payload_bytes,
             size_bytes: payload_size,
             sha256: payload_sha.clone(),
             stored_object: StoredObject {
