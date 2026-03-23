@@ -3,16 +3,17 @@
 ## Purpose
 
 OpenArchive is a local-first archive and memory layer for AI-era personal
-data. The current slice-one direction is:
+data. The current V1 shape is:
 
 - local startup via Docker Compose
-- Postgres as the default relational backend target
-- filesystem-backed object storage for raw payloads
+- Postgres as the default relational backend
+- filesystem-backed object storage by default
 - MCP as the primary external interface
 - asynchronous enrichment with a database-backed job queue
 
-The current code still contains Oracle-first implementation pieces. Treat the
-docs as the architectural target and the code as an in-progress migration.
+Legacy Oracle-first implementation pieces still exist. Treat current docs and
+code together as the source of truth for shipped behavior, and preserve the
+architectural constraints described below.
 
 ## Repo Priorities
 
@@ -56,8 +57,7 @@ docs as the architectural target and the code as an in-progress migration.
 - Add comments only where they explain a boundary, invariant, or non-obvious
   behavior.
 - Prefer rustdoc on public traits, modules, and types at architecture seams.
-- Do not add comments that only restate the code or mention that docs and code
-  are temporarily out of sync.
+- Do not add comments that only restate the code.
 
 ## Verification
 
@@ -70,8 +70,12 @@ docs as the architectural target and the code as an in-progress migration.
 
 ## Important Files
 
-- [`README.md`](README.md): project pitch and current status
-- [`docs/02-architecture.md`](docs/02-architecture.md): working architecture
+- [`README.md`](README.md): project pitch, quick start, import flow, MCP usage
+- [`docs/architecture.md`](docs/architecture.md): system shape and boundaries
+- [`docs/domain-model.md`](docs/domain-model.md): canonical archive and derived
+  object model
+- [`docs/engineering-rules.md`](docs/engineering-rules.md): implementation
+  constraints and coding rules
 - [`src/bootstrap.rs`](src/bootstrap.rs): provider assembly
 - [`src/config.rs`](src/config.rs): provider-shaped configuration
 - [`src/storage/mod.rs`](src/storage/mod.rs): storage-facing traits and write

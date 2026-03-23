@@ -1,51 +1,149 @@
 # OpenArchive
 
-A local-first archive and memory layer for anything you want to preserve,
-enrich, and reuse. OpenArchive ingests AI conversations, documents, notes,
-markdown, and other source material — enriches them with structured metadata —
-and makes everything searchable and retrievable through a machine-first
-interface.
+OpenArchive is a local-first archive and memory layer for AI-era personal
+data. It ingests exports and transcripts, preserves the raw payloads, builds a
+canonical archive, runs asynchronous enrichment, and exposes the result
+through a machine-first interface.
 
-OpenArchive doesn't just index your source material for search. It reads it,
-extracts what matters — key decisions, preferences, relationships between
-people and ideas, things worth remembering — and links every derived insight
-back to the exact source passage it came from. The archive builds structured
-knowledge over time, not just a pile of searchable text.
+The point is not just to make old chats searchable. The point is to build a
+grounded archive that can accumulate durable knowledge over time: summaries,
+classifications, entities, relationships, memories, evidence links, and
+user- or agent-authored writebacks.
 
-## What It Does
+## What OpenArchive Is
 
-**Import** — bring in AI chat exports, documents, markdown files, notes, or
-any source material worth preserving. OpenArchive normalizes everything into a
-canonical model while keeping the original source verbatim.
+OpenArchive does five things:
 
-**Enrich** — a durable, staged pipeline extracts summaries, classifications,
-memories, entities, and relationships from your archived artifacts. Enrichment
-runs asynchronously and survives restarts.
+- Import source material through source-specific adapters.
+- Preserve raw payload bytes outside the relational database.
+- Normalize source material into a canonical artifact and segment model.
+- Run a durable enrichment pipeline over stored artifacts.
+- Expose retrieval and writeback through MCP, with a small HTTP surface for
+  imports and basic listing.
 
-**Search** — query your archive by title, transcript content, or derived
-metadata. Results carry match context and ranking so downstream consumers know
-what matched and why.
+## Why This Is Not Just RAG
 
-**Retrieve** — pull artifact detail or assembled context packs. A context pack
-is a compact, structured bundle of the most relevant knowledge about an
-artifact — summaries, classifications, memories, relationships, and the
-evidence that supports them — shaped for machine consumption.
+OpenArchive is adjacent to retrieval-augmented generation, but it is not just
+"put embeddings on documents and return chunks."
 
-**MCP** — all retrieval is exposed through local MCP tools (`search_archive`,
-`get_artifact`, `get_context_pack`), so any MCP-aware agent or editor can use
-your archive directly.
+OpenArchive keeps a stronger set of invariants:
+
+- Raw source payloads are preserved for audit and reprocessing.
+- Canonical archive rows are separated from object storage.
+- Derived objects are typed and evidence-backed.
+- Retrieval is shaped around artifacts, context packs, and archive objects,
+  not only chunk similarity.
+- MCP clients can write back memories, entities, and links into the archive.
+- The system is built as an archive and memory substrate, not only as a
+  prompt-prep utility.
+
+## V1 Status
+
+OpenArchive V1 is a working local-first MVP.
+
+What exists today:
+
+- Postgres as the mainline relational backend
+- Local filesystem object storage by default, with S3-compatible storage as an
+  optional provider
+- Import handlers for ChatGPT, Claude, Grok, and Gemini export JSON
+- Durable asynchronous enrichment with extract, retrieve-context, reconcile,
+  and optional embedding jobs
+- Archive retrieval through MCP
+- MCP writeback for memories, entities, links, and object status updates
+- Derived-object search with lexical ranking and optional embedding-backed
+  semantic ranking
+
+What is still missing or intentionally early:
+
+- more import types beyond the current export handlers
+- a polished human-facing UI
+- review, pruning, merge, and correction workflows for bad or stale data
+- stronger ranking and retrieval quality
+- easier first-run setup and product-grade operator ergonomics
 
 ## Quick Start
+
+### Prerequisites
+
+- Docker and Docker Compose
+- Rust and Cargo if you want to run the MCP server locally outside Docker
+
+### 1. Start the local stack
+
+Copy the example environment and start the stack:
 
 ```bash
 cp .env.example .env
 make up
 ```
 
-This starts Postgres and the OpenArchive container. The app runs migrations on
-startup and serves on `http://localhost:3000`.
+The checked-in `.env.example` is set up for a local smoke-test path:
 
-Import a supported export:
+- `OA_RELATIONAL_STORE=postgres`
+- `OA_OBJECT_STORE=local_fs`
+- `OA_INFERENCE_PROVIDER=stub`
+- `OA_INFERENCE_MODE=direct`
+- `OA_EMBEDDING_PROVIDER=disabled`
+
+That path is useful for validating imports, storage, MCP wiring, and the job
+pipeline. It is not intended to represent real enrichment quality.
+
+Sanity-check the running service:
+
+```bash
+curl http://localhost:3000/artifacts
+```
+
+Useful operator commands:
+
+```bash
+make logs
+make down
+```
+
+### 2. Switch to a real inference provider
+
+For real enrichment, edit `.env` and set a hosted provider plus credentials.
+Supported inference providers today:
+
+- `openai`
+- `gemini`
+- `anthropic`
+- `grok`
+- `stub`
+
+Example:
+
+```bash
+OA_INFERENCE_PROVIDER=openai
+OA_INFERENCE_MODE=direct
+OA_OPENAI_API_KEY=...
+```
+
+If you want embedding-backed object search, also configure embeddings:
+
+```bash
+OA_EMBEDDING_PROVIDER=openai
+OA_OPENAI_API_KEY=...
+OA_OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+OA_OPENAI_EMBEDDING_DIMENSIONS=1536
+```
+
+The OpenAI-shaped provider can also target OpenAI-compatible endpoints through
+`OA_OPENAI_BASE_URL`.
+
+## Import Data
+
+Imports happen over HTTP. The current import surface is intentionally small:
+
+- `POST /imports/chatgpt`
+- `POST /imports/claude`
+- `POST /imports/grok`
+- `POST /imports/gemini`
+- `GET /artifacts`
+
+Example import commands:
 
 ```bash
 curl -X POST http://localhost:3000/imports/chatgpt \
@@ -53,104 +151,101 @@ curl -X POST http://localhost:3000/imports/chatgpt \
   -d @path/to/conversations.json
 ```
 
-Other source-specific import routes:
-
 ```bash
-curl -X POST http://localhost:3000/imports/claude  -H "Content-Type: application/json" -d @path/to/claude/conversations.json
-curl -X POST http://localhost:3000/imports/grok    -H "Content-Type: application/json" -d @path/to/prod-grok-backend.json
-curl -X POST http://localhost:3000/imports/gemini  -H "Content-Type: application/json" -d @path/to/MyActivity.json
+curl -X POST http://localhost:3000/imports/claude \
+  -H "Content-Type: application/json" \
+  -d @path/to/claude-export.json
 ```
 
-The enrichment worker picks up imported artifacts automatically. Once
-enrichment completes, search and retrieve through MCP or the HTTP surface.
-
-Other useful commands:
-
 ```bash
-make logs              # tail container logs
-make down              # stop the stack
-make up-ollama         # add local Ollama inference
+curl -X POST http://localhost:3000/imports/grok \
+  -H "Content-Type: application/json" \
+  -d @path/to/prod-grok-backend.json
 ```
 
-## How It Works
+```bash
+curl -X POST http://localhost:3000/imports/gemini \
+  -H "Content-Type: application/json" \
+  -d @path/to/MyActivity.json
+```
+
+Imports persist canonical rows immediately and enqueue enrichment work.
+Enrichment completes asynchronously in the background.
+
+## Use Through MCP
+
+MCP is the primary external interface for day-to-day use.
+
+### Build the MCP server
+
+```bash
+cargo build --bin mcp
+```
+
+This produces a local stdio server at:
 
 ```text
-ingest → normalize → store → preprocess → extract → retrieve-context → reconcile → retrieve
+target/debug/mcp
 ```
 
-1. **Import** accepts a source payload, parses it, copies the raw payload into
-   object storage, writes canonical rows (artifacts, segments, participants),
-   and enqueues enrichment
-2. **Preprocess** inspects the artifact and decides extraction shape — whole,
-   windowed, or topic-threaded
-3. **Extract** runs semantic derivation and persists structured outputs
-4. **Retrieve-context** queries the archive for related prior knowledge using
-   extraction-produced intents
-5. **Reconcile** merges extraction with retrieved context, writes final derived
-   objects with evidence links
-6. **Retrieval services** read the persisted state to serve search, artifact
-   detail, and context-pack assembly
+The MCP binary loads `.env` relative to the project root, so a compiled binary
+under `target/debug/` can usually reuse the repo's `.env` file without extra
+wrapper scripts.
 
-## Architecture
+### Connect Claude Desktop
 
-OpenArchive is synchronous Rust with explicit provider boundaries.
+Add an MCP server entry that points Claude Desktop at the compiled binary:
 
-- **Transport-agnostic core** — application use cases in `src/app/` are
-  shared by MCP, HTTP, and future transports
-- **Provider seams** — relational storage, object storage, and inference each
-  have trait boundaries with swappable implementations
-- **Database-backed job queue** — durable, inspectable with plain SQL, no
-  separate message broker required
-- **Local-first defaults** — Postgres, filesystem object storage, optional
-  Ollama. No cloud accounts needed to run
+```json
+{
+  "mcpServers": {
+    "openarchive": {
+      "command": "/absolute/path/to/open_archive/target/debug/mcp"
+    }
+  }
+}
+```
 
-Current providers:
+After saving the config, restart Claude Desktop. The server will expose the
+OpenArchive tool set over stdio.
 
-| Concern            | Default          | Alternatives                        |
-|--------------------|------------------|-------------------------------------|
-| Relational storage | Postgres         | Oracle (legacy)                     |
-| Object storage     | Local filesystem | S3-compatible (planned)             |
-| Inference          | Gemini, OpenAI, Anthropic, Grok | Ollama via OpenAI-compatible endpoint |
+### MCP Tools
 
-## Project Status
+The current MCP surface includes:
 
-**Working end to end:**
+- `search_archive`: ranked archive search across artifact titles, derived
+  objects, and segment excerpts
+- `get_artifact`: artifact detail plus bounded segment windows
+- `get_context_pack`: compact artifact context pack for downstream agents
+- `search_objects`: derived-object search with optional embedding-backed
+  semantic ranking
+- `list_artifacts`: filtered artifact browsing
+- `get_timeline`: chronological artifact browsing with optional filters
+- `get_related`: one-hop related-object traversal
+- `store_memory`: persist a user- or agent-authored memory
+- `store_entity`: persist a user- or agent-authored entity
+- `link_objects`: create a relationship between derived objects
+- `update_object`: mark an object as superseded or rejected
 
-- ChatGPT, Claude, Grok, and Gemini JSON import with raw payload preservation
-- Four-stage enrichment pipeline (preprocess → extract → retrieve-context → reconcile)
-- Archive search, artifact detail, and context-pack retrieval
-- Local MCP tool surface over all retrieval use cases
+## Core Docs
 
-**In progress:**
+The active documentation set is intentionally small:
 
-- Search ranking quality and full-text search
-- Broader import coverage beyond current chat export handlers (Codex, documents, markdown, plain text)
-- Remote MCP deployment
-- First-run setup flow to replace manual `.env` configuration
-
-## Documentation
-
-| Doc | What it covers |
-|-----|----------------|
-| [Product Overview](docs/01-product-overview.md) | Vision, principles, target users |
-| [Architecture](docs/02-architecture.md) | System shape, providers, execution model |
-| [Roadmap](docs/05-roadmap.md) | Sequencing and exit criteria |
-| [Brain Overview](docs/06-brain-overview.md) | Enrichment pipeline design |
-| [Artifact Model](docs/07-artifact-model.md) | Canonical artifact structure |
-| [Provenance Model](docs/08-provenance-model.md) | Source fidelity and traceability |
-| [Derived Metadata](docs/09-derived-metadata-model.md) | Summaries, memories, classifications |
-| [Context Packs](docs/10-context-pack-model.md) | Working-memory assembly for consumers |
+- [docs/architecture.md](docs/architecture.md)
+- [docs/domain-model.md](docs/domain-model.md)
+- [docs/engineering-rules.md](docs/engineering-rules.md)
+- [docs/roadmap.md](docs/roadmap.md)
 
 ## Contributing
 
-OpenArchive is early-stage and open to contributors. The most interesting
-problems right now:
+The most useful work after V1 is productization rather than proving the basic
+system shape:
 
-- search ranking over heterogeneous content (titles, transcripts, derived metadata)
-- import adapters for more source types (AI tools, documents, notes, markdown)
-- context-pack assembly strategies
-- local and remote deployment ergonomics
+- broader import coverage
+- better retrieval and ranking quality
+- human review and correction workflows
+- better product UX and setup ergonomics
 
-If you want to dig in: the codebase is Rust, the storage boundary is
-trait-based, and `make up` gets a working stack running locally. Start with
-the [Architecture doc](docs/02-architecture.md) for orientation.
+Start with [docs/architecture.md](docs/architecture.md) for system shape and
+[docs/engineering-rules.md](docs/engineering-rules.md) for implementation
+constraints.
