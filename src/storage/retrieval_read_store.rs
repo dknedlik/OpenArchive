@@ -141,6 +141,25 @@ pub trait DerivedObjectSearchStore: Send + Sync {
         query_embedding: &[f32],
         limit: usize,
     ) -> StorageResult<Vec<DerivedObjectSearchResult>>;
+
+    fn get_related_objects(
+        &self,
+        derived_object_id: &str,
+        limit: usize,
+    ) -> StorageResult<Vec<GraphRelatedEntry>>;
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct GraphRelatedEntry {
+    pub derived_object_id: String,
+    pub artifact_id: String,
+    pub derived_object_type: DerivedObjectType,
+    pub title: Option<String>,
+    pub body_text: Option<String>,
+    pub relation_kind: String,
+    pub link_type: Option<String>,
+    pub confidence_score: Option<f64>,
+    pub rationale: Option<String>,
 }
 
 pub trait MvpRetrievalReadStore:

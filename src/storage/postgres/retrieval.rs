@@ -5,8 +5,8 @@ use crate::storage::postgres::embedding::vector_literal;
 use crate::storage::retrieval_read_store::{
     ArchiveSearchCandidate, ArtifactContextDerivedObject, ArtifactContextEvidenceLink,
     ArtifactContextPackMaterial, ArtifactDetailDerivedObject, ArtifactDetailRecord,
-    ArtifactDetailSegment, ArtifactDetailView, DerivedObjectSearchResult, ObjectSearchFilters,
-    RelatedDerivedObject, SearchCandidateKind, SearchFilters,
+    ArtifactDetailSegment, ArtifactDetailView, DerivedObjectSearchResult, GraphRelatedEntry,
+    ObjectSearchFilters, RelatedDerivedObject, SearchCandidateKind, SearchFilters,
 };
 use crate::storage::types::{
     DerivedObjectType, EnrichmentStatus, EvidenceRole, RetrievalIntent, RetrievedContextItem,
@@ -737,9 +737,8 @@ pub fn search_objects_by_embedding(
 
     let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> = Vec::new();
     let mut next_param = 1usize;
+    // Inline the vector literal in SQL — pgvector doesn't support TEXT parameter binding.
     let embedding_literal = vector_literal(query_embedding);
-    params.push(&embedding_literal);
-    next_param += 1;
 
     let object_type_str: String = filters
         .object_type
@@ -781,11 +780,11 @@ pub fn search_objects_by_embedding(
     let sql = format!(
         "SELECT d.derived_object_id, d.artifact_id, d.derived_object_type, d.title, d.body_text,
                 d.candidate_key, d.confidence_score::double precision,
-                GREATEST(0::real, (1 - (e.embedding <=> $1::vector))::real) AS score
+                GREATEST(0::real, (1 - (e.embedding <=> '{embedding_literal}'::vector))::real) AS score
          FROM oa_derived_object_embedding e
          JOIN oa_derived_object d ON d.derived_object_id = e.derived_object_id
          WHERE {}
-         ORDER BY e.embedding <=> $1::vector ASC, d.derived_object_id ASC
+         ORDER BY e.embedding <=> '{embedding_literal}'::vector ASC, d.derived_object_id ASC
          LIMIT ${limit_idx}",
         conditions.join(" AND "),
     );
@@ -878,6 +877,78 @@ pub fn find_related_by_candidate_keys(
                     source,
                 }
             })?,
+        });
+    }
+
+    Ok(results)
+}
+
+pub fn get_related_objects(
+    client: &mut Client,
+    connection_string: &str,
+    derived_object_id: &str,
+    limit: usize,
+) -> StorageResult<Vec<GraphRelatedEntry>> {
+    let limit = i64::try_from(limit).map_err(|_| StorageError::InvalidDerivationWrite {
+        detail: format!("limit {limit} exceeds Postgres BIGINT range"),
+    })?;
+
+    let sql = "
+        SELECT d.derived_object_id, d.artifact_id, d.derived_object_type,
+               d.title, d.body_text,
+               'archive_link'::text AS relation_kind,
+               al.link_type, al.confidence_score::double precision, al.rationale
+        FROM oa_archive_link al
+        JOIN oa_derived_object d
+          ON d.derived_object_id = CASE
+               WHEN al.source_object_id = $1 THEN al.target_object_id
+               ELSE al.source_object_id END
+        WHERE (al.source_object_id = $1 OR al.target_object_id = $1)
+          AND d.object_status = 'active'
+
+        UNION ALL
+
+        SELECT DISTINCT d.derived_object_id, d.artifact_id, d.derived_object_type,
+               d.title, d.body_text,
+               'shared_evidence'::text AS relation_kind,
+               NULL::text, NULL::float8, NULL::text
+        FROM oa_evidence_link el1
+        JOIN oa_evidence_link el2 ON el2.segment_id = el1.segment_id AND el2.derived_object_id != $1
+        JOIN oa_derived_object d ON d.derived_object_id = el2.derived_object_id
+        WHERE el1.derived_object_id = $1
+          AND d.object_status = 'active'
+
+        LIMIT $2
+    ";
+
+    let rows = client
+        .query(sql, &[&derived_object_id, &limit])
+        .map_err(|source| map_pg_err(connection_string, source))?;
+
+    let mut results = Vec::with_capacity(rows.len());
+    let mut seen = std::collections::HashSet::new();
+    for row in rows {
+        let obj_id: String = row.get(0);
+        if !seen.insert(obj_id.clone()) {
+            continue;
+        }
+        let artifact_id: String = row.get(1);
+        let derived_object_type_str: String = row.get(2);
+        results.push(GraphRelatedEntry {
+            derived_object_id: obj_id,
+            artifact_id: artifact_id.clone(),
+            derived_object_type: DerivedObjectType::from_str(&derived_object_type_str).ok_or_else(
+                || StorageError::InvalidDerivedObjectType {
+                    artifact_id: artifact_id.clone(),
+                    value: derived_object_type_str,
+                },
+            )?,
+            title: row.get(3),
+            body_text: row.get(4),
+            relation_kind: row.get(5),
+            link_type: row.get(6),
+            confidence_score: row.get(7),
+            rationale: row.get(8),
         });
     }
 

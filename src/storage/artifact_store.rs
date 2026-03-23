@@ -23,6 +23,20 @@ pub trait ArtifactStore {
 pub trait ArtifactReadStore: Send + Sync {
     fn list_artifacts(&self) -> StorageResult<Vec<crate::storage::types::ArtifactListItem>>;
 
+    fn list_artifacts_filtered(
+        &self,
+        filters: &crate::storage::types::ArtifactListFilters,
+        limit: usize,
+        offset: usize,
+    ) -> StorageResult<Vec<crate::storage::types::ArtifactListItem>>;
+
+    fn get_timeline(
+        &self,
+        filters: &crate::storage::types::TimelineFilters,
+        limit: usize,
+        offset: usize,
+    ) -> StorageResult<Vec<crate::storage::types::TimelineEntry>>;
+
     /// Load the ordered artifact shape the enrichment worker needs.
     fn load_artifact_for_enrichment(
         &self,

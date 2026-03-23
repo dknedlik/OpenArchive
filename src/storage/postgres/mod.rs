@@ -22,7 +22,7 @@ use crate::storage::retrieval_read_store::{
     ArchiveSearchCandidate, ArchiveSearchReadStore, ArtifactContextPackMaterial,
     ArtifactContextPackReadStore, ArtifactDetailReadStore, ArtifactDetailView,
     CrossArtifactReadStore, DerivedObjectSearchResult, DerivedObjectSearchStore,
-    ObjectSearchFilters, RelatedDerivedObject, SearchFilters,
+    GraphRelatedEntry, ObjectSearchFilters, RelatedDerivedObject, SearchFilters,
 };
 use crate::storage::types::{
     ArtifactExtractionResult, ClaimedJob, NewEnrichmentBatch, PersistedEnrichmentBatch,
@@ -73,6 +73,26 @@ impl ArtifactReadStore for PostgresArtifactReadStore {
     fn list_artifacts(&self) -> StorageResult<Vec<crate::storage::types::ArtifactListItem>> {
         let mut client = postgres_db::connect(&self.config)?;
         artifact::list_artifacts(&mut client)
+    }
+
+    fn list_artifacts_filtered(
+        &self,
+        filters: &crate::storage::types::ArtifactListFilters,
+        limit: usize,
+        offset: usize,
+    ) -> StorageResult<Vec<crate::storage::types::ArtifactListItem>> {
+        let mut client = postgres_db::connect(&self.config)?;
+        artifact::list_artifacts_filtered(&mut client, filters, limit, offset)
+    }
+
+    fn get_timeline(
+        &self,
+        filters: &crate::storage::types::TimelineFilters,
+        limit: usize,
+        offset: usize,
+    ) -> StorageResult<Vec<crate::storage::types::TimelineEntry>> {
+        let mut client = postgres_db::connect(&self.config)?;
+        artifact::get_timeline(&mut client, filters, limit, offset)
     }
 
     fn load_artifact_for_enrichment(
@@ -376,6 +396,21 @@ impl DerivedObjectSearchStore for PostgresRetrievalReadStore {
                 self.client.connection_string(),
                 filters,
                 query_embedding,
+                limit,
+            )
+        })
+    }
+
+    fn get_related_objects(
+        &self,
+        derived_object_id: &str,
+        limit: usize,
+    ) -> StorageResult<Vec<GraphRelatedEntry>> {
+        self.client.with_client(|client| {
+            retrieval::get_related_objects(
+                client,
+                self.client.connection_string(),
+                derived_object_id,
                 limit,
             )
         })
@@ -763,6 +798,24 @@ impl crate::storage::writeback_store::WritebackStore for PostgresWritebackStore 
     ) -> StorageResult<()> {
         self.client.with_client(|client| {
             writeback::store_archive_link(client, self.client.connection_string(), link)
+        })
+    }
+
+    fn update_object_status(
+        &self,
+        update: &crate::storage::writeback_store::UpdateObjectStatus,
+    ) -> StorageResult<()> {
+        self.client.with_client(|client| {
+            writeback::update_object_status(client, self.client.connection_string(), update)
+        })
+    }
+
+    fn store_agent_entity(
+        &self,
+        entity: &crate::storage::writeback_store::NewAgentEntity,
+    ) -> StorageResult<()> {
+        self.client.with_client(|client| {
+            writeback::store_agent_entity(client, self.client.connection_string(), entity)
         })
     }
 }

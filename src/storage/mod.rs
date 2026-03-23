@@ -59,27 +59,31 @@ pub use retrieval_read_store::{
     ArtifactContextEvidenceLink, ArtifactContextPackMaterial, ArtifactContextPackReadStore,
     ArtifactDetailDerivedObject, ArtifactDetailReadStore, ArtifactDetailRecord,
     ArtifactDetailSegment, ArtifactDetailView, CrossArtifactReadStore, DerivedObjectSearchResult,
-    DerivedObjectSearchStore, MvpRetrievalReadStore, ObjectSearchFilters, RelatedDerivedObject,
-    SearchCandidateKind, SearchFilters,
+    DerivedObjectSearchStore, GraphRelatedEntry, MvpRetrievalReadStore, ObjectSearchFilters,
+    RelatedDerivedObject, SearchCandidateKind, SearchFilters,
 };
 pub use segment_store::SegmentStore;
 pub use types::{
     ArtifactClass, ArtifactExtractPayload, ArtifactExtractionResult, ArtifactIngestResult,
-    ArtifactListItem, ArtifactReconcilePayload, ArtifactRetrieveContextPayload, ArtifactStatus,
-    CandidateEntity, CandidateRelationship, ClaimedJob, ClassificationObjectJson,
-    ConversationWindowRef, DerivationRunStatus, DerivationRunType, DerivedObjectEmbeddingItem,
-    DerivedObjectEmbeddingPayload, DerivedObjectPayload, DerivedObjectType, EnrichmentStatus,
-    EnrichmentTier, EvidenceRole, ExtractedClassification, ExtractedMemory, ImportStatus,
-    InputScopeType, JobStatus, JobType, LoadedArtifactForEnrichment, LoadedArtifactRecord,
-    LoadedParticipant, LoadedSegment, MemoryObjectJson, NewArtifact, NewDerivationRun,
-    NewDerivedObject, NewDerivedObjectEmbedding, NewEnrichmentBatch, NewEnrichmentJob,
-    NewEvidenceLink, NewImport, NewImportObjectRef, NewParticipant, NewSegment, ObjectStatus,
-    OriginKind, PayloadFormat, PersistedEnrichmentBatch, ReconciliationDecision,
-    ReconciliationDecisionKind, RelationshipObjectJson, RetrievalIntent, RetrievalResultSet,
-    RetrievedContextItem, RetryOutcome, ScopeType, SegmentSpanRef, SegmentType, SourceType,
-    SummaryObjectJson, SupportStrength, TopicThreadRef,
+    ArtifactListFilters, ArtifactListItem, ArtifactReconcilePayload,
+    ArtifactRetrieveContextPayload, ArtifactStatus, CandidateEntity, CandidateRelationship,
+    ClaimedJob, ClassificationObjectJson, ConversationWindowRef, DerivationRunStatus,
+    DerivationRunType, DerivedObjectEmbeddingItem, DerivedObjectEmbeddingPayload,
+    DerivedObjectPayload, DerivedObjectType, EnrichmentStatus, EnrichmentTier, EntityObjectJson,
+    EvidenceRole, ExtractedClassification, ExtractedMemory, ImportStatus, InputScopeType,
+    JobStatus, JobType, LoadedArtifactForEnrichment, LoadedArtifactRecord, LoadedParticipant,
+    LoadedSegment, MemoryObjectJson, NewArtifact, NewDerivationRun, NewDerivedObject,
+    NewDerivedObjectEmbedding, NewEnrichmentBatch, NewEnrichmentJob, NewEvidenceLink, NewImport,
+    NewImportObjectRef, NewParticipant, NewSegment, ObjectStatus, OriginKind, PayloadFormat,
+    PersistedEnrichmentBatch, ReconciliationDecision, ReconciliationDecisionKind,
+    RelationshipObjectJson, RetrievalIntent, RetrievalResultSet, RetrievedContextItem,
+    RetryOutcome, ScopeType, SegmentSpanRef, SegmentType, SourceType, SummaryObjectJson,
+    SupportStrength, TimelineEntry, TimelineFilters, TopicThreadRef,
 };
-pub use writeback_store::{NewAgentMemory, NewArchiveLink, WritebackStore};
+pub use writeback_store::{
+    NewAgentEntity, NewAgentEvidenceLink, NewAgentMemory, NewArchiveLink, UpdateObjectStatus,
+    WritebackStore,
+};
 
 use crate::error::StorageResult;
 

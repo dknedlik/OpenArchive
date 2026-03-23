@@ -5,6 +5,21 @@ use open_archive::config::AppConfig;
 fn main() -> Result<(), anyhow::Error> {
     eprintln!("[open-archive-mcp] process starting");
 
+    // Load .env file relative to the binary location (not cwd), so that
+    // spawned processes (e.g. from Claude Desktop) find the project .env
+    // regardless of their working directory.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(project_dir) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+            let env_path = project_dir.join(".env");
+            if env_path.exists() {
+                eprintln!("[open-archive-mcp] loading .env from {}", env_path.display());
+                let _ = dotenvy::from_path(&env_path);
+            }
+        }
+    }
+    // Fallback: try cwd-relative .env as well.
+    let _ = dotenvy::dotenv();
+
     let config = AppConfig::from_env().context("failed to load application configuration")?;
     eprintln!("[open-archive-mcp] configuration loaded");
 

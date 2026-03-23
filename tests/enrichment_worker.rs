@@ -664,6 +664,24 @@ impl ArtifactReadStore for FixedReadStore {
         Ok(Vec::new())
     }
 
+    fn list_artifacts_filtered(
+        &self,
+        _filters: &open_archive::storage::ArtifactListFilters,
+        _limit: usize,
+        _offset: usize,
+    ) -> StorageResult<Vec<ArtifactListItem>> {
+        Ok(Vec::new())
+    }
+
+    fn get_timeline(
+        &self,
+        _filters: &open_archive::storage::TimelineFilters,
+        _limit: usize,
+        _offset: usize,
+    ) -> StorageResult<Vec<open_archive::storage::TimelineEntry>> {
+        Ok(Vec::new())
+    }
+
     fn load_artifact_for_enrichment(
         &self,
         _artifact_id: &str,

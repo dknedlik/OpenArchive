@@ -209,6 +209,24 @@ mod tests {
             Ok(self.artifacts.clone())
         }
 
+        fn list_artifacts_filtered(
+            &self,
+            _filters: &crate::storage::ArtifactListFilters,
+            _limit: usize,
+            _offset: usize,
+        ) -> crate::error::StorageResult<Vec<ArtifactListItem>> {
+            Ok(self.artifacts.clone())
+        }
+
+        fn get_timeline(
+            &self,
+            _filters: &crate::storage::TimelineFilters,
+            _limit: usize,
+            _offset: usize,
+        ) -> crate::error::StorageResult<Vec<crate::storage::TimelineEntry>> {
+            Ok(Vec::new())
+        }
+
         fn load_artifact_for_enrichment(
             &self,
             _artifact_id: &str,

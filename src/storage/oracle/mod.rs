@@ -70,6 +70,24 @@ impl ArtifactReadStore for OracleArtifactReadStore {
         artifact::list_artifacts(&conn)
     }
 
+    fn list_artifacts_filtered(
+        &self,
+        _filters: &crate::storage::types::ArtifactListFilters,
+        _limit: usize,
+        _offset: usize,
+    ) -> StorageResult<Vec<crate::storage::types::ArtifactListItem>> {
+        unimplemented!("list_artifacts_filtered not yet implemented for Oracle")
+    }
+
+    fn get_timeline(
+        &self,
+        _filters: &crate::storage::types::TimelineFilters,
+        _limit: usize,
+        _offset: usize,
+    ) -> StorageResult<Vec<crate::storage::types::TimelineEntry>> {
+        unimplemented!("get_timeline not yet implemented for Oracle")
+    }
+
     fn load_artifact_for_enrichment(
         &self,
         artifact_id: &str,

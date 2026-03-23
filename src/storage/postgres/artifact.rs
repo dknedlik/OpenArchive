@@ -135,6 +135,114 @@ pub fn list_artifacts(client: &mut postgres::Client) -> StorageResult<Vec<Artifa
     Ok(artifacts)
 }
 
+pub fn list_artifacts_filtered(
+    client: &mut postgres::Client,
+    filters: &crate::storage::types::ArtifactListFilters,
+    limit: usize,
+    offset: usize,
+) -> StorageResult<Vec<ArtifactListItem>> {
+    let source_type: Option<&str> = filters.source_type.as_ref().map(|v| v.as_str());
+    let enrichment_status: Option<&str> = filters.enrichment_status.as_ref().map(|v| v.as_str());
+    let captured_after: Option<&str> = filters.captured_after.as_deref();
+    let captured_before: Option<&str> = filters.captured_before.as_deref();
+    let limit_i64 = limit as i64;
+    let offset_i64 = offset as i64;
+
+    let rows = client
+        .query(
+            "SELECT artifact_id, title, source_type, \
+                    to_char(created_at_source, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), \
+                    to_char(captured_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), \
+                    enrichment_status \
+             FROM oa_artifact \
+             WHERE ($1::text IS NULL OR source_type = $1) \
+               AND ($2::text IS NULL OR enrichment_status = $2) \
+               AND ($3::text IS NULL OR captured_at >= $3::timestamptz) \
+               AND ($4::text IS NULL OR captured_at < $4::timestamptz) \
+             ORDER BY captured_at DESC, artifact_id ASC \
+             LIMIT $5 OFFSET $6",
+            &[
+                &source_type,
+                &enrichment_status,
+                &captured_after,
+                &captured_before,
+                &limit_i64,
+                &offset_i64,
+            ],
+        )
+        .map_err(map_pg_storage_err)?;
+
+    let mut artifacts = Vec::new();
+    for row in rows {
+        let artifact_id: String = row.get(0);
+        let enrichment_status_str: String = row.get(5);
+        let artifact_id_clone = artifact_id.clone();
+        artifacts.push(ArtifactListItem {
+            artifact_id,
+            title: row.get(1),
+            source_type: row.get(2),
+            created_at_source: row.get(3),
+            captured_at: row.get(4),
+            enrichment_status: EnrichmentStatus::from_str(&enrichment_status_str).ok_or_else(
+                || crate::error::StorageError::InvalidEnrichmentStatus {
+                    artifact_id: artifact_id_clone,
+                    value: enrichment_status_str.clone(),
+                },
+            )?,
+        });
+    }
+
+    Ok(artifacts)
+}
+
+pub fn get_timeline(
+    client: &mut postgres::Client,
+    filters: &crate::storage::types::TimelineFilters,
+    limit: usize,
+    offset: usize,
+) -> StorageResult<Vec<crate::storage::types::TimelineEntry>> {
+    let keyword: Option<&str> = filters.keyword.as_deref();
+    let source_type: Option<&str> = filters.source_type.as_ref().map(|v| v.as_str());
+    let limit_i64 = limit as i64;
+    let offset_i64 = offset as i64;
+
+    let rows = client
+        .query(
+            "SELECT a.artifact_id, a.title, a.source_type, \
+                    to_char(a.created_at_source, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), \
+                    to_char(a.captured_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), \
+                    a.enrichment_status, \
+                    (SELECT d.body_text FROM oa_derived_object d \
+                     WHERE d.artifact_id = a.artifact_id \
+                       AND d.derived_object_type = 'summary' \
+                       AND d.object_status = 'active' \
+                     ORDER BY d.confidence_score DESC NULLS LAST \
+                     LIMIT 1) \
+             FROM oa_artifact a \
+             WHERE ($1::text IS NULL OR a.title_tsv @@ plainto_tsquery('english', $1)) \
+               AND ($2::text IS NULL OR a.source_type = $2) \
+             ORDER BY COALESCE(a.created_at_source, a.captured_at) ASC \
+             LIMIT $3 OFFSET $4",
+            &[&keyword, &source_type, &limit_i64, &offset_i64],
+        )
+        .map_err(map_pg_storage_err)?;
+
+    let mut entries = Vec::new();
+    for row in rows {
+        entries.push(crate::storage::types::TimelineEntry {
+            artifact_id: row.get(0),
+            title: row.get(1),
+            source_type: row.get(2),
+            created_at_source: row.get(3),
+            captured_at: row.get(4),
+            enrichment_status: row.get(5),
+            summary_snippet: row.get(6),
+        });
+    }
+
+    Ok(entries)
+}
+
 pub fn load_artifact_for_enrichment(
     client: &mut postgres::Client,
     artifact_id: &str,

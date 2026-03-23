@@ -7,6 +7,7 @@ edition = "2021"
 anyhow = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["alloc", "serde", "std"] }
 clap = { version = "4.5", features = ["derive"] }
+dotenvy = "0.15"
 env_logger = "0.11"
 log = "0.4"
 oracle = { version = "0.6", features = ["chrono"] }

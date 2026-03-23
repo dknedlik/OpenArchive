@@ -4,7 +4,7 @@ use crate::embedding::EmbeddingProvider;
 use crate::error::{OpenArchiveError, Result};
 use crate::storage::{
     ArchiveSearchReadStore, DerivedObjectSearchResult, DerivedObjectSearchStore, DerivedObjectType,
-    ObjectSearchFilters, SearchCandidateKind, SearchFilters,
+    GraphRelatedEntry, ObjectSearchFilters, SearchCandidateKind, SearchFilters,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -149,6 +149,17 @@ impl ObjectSearchService {
 
         Ok(merge_results(lexical, semantic, limit))
     }
+
+    pub fn get_related(
+        &self,
+        derived_object_id: &str,
+        limit: usize,
+    ) -> Result<Vec<GraphRelatedEntry>> {
+        let limit = limit.clamp(1, 50);
+        self.store
+            .get_related_objects(derived_object_id, limit)
+            .map_err(OpenArchiveError::from)
+    }
 }
 
 fn truncate_results(
@@ -164,12 +175,23 @@ fn merge_results(
     semantic: Vec<DerivedObjectSearchResult>,
     limit: usize,
 ) -> Vec<DerivedObjectSearchResult> {
+    use std::collections::HashSet;
     use std::collections::HashMap;
+
+    // Collect semantic IDs so we can tell which lexical results had no semantic match.
+    let semantic_ids: HashSet<&str> = semantic.iter().map(|r| r.derived_object_id.as_str()).collect();
 
     let mut merged: HashMap<String, DerivedObjectSearchResult> = HashMap::new();
 
     for mut result in lexical {
-        result.score = Some(normalize_lexical_score(result.score.unwrap_or_default()));
+        let norm = normalize_lexical_score(result.score.unwrap_or_default());
+        // Lexical-only results (no semantic match) get weighted down — their semantic
+        // component is effectively 0, so they score `norm * 0.4` rather than the full value.
+        result.score = if semantic_ids.contains(result.derived_object_id.as_str()) {
+            Some(norm) // will be blended when we process the semantic list
+        } else {
+            Some(norm * 0.4)
+        };
         merged.insert(result.derived_object_id.clone(), result);
     }
 
@@ -177,6 +199,7 @@ fn merge_results(
         let semantic_score = result.score.unwrap_or_default().clamp(0.0, 1.0);
         match merged.get_mut(&result.derived_object_id) {
             Some(existing) => {
+                // This entry appeared in both lists — blend the scores.
                 let lexical_score = existing.score.unwrap_or_default();
                 existing.score = Some((lexical_score * 0.4) + (semantic_score * 0.6));
                 if existing.title.is_none() {
@@ -187,6 +210,8 @@ fn merge_results(
                 }
             }
             None => {
+                // Semantic-only: keep full semantic score — penalizing these
+                // would bury the best semantic matches below lexical noise.
                 result.score = Some(semantic_score);
                 merged.insert(result.derived_object_id.clone(), result);
             }
@@ -219,6 +244,7 @@ mod tests {
     use super::*;
     use crate::embedding::StubEmbeddingProvider;
     use crate::error::StorageResult;
+    use crate::storage::retrieval_read_store::GraphRelatedEntry;
     use crate::storage::{
         ArchiveSearchCandidate, ArchiveSearchReadStore, DerivedObjectSearchStore,
     };
@@ -274,6 +300,14 @@ mod tests {
                 confidence_score: None,
                 score: Some(0.75),
             }])
+        }
+
+        fn get_related_objects(
+            &self,
+            _derived_object_id: &str,
+            _limit: usize,
+        ) -> StorageResult<Vec<GraphRelatedEntry>> {
+            Ok(Vec::new())
         }
     }
 

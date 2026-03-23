@@ -350,6 +350,7 @@ pub enum DerivedObjectType {
     Classification,
     Memory,
     Relationship,
+    Entity,
 }
 
 impl DerivedObjectType {
@@ -359,6 +360,7 @@ impl DerivedObjectType {
             DerivedObjectType::Classification => "classification",
             DerivedObjectType::Memory => "memory",
             DerivedObjectType::Relationship => "relationship",
+            DerivedObjectType::Entity => "entity",
         }
     }
 
@@ -368,6 +370,7 @@ impl DerivedObjectType {
             DerivedObjectType::Summary
                 | DerivedObjectType::Memory
                 | DerivedObjectType::Relationship
+                | DerivedObjectType::Entity
         )
     }
 
@@ -377,6 +380,7 @@ impl DerivedObjectType {
             "classification" => Some(Self::Classification),
             "memory" => Some(Self::Memory),
             "relationship" => Some(Self::Relationship),
+            "entity" => Some(Self::Entity),
             _ => None,
         }
     }
@@ -407,6 +411,7 @@ impl OriginKind {
 pub enum ObjectStatus {
     Active,
     Superseded,
+    Rejected,
     Failed,
 }
 
@@ -415,7 +420,18 @@ impl ObjectStatus {
         match self {
             ObjectStatus::Active => "active",
             ObjectStatus::Superseded => "superseded",
+            ObjectStatus::Rejected => "rejected",
             ObjectStatus::Failed => "failed",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(Self::Active),
+            "superseded" => Some(Self::Superseded),
+            "rejected" => Some(Self::Rejected),
+            "failed" => Some(Self::Failed),
+            _ => None,
         }
     }
 }
@@ -705,6 +721,13 @@ pub struct RelationshipObjectJson {
     pub contradicts_relationship_object_id: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct EntityObjectJson {
+    pub entity_type: String,
+    #[serde(default)]
+    pub candidate_key: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DerivedObjectPayload {
     Summary {
@@ -727,6 +750,11 @@ pub enum DerivedObjectPayload {
         body_text: String,
         object_json: RelationshipObjectJson,
     },
+    Entity {
+        title: Option<String>,
+        body_text: String,
+        object_json: EntityObjectJson,
+    },
 }
 
 impl DerivedObjectPayload {
@@ -736,6 +764,7 @@ impl DerivedObjectPayload {
             DerivedObjectPayload::Classification { .. } => DerivedObjectType::Classification,
             DerivedObjectPayload::Memory { .. } => DerivedObjectType::Memory,
             DerivedObjectPayload::Relationship { .. } => DerivedObjectType::Relationship,
+            DerivedObjectPayload::Entity { .. } => DerivedObjectType::Entity,
         }
     }
 
@@ -744,7 +773,8 @@ impl DerivedObjectPayload {
             DerivedObjectPayload::Summary { title, .. }
             | DerivedObjectPayload::Classification { title, .. }
             | DerivedObjectPayload::Memory { title, .. }
-            | DerivedObjectPayload::Relationship { title, .. } => title.as_deref(),
+            | DerivedObjectPayload::Relationship { title, .. }
+            | DerivedObjectPayload::Entity { title, .. } => title.as_deref(),
         }
     }
 
@@ -752,7 +782,8 @@ impl DerivedObjectPayload {
         match self {
             DerivedObjectPayload::Summary { body_text, .. }
             | DerivedObjectPayload::Memory { body_text, .. }
-            | DerivedObjectPayload::Relationship { body_text, .. } => Some(body_text.as_str()),
+            | DerivedObjectPayload::Relationship { body_text, .. }
+            | DerivedObjectPayload::Entity { body_text, .. } => Some(body_text.as_str()),
             DerivedObjectPayload::Classification { body_text, .. } => body_text.as_deref(),
         }
     }
@@ -770,6 +801,9 @@ impl DerivedObjectPayload {
             }
             DerivedObjectPayload::Relationship { object_json, .. } => {
                 Some(serde_json::to_string(object_json).expect("relationship payload serializable"))
+            }
+            DerivedObjectPayload::Entity { object_json, .. } => {
+                Some(serde_json::to_string(object_json).expect("entity payload serializable"))
             }
         }
     }
@@ -1059,6 +1093,31 @@ pub struct ArtifactListItem {
     pub created_at_source: Option<String>,
     pub captured_at: String,
     pub enrichment_status: EnrichmentStatus,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ArtifactListFilters {
+    pub source_type: Option<SourceType>,
+    pub enrichment_status: Option<EnrichmentStatus>,
+    pub captured_after: Option<String>,
+    pub captured_before: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct TimelineEntry {
+    pub artifact_id: String,
+    pub title: Option<String>,
+    pub source_type: String,
+    pub created_at_source: Option<String>,
+    pub captured_at: String,
+    pub enrichment_status: String,
+    pub summary_snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TimelineFilters {
+    pub keyword: Option<String>,
+    pub source_type: Option<SourceType>,
 }
 
 /// Worker-facing artifact metadata assembled from canonical relational rows.

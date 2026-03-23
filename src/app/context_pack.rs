@@ -99,6 +99,7 @@ pub struct ContextPackResponse {
     pub classifications: Vec<ContextDerivedEntry>,
     pub memories: Vec<ContextDerivedEntry>,
     pub relationships: Vec<ContextDerivedEntry>,
+    pub entities: Vec<ContextDerivedEntry>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub related_objects: Vec<RelatedObjectEntry>,
     pub segment_count: usize,
@@ -182,6 +183,7 @@ impl ContextPackService {
         let mut classifications = Vec::new();
         let mut memories = Vec::new();
         let mut relationships = Vec::new();
+        let mut entities = Vec::new();
 
         for obj in &material.derived_objects {
             let evidence = evidence_by_object
@@ -203,6 +205,7 @@ impl ContextPackService {
                 DerivedObjectType::Classification => classifications.push(entry),
                 DerivedObjectType::Memory => memories.push(entry),
                 DerivedObjectType::Relationship => relationships.push(entry),
+                DerivedObjectType::Entity => entities.push(entry),
             }
         }
 
@@ -213,7 +216,8 @@ impl ContextPackService {
         let has_any_objects = has_summary
             || !classifications.is_empty()
             || !memories.is_empty()
-            || !relationships.is_empty();
+            || !relationships.is_empty()
+            || !entities.is_empty();
 
         let readiness = compute_readiness(
             material.artifact.enrichment_status,
@@ -293,6 +297,7 @@ impl ContextPackService {
             classifications,
             memories,
             relationships,
+            entities,
             related_objects,
             segment_count: total_segments,
             provenance,
