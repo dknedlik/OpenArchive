@@ -7,18 +7,20 @@ use log::{error, info, warn};
 use rand::random;
 use serde_json::{json, Value};
 
-use crate::app::{artifact_detail, context_pack, search, ArchiveApplication};
+use crate::app::{artifact_detail, context_pack, review, search, ArchiveApplication};
+use crate::storage::types::{ArtifactListFilters, TimelineFilters};
 use crate::storage::writeback_store::{
     NewAgentEntity, NewAgentEvidenceLink, NewAgentMemory, NewArchiveLink, UpdateObjectStatus,
 };
-use crate::storage::types::{ArtifactListFilters, TimelineFilters};
 use crate::storage::{
     DerivedObjectType, EnrichmentStatus, EvidenceRole, ObjectSearchFilters, ObjectStatus,
-    SearchFilters, SourceType, SupportStrength,
+    ReviewDecisionStatus, ReviewItemKind, ReviewQueueFilters, SearchFilters, SourceType,
+    SupportStrength,
 };
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const SEARCH_LIMIT_CAP: usize = 50;
+const REVIEW_LIMIT_CAP: usize = 100;
 
 pub fn run_stdio_server(app: Arc<ArchiveApplication>) -> io::Result<()> {
     let stdin = io::stdin();
@@ -101,9 +103,7 @@ fn handle_request(app: &ArchiveApplication, request: JsonRpcRequest) -> Option<V
         "notifications/initialized" => return None,
         "ping" => jsonrpc_result(id, json!({})),
         "tools/list" => jsonrpc_result(id, json!({ "tools": tool_definitions() })),
-        "tools/call" => {
-            jsonrpc_result(id, call_tool(app, request.params.unwrap_or(Value::Null)))
-        }
+        "tools/call" => jsonrpc_result(id, call_tool(app, request.params.unwrap_or(Value::Null))),
         _ => jsonrpc_error(id, -32601, format!("method not found: {}", request.method)),
     };
 
@@ -121,7 +121,7 @@ fn tool_definitions() -> Vec<Value> {
                     "query": { "type": "string", "description": "Search query text." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": SEARCH_LIMIT_CAP, "description": "Optional result limit; values above 50 are silently clamped." },
                     "object_type": { "type": "string", "enum": ["summary", "classification", "memory", "relationship", "entity"], "description": "Filter results to a specific derived object type." },
-                    "source_type": { "type": "string", "enum": ["chatgpt_export", "claude_export", "grok_export", "gemini_takeout"], "description": "Filter results to artifacts from a specific source." }
+                    "source_type": { "type": "string", "enum": ["chatgpt_export", "claude_export", "grok_export", "gemini_takeout", "text_file", "markdown_file"], "description": "Filter results to artifacts from a specific source." }
                 },
                 "required": ["query"],
                 "additionalProperties": false
@@ -222,7 +222,7 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "source_type": { "type": "string", "enum": ["chatgpt_export", "claude_export", "grok_export", "gemini_takeout"], "description": "Filter to artifacts from a specific source." },
+                    "source_type": { "type": "string", "enum": ["chatgpt_export", "claude_export", "grok_export", "gemini_takeout", "text_file", "markdown_file"], "description": "Filter to artifacts from a specific source." },
                     "enrichment_status": { "type": "string", "enum": ["pending", "running", "completed", "partial", "failed"], "description": "Filter by enrichment status." },
                     "captured_after": { "type": "string", "description": "ISO 8601 lower bound on capture time (inclusive)." },
                     "captured_before": { "type": "string", "description": "ISO 8601 upper bound on capture time (exclusive)." },
@@ -297,10 +297,73 @@ fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "keyword": { "type": "string", "description": "Optional keyword to filter artifacts by title (full-text search)." },
-                    "source_type": { "type": "string", "enum": ["chatgpt_export", "claude_export", "grok_export", "gemini_takeout"], "description": "Filter to artifacts from a specific source." },
+                    "source_type": { "type": "string", "enum": ["chatgpt_export", "claude_export", "grok_export", "gemini_takeout", "text_file", "markdown_file"], "description": "Filter to artifacts from a specific source." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Max results, default 20." },
                     "offset": { "type": "integer", "minimum": 0, "description": "Pagination offset, default 0." }
                 },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "list_review_items",
+            "description": "List review queue items that need human or agent attention. Returns prioritized review items with suggested actions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kinds": {
+                        "type": "array",
+                        "description": "Optional review item kind filter.",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "artifact_needs_attention",
+                                "artifact_missing_summary",
+                                "object_low_confidence",
+                                "candidate_key_collision",
+                                "object_missing_evidence"
+                            ]
+                        }
+                    },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": REVIEW_LIMIT_CAP, "description": "Max results, default 20." }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "record_review_decision",
+            "description": "Record a review note, dismissal, or resolution for a review queue item.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": [
+                            "artifact_needs_attention",
+                            "artifact_missing_summary",
+                            "object_low_confidence",
+                            "candidate_key_collision",
+                            "object_missing_evidence"
+                        ]
+                    },
+                    "artifact_id": { "type": "string", "description": "Artifact identifier for the review item." },
+                    "derived_object_id": { "type": "string", "description": "Required for object-level review items." },
+                    "decision_status": { "type": "string", "enum": ["noted", "dismissed", "resolved"] },
+                    "note_text": { "type": "string", "description": "Optional note text. Required when decision_status is noted." },
+                    "decided_by": { "type": "string", "description": "Optional reviewer identifier." }
+                },
+                "required": ["kind", "artifact_id", "decision_status"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "retry_artifact_enrichment",
+            "description": "Queue a fresh enrichment extract job for an artifact when review determines the artifact should be retried.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "artifact_id": { "type": "string", "description": "Artifact identifier." }
+                },
+                "required": ["artifact_id"],
                 "additionalProperties": false
             }
         }),
@@ -318,11 +381,18 @@ fn call_tool(app: &ArchiveApplication, params: Value) -> Value {
         "search_archive" => {
             let service = match app.search.as_ref() {
                 Some(s) => s,
-                None => return tool_error("service_unavailable", "search_archive is unavailable for the configured provider"),
+                None => {
+                    return tool_error(
+                        "service_unavailable",
+                        "search_archive is unavailable for the configured provider",
+                    )
+                }
             };
             let query = match arguments.get("query").and_then(Value::as_str) {
                 Some(q) => q,
-                None => return tool_error("invalid_params", "search_archive requires a string query"),
+                None => {
+                    return tool_error("invalid_params", "search_archive requires a string query")
+                }
             };
             let limit = arguments
                 .get("limit")
@@ -330,38 +400,64 @@ fn call_tool(app: &ArchiveApplication, params: Value) -> Value {
                 .map(|value| value as usize)
                 .unwrap_or(10)
                 .clamp(1, SEARCH_LIMIT_CAP);
-            let object_type = match parse_optional_enum(&arguments, "object_type", DerivedObjectType::from_str) {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
-            let source_type = match parse_optional_enum(&arguments, "source_type", SourceType::from_str) {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
+            let object_type =
+                match parse_optional_enum(&arguments, "object_type", DerivedObjectType::from_str) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+            let source_type =
+                match parse_optional_enum(&arguments, "source_type", SourceType::from_str) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
             match service.search(search::ArchiveSearchRequest {
                 query_text: query.to_string(),
                 limit,
-                filters: SearchFilters { object_type, source_type },
+                filters: SearchFilters {
+                    object_type,
+                    source_type,
+                },
             }) {
-                Ok(response) => tool_success(serde_json::to_value(response).expect("search response serializable")),
+                Ok(response) => tool_success(
+                    serde_json::to_value(response).expect("search response serializable"),
+                ),
                 Err(err) => tool_error("internal_error", &err.to_string()),
             }
         }
         "get_artifact" => {
             let service = match app.artifact_detail.as_ref() {
                 Some(s) => s,
-                None => return tool_error("service_unavailable", "get_artifact is unavailable for the configured provider"),
+                None => {
+                    return tool_error(
+                        "service_unavailable",
+                        "get_artifact is unavailable for the configured provider",
+                    )
+                }
             };
             let artifact_id = match arguments.get("artifact_id").and_then(Value::as_str) {
                 Some(id) => id,
                 None => return tool_error("invalid_params", "get_artifact requires artifact_id"),
             };
-            let include_segments = arguments.get("include_segments").and_then(Value::as_bool).unwrap_or(false);
-            let segment_offset = arguments.get("segment_offset").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(0);
-            let segment_limit = arguments.get("segment_limit").and_then(Value::as_u64).map(|v| v as usize)
-                .unwrap_or(artifact_detail::DEFAULT_SEGMENT_LIMIT).clamp(1, artifact_detail::DEFAULT_SEGMENT_LIMIT);
+            let include_segments = arguments
+                .get("include_segments")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let segment_offset = arguments
+                .get("segment_offset")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+                .unwrap_or(0);
+            let segment_limit = arguments
+                .get("segment_limit")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+                .unwrap_or(artifact_detail::DEFAULT_SEGMENT_LIMIT)
+                .clamp(1, artifact_detail::DEFAULT_SEGMENT_LIMIT);
             match service.get(artifact_detail::ArtifactDetailRequest {
-                artifact_id: artifact_id.to_string(), include_segments, segment_offset, segment_limit,
+                artifact_id: artifact_id.to_string(),
+                include_segments,
+                segment_offset,
+                segment_limit,
             }) {
                 Ok(Some(response)) => tool_success(json!({ "found": true, "artifact": response })),
                 Ok(None) => tool_success(json!({ "found": false })),
@@ -371,14 +467,25 @@ fn call_tool(app: &ArchiveApplication, params: Value) -> Value {
         "get_context_pack" => {
             let service = match app.context_pack.as_ref() {
                 Some(s) => s,
-                None => return tool_error("service_unavailable", "get_context_pack is unavailable for the configured provider"),
+                None => {
+                    return tool_error(
+                        "service_unavailable",
+                        "get_context_pack is unavailable for the configured provider",
+                    )
+                }
             };
             let artifact_id = match arguments.get("artifact_id").and_then(Value::as_str) {
                 Some(id) => id,
-                None => return tool_error("invalid_params", "get_context_pack requires artifact_id"),
+                None => {
+                    return tool_error("invalid_params", "get_context_pack requires artifact_id")
+                }
             };
-            match service.assemble(context_pack::ContextPackRequest { artifact_id: artifact_id.to_string() }) {
-                Ok(Some(response)) => tool_success(json!({ "found": true, "context_pack": response })),
+            match service.assemble(context_pack::ContextPackRequest {
+                artifact_id: artifact_id.to_string(),
+            }) {
+                Ok(Some(response)) => {
+                    tool_success(json!({ "found": true, "context_pack": response }))
+                }
                 Ok(None) => tool_success(json!({ "found": false })),
                 Err(err) => tool_error("internal_error", &err.to_string()),
             }
@@ -386,17 +493,42 @@ fn call_tool(app: &ArchiveApplication, params: Value) -> Value {
         "search_objects" => {
             let service = match app.object_search.as_ref() {
                 Some(s) => s,
-                None => return tool_error("service_unavailable", "search_objects is unavailable for the configured provider"),
+                None => {
+                    return tool_error(
+                        "service_unavailable",
+                        "search_objects is unavailable for the configured provider",
+                    )
+                }
             };
-            let query = arguments.get("query").and_then(Value::as_str).map(|s| s.to_string());
-            let object_type = match parse_optional_enum(&arguments, "object_type", DerivedObjectType::from_str) {
-                Ok(v) => v,
-                Err(e) => return e,
+            let query = arguments
+                .get("query")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let object_type =
+                match parse_optional_enum(&arguments, "object_type", DerivedObjectType::from_str) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+            let candidate_key = arguments
+                .get("candidate_key")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let artifact_id = arguments
+                .get("artifact_id")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let limit = arguments
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+                .unwrap_or(20)
+                .clamp(1, SEARCH_LIMIT_CAP);
+            let filters = ObjectSearchFilters {
+                query,
+                object_type,
+                candidate_key,
+                artifact_id,
             };
-            let candidate_key = arguments.get("candidate_key").and_then(Value::as_str).map(|s| s.to_string());
-            let artifact_id = arguments.get("artifact_id").and_then(Value::as_str).map(|s| s.to_string());
-            let limit = arguments.get("limit").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(20).clamp(1, SEARCH_LIMIT_CAP);
-            let filters = ObjectSearchFilters { query, object_type, candidate_key, artifact_id };
             match service.search(filters, limit) {
                 Ok(results) => {
                     let results_json: Vec<Value> = results.into_iter().map(|r| json!({
@@ -415,7 +547,12 @@ fn call_tool(app: &ArchiveApplication, params: Value) -> Value {
         "store_memory" => {
             let service = match app.writeback.as_ref() {
                 Some(s) => s,
-                None => return tool_error("service_unavailable", "store_memory is unavailable for the configured provider"),
+                None => {
+                    return tool_error(
+                        "service_unavailable",
+                        "store_memory is unavailable for the configured provider",
+                    )
+                }
             };
             let title = match arguments.get("title").and_then(Value::as_str) {
                 Some(v) => v,
@@ -433,8 +570,14 @@ fn call_tool(app: &ArchiveApplication, params: Value) -> Value {
                 Some(v) => v.to_string(),
                 None => return tool_error("invalid_params", "store_memory requires artifact_id"),
             };
-            let candidate_key = arguments.get("candidate_key").and_then(Value::as_str).map(|s| s.to_string());
-            let contributed_by = arguments.get("contributed_by").and_then(Value::as_str).map(|s| s.to_string());
+            let candidate_key = arguments
+                .get("candidate_key")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let contributed_by = arguments
+                .get("contributed_by")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
             let evidence = match parse_evidence_array(&arguments) {
                 Ok(v) => v,
                 Err(e) => return e,
@@ -459,25 +602,43 @@ fn call_tool(app: &ArchiveApplication, params: Value) -> Value {
         "link_objects" => {
             let service = match app.writeback.as_ref() {
                 Some(s) => s,
-                None => return tool_error("service_unavailable", "link_objects is unavailable for the configured provider"),
+                None => {
+                    return tool_error(
+                        "service_unavailable",
+                        "link_objects is unavailable for the configured provider",
+                    )
+                }
             };
             let source_object_id = match arguments.get("source_object_id").and_then(Value::as_str) {
                 Some(v) => v,
-                None => return tool_error("invalid_params", "link_objects requires source_object_id"),
+                None => {
+                    return tool_error("invalid_params", "link_objects requires source_object_id")
+                }
             };
             let target_object_id = match arguments.get("target_object_id").and_then(Value::as_str) {
                 Some(v) => v,
-                None => return tool_error("invalid_params", "link_objects requires target_object_id"),
+                None => {
+                    return tool_error("invalid_params", "link_objects requires target_object_id")
+                }
             };
             let link_type = match arguments.get("link_type").and_then(Value::as_str) {
                 Some(v) => v,
                 None => return tool_error("invalid_params", "link_objects requires link_type"),
             };
             if source_object_id == target_object_id {
-                return tool_error("invalid_params", "link_objects: source and target must be different objects");
+                return tool_error(
+                    "invalid_params",
+                    "link_objects: source and target must be different objects",
+                );
             }
-            let rationale = arguments.get("rationale").and_then(Value::as_str).map(|s| s.to_string());
-            let contributed_by = arguments.get("contributed_by").and_then(Value::as_str).map(|s| s.to_string());
+            let rationale = arguments
+                .get("rationale")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let contributed_by = arguments
+                .get("contributed_by")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
             let archive_link_id = new_id("alink");
             let link = NewArchiveLink {
                 archive_link_id: archive_link_id.clone(),
@@ -494,46 +655,207 @@ fn call_tool(app: &ArchiveApplication, params: Value) -> Value {
             }
         }
         "list_artifacts" => {
-            let source_type = match parse_optional_enum(&arguments, "source_type", SourceType::from_str) {
+            let source_type =
+                match parse_optional_enum(&arguments, "source_type", SourceType::from_str) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+            let enrichment_status = match parse_optional_enum(
+                &arguments,
+                "enrichment_status",
+                EnrichmentStatus::from_str,
+            ) {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-            let enrichment_status = match parse_optional_enum(&arguments, "enrichment_status", EnrichmentStatus::from_str) {
-                Ok(v) => v,
-                Err(e) => return e,
+            let captured_after = arguments
+                .get("captured_after")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let captured_before = arguments
+                .get("captured_before")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let limit = arguments
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+                .unwrap_or(20);
+            let offset = arguments
+                .get("offset")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+                .unwrap_or(0);
+            let filters = ArtifactListFilters {
+                source_type,
+                enrichment_status,
+                captured_after,
+                captured_before,
             };
-            let captured_after = arguments.get("captured_after").and_then(Value::as_str).map(|s| s.to_string());
-            let captured_before = arguments.get("captured_before").and_then(Value::as_str).map(|s| s.to_string());
-            let limit = arguments.get("limit").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(20);
-            let offset = arguments.get("offset").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(0);
-            let filters = ArtifactListFilters { source_type, enrichment_status, captured_after, captured_before };
-            match app.artifacts.list_artifacts_filtered(&filters, limit, offset) {
+            match app
+                .artifacts
+                .list_artifacts_filtered(&filters, limit, offset)
+            {
                 Ok(artifacts) => {
-                    let artifacts_json = serde_json::to_value(&artifacts).expect("artifact list serializable");
+                    let artifacts_json =
+                        serde_json::to_value(&artifacts).expect("artifact list serializable");
                     tool_success(json!({ "artifacts": artifacts_json }))
                 }
                 Err(err) => tool_storage_error(&err),
             }
         }
+        "list_review_items" => {
+            let service = match app.review.as_ref() {
+                Some(s) => s,
+                None => {
+                    return tool_error(
+                        "service_unavailable",
+                        "list_review_items is unavailable for the configured provider",
+                    )
+                }
+            };
+            let kinds = match parse_enum_array(&arguments, "kinds", ReviewItemKind::from_str) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let limit = arguments
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+                .unwrap_or(20)
+                .clamp(1, REVIEW_LIMIT_CAP);
+            match service.list(review::ReviewQueueRequest {
+                filters: ReviewQueueFilters { kinds },
+                limit,
+            }) {
+                Ok(response) => {
+                    tool_success(serde_json::to_value(response).expect("review queue serializable"))
+                }
+                Err(err) => tool_app_error(&err),
+            }
+        }
+        "record_review_decision" => {
+            let service = match app.review.as_ref() {
+                Some(s) => s,
+                None => {
+                    return tool_error(
+                        "service_unavailable",
+                        "record_review_decision is unavailable for the configured provider",
+                    )
+                }
+            };
+            let kind = match parse_required_enum(&arguments, "kind", ReviewItemKind::from_str) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let artifact_id = match arguments.get("artifact_id").and_then(Value::as_str) {
+                Some(v) => v.to_string(),
+                None => {
+                    return tool_error(
+                        "invalid_params",
+                        "record_review_decision requires artifact_id",
+                    )
+                }
+            };
+            let derived_object_id = arguments
+                .get("derived_object_id")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let decision_status = match parse_required_enum(
+                &arguments,
+                "decision_status",
+                ReviewDecisionStatus::from_str,
+            ) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let note_text = arguments
+                .get("note_text")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let decided_by = arguments
+                .get("decided_by")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+
+            match service.record_decision(review::ReviewDecisionRequest {
+                kind,
+                artifact_id,
+                derived_object_id,
+                decision_status,
+                note_text,
+                decided_by,
+            }) {
+                Ok(review_decision_id) => tool_success(
+                    json!({ "recorded": true, "review_decision_id": review_decision_id }),
+                ),
+                Err(err) => tool_app_error(&err),
+            }
+        }
+        "retry_artifact_enrichment" => {
+            let service = match app.review.as_ref() {
+                Some(s) => s,
+                None => {
+                    return tool_error(
+                        "service_unavailable",
+                        "retry_artifact_enrichment is unavailable for the configured provider",
+                    )
+                }
+            };
+            let artifact_id = match arguments.get("artifact_id").and_then(Value::as_str) {
+                Some(v) => v.to_string(),
+                None => {
+                    return tool_error(
+                        "invalid_params",
+                        "retry_artifact_enrichment requires artifact_id",
+                    )
+                }
+            };
+            match service.retry_artifact(review::RetryArtifactRequest { artifact_id }) {
+                Ok(job_id) => tool_success(json!({ "queued": true, "job_id": job_id })),
+                Err(err) => tool_app_error(&err),
+            }
+        }
         "update_object" => {
             let service = match app.writeback.as_ref() {
                 Some(s) => s,
-                None => return tool_error("service_unavailable", "update_object is unavailable for the configured provider"),
+                None => {
+                    return tool_error(
+                        "service_unavailable",
+                        "update_object is unavailable for the configured provider",
+                    )
+                }
             };
-            let derived_object_id = match arguments.get("derived_object_id").and_then(Value::as_str) {
+            let derived_object_id = match arguments.get("derived_object_id").and_then(Value::as_str)
+            {
                 Some(v) => v.to_string(),
-                None => return tool_error("invalid_params", "update_object requires derived_object_id"),
+                None => {
+                    return tool_error("invalid_params", "update_object requires derived_object_id")
+                }
             };
             let new_status = match arguments.get("new_status").and_then(Value::as_str) {
                 Some(v) => match ObjectStatus::from_str(v) {
                     Some(s) => s,
-                    None => return tool_error("invalid_params", &format!("invalid new_status: {v}")),
+                    None => {
+                        return tool_error("invalid_params", &format!("invalid new_status: {v}"))
+                    }
                 },
                 None => return tool_error("invalid_params", "update_object requires new_status"),
             };
-            let replacement_object_id = arguments.get("replacement_object_id").and_then(Value::as_str).map(|s| s.to_string());
-            let contributed_by = arguments.get("contributed_by").and_then(Value::as_str).map(|s| s.to_string());
-            let update = UpdateObjectStatus { derived_object_id, new_status, replacement_object_id, contributed_by };
+            let replacement_object_id = arguments
+                .get("replacement_object_id")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let contributed_by = arguments
+                .get("contributed_by")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let update = UpdateObjectStatus {
+                derived_object_id,
+                new_status,
+                replacement_object_id,
+                contributed_by,
+            };
             match service.update_object_status(update) {
                 Ok(()) => tool_success(json!({ "updated": true })),
                 Err(err) => tool_error("internal_error", &err.to_string()),
@@ -542,7 +864,12 @@ fn call_tool(app: &ArchiveApplication, params: Value) -> Value {
         "store_entity" => {
             let service = match app.writeback.as_ref() {
                 Some(s) => s,
-                None => return tool_error("service_unavailable", "store_entity is unavailable for the configured provider"),
+                None => {
+                    return tool_error(
+                        "service_unavailable",
+                        "store_entity is unavailable for the configured provider",
+                    )
+                }
             };
             let title = match arguments.get("title").and_then(Value::as_str) {
                 Some(v) => v,
@@ -560,8 +887,14 @@ fn call_tool(app: &ArchiveApplication, params: Value) -> Value {
                 Some(v) => v.to_string(),
                 None => return tool_error("invalid_params", "store_entity requires artifact_id"),
             };
-            let candidate_key = arguments.get("candidate_key").and_then(Value::as_str).map(|s| s.to_string());
-            let contributed_by = arguments.get("contributed_by").and_then(Value::as_str).map(|s| s.to_string());
+            let candidate_key = arguments
+                .get("candidate_key")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let contributed_by = arguments
+                .get("contributed_by")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
             let evidence = match parse_evidence_array(&arguments) {
                 Ok(v) => v,
                 Err(e) => return e,
@@ -585,33 +918,62 @@ fn call_tool(app: &ArchiveApplication, params: Value) -> Value {
         "get_related" => {
             let service = match app.object_search.as_ref() {
                 Some(s) => s,
-                None => return tool_error("service_unavailable", "get_related is unavailable for the configured provider"),
+                None => {
+                    return tool_error(
+                        "service_unavailable",
+                        "get_related is unavailable for the configured provider",
+                    )
+                }
             };
-            let derived_object_id = match arguments.get("derived_object_id").and_then(Value::as_str) {
+            let derived_object_id = match arguments.get("derived_object_id").and_then(Value::as_str)
+            {
                 Some(v) => v,
-                None => return tool_error("invalid_params", "get_related requires derived_object_id"),
+                None => {
+                    return tool_error("invalid_params", "get_related requires derived_object_id")
+                }
             };
-            let limit = arguments.get("limit").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(20);
+            let limit = arguments
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+                .unwrap_or(20);
             match service.get_related(derived_object_id, limit) {
                 Ok(entries) => {
-                    let entries_json = serde_json::to_value(&entries).expect("related entries serializable");
+                    let entries_json =
+                        serde_json::to_value(&entries).expect("related entries serializable");
                     tool_success(json!({ "related": entries_json }))
                 }
                 Err(err) => tool_error("internal_error", &err.to_string()),
             }
         }
         "get_timeline" => {
-            let source_type = match parse_optional_enum(&arguments, "source_type", SourceType::from_str) {
-                Ok(v) => v,
-                Err(e) => return e,
+            let source_type =
+                match parse_optional_enum(&arguments, "source_type", SourceType::from_str) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+            let keyword = arguments
+                .get("keyword")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let limit = arguments
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+                .unwrap_or(20);
+            let offset = arguments
+                .get("offset")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+                .unwrap_or(0);
+            let filters = TimelineFilters {
+                keyword,
+                source_type,
             };
-            let keyword = arguments.get("keyword").and_then(Value::as_str).map(|s| s.to_string());
-            let limit = arguments.get("limit").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(20);
-            let offset = arguments.get("offset").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(0);
-            let filters = TimelineFilters { keyword, source_type };
             match app.artifacts.get_timeline(&filters, limit, offset) {
                 Ok(entries) => {
-                    let entries_json = serde_json::to_value(&entries).expect("timeline serializable");
+                    let entries_json =
+                        serde_json::to_value(&entries).expect("timeline serializable");
                     tool_success(json!({ "entries": entries_json }))
                 }
                 Err(err) => tool_storage_error(&err),
@@ -629,13 +991,62 @@ fn parse_optional_enum<T>(
     match arguments.get(field).and_then(Value::as_str) {
         Some(value) => match parser(value) {
             Some(parsed) => Ok(Some(parsed)),
-            None => Err(tool_error("invalid_params", &format!("invalid {field}: {value}"))),
+            None => Err(tool_error(
+                "invalid_params",
+                &format!("invalid {field}: {value}"),
+            )),
         },
         None => Ok(None),
     }
 }
 
-fn parse_evidence_array(arguments: &Value) -> std::result::Result<Vec<NewAgentEvidenceLink>, Value> {
+fn parse_required_enum<T>(
+    arguments: &Value,
+    field: &str,
+    parser: fn(&str) -> Option<T>,
+) -> std::result::Result<T, Value> {
+    match arguments.get(field).and_then(Value::as_str) {
+        Some(value) => parser(value)
+            .ok_or_else(|| tool_error("invalid_params", &format!("invalid {field}: {value}"))),
+        None => Err(tool_error(
+            "invalid_params",
+            &format!("tools/call arguments.{field} is required"),
+        )),
+    }
+}
+
+fn parse_enum_array<T>(
+    arguments: &Value,
+    field: &str,
+    parser: fn(&str) -> Option<T>,
+) -> std::result::Result<Option<Vec<T>>, Value> {
+    let Some(items) = arguments.get(field) else {
+        return Ok(None);
+    };
+    let array = items.as_array().ok_or_else(|| {
+        tool_error(
+            "invalid_params",
+            &format!("tools/call arguments.{field} must be an array"),
+        )
+    })?;
+    let mut parsed = Vec::with_capacity(array.len());
+    for item in array {
+        let raw = item.as_str().ok_or_else(|| {
+            tool_error(
+                "invalid_params",
+                &format!("tools/call arguments.{field} items must be strings"),
+            )
+        })?;
+        let value = parser(raw)
+            .ok_or_else(|| tool_error("invalid_params", &format!("invalid {field}: {raw}")))?;
+        parsed.push(value);
+    }
+    Ok(Some(parsed))
+}
+
+fn parse_evidence_array(
+    arguments: &Value,
+) -> std::result::Result<Vec<NewAgentEvidenceLink>, Value> {
     let items = match arguments.get("evidence").and_then(Value::as_array) {
         Some(arr) => arr,
         None => return Ok(vec![]),
@@ -644,15 +1055,38 @@ fn parse_evidence_array(arguments: &Value) -> std::result::Result<Vec<NewAgentEv
     for item in items {
         let segment_id = match item.get("segment_id").and_then(Value::as_str) {
             Some(v) => v.to_string(),
-            None => return Err(tool_error("invalid_params", "evidence item requires segment_id")),
+            None => {
+                return Err(tool_error(
+                    "invalid_params",
+                    "evidence item requires segment_id",
+                ))
+            }
         };
-        let evidence_role = match item.get("evidence_role").and_then(Value::as_str).and_then(EvidenceRole::from_str) {
+        let evidence_role = match item
+            .get("evidence_role")
+            .and_then(Value::as_str)
+            .and_then(EvidenceRole::from_str)
+        {
             Some(v) => v,
-            None => return Err(tool_error("invalid_params", "evidence item requires valid evidence_role")),
+            None => {
+                return Err(tool_error(
+                    "invalid_params",
+                    "evidence item requires valid evidence_role",
+                ))
+            }
         };
-        let support_strength = match item.get("support_strength").and_then(Value::as_str).and_then(SupportStrength::from_str) {
+        let support_strength = match item
+            .get("support_strength")
+            .and_then(Value::as_str)
+            .and_then(SupportStrength::from_str)
+        {
             Some(v) => v,
-            None => return Err(tool_error("invalid_params", "evidence item requires valid support_strength")),
+            None => {
+                return Err(tool_error(
+                    "invalid_params",
+                    "evidence item requires valid support_strength",
+                ))
+            }
         };
         evidence.push(NewAgentEvidenceLink {
             evidence_link_id: new_id("elink"),
@@ -713,7 +1147,19 @@ fn tool_storage_error(err: &crate::error::StorageError) -> Value {
     }
 }
 
+fn tool_app_error(err: &crate::error::OpenArchiveError) -> Value {
+    match err {
+        crate::error::OpenArchiveError::Invariant(detail) => tool_error("invalid_params", detail),
+        crate::error::OpenArchiveError::Storage(storage_err) => tool_storage_error(storage_err),
+        _ => tool_error("internal_error", &err.to_string()),
+    }
+}
+
 fn summarize_tool_result(value: &Value) -> String {
+    if let Some(items) = value.get("items").and_then(Value::as_array) {
+        return format!("{} review items", items.len());
+    }
+
     if let Some(results) = value.get("results").and_then(Value::as_array) {
         return format!("{} results", results.len());
     }
@@ -730,12 +1176,36 @@ fn summarize_tool_result(value: &Value) -> String {
         return "stored".to_string();
     }
 
-    if value.get("linked").and_then(Value::as_bool).unwrap_or(false) {
+    if value
+        .get("linked")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         return "linked".to_string();
     }
 
-    if value.get("updated").and_then(Value::as_bool).unwrap_or(false) {
+    if value
+        .get("updated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         return "updated".to_string();
+    }
+
+    if value
+        .get("recorded")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return "recorded".to_string();
+    }
+
+    if value
+        .get("queued")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return "queued".to_string();
     }
 
     if let Some(artifacts) = value.get("artifacts").and_then(Value::as_array) {
@@ -941,6 +1411,7 @@ mod tests {
     use crate::app::artifact_detail::ArtifactDetailService;
     use crate::app::context_pack::ContextPackService;
     use crate::app::retrieval::ArchiveRetrievalService;
+    use crate::app::review::ReviewService;
     use crate::app::search::ArchiveSearchService;
     use crate::storage::{ArchiveRetrievalStore, RetrievalIntent, RetrievedContextItem};
 
@@ -957,6 +1428,7 @@ mod tests {
         let writeback = Some(crate::app::writeback::WritebackService::new(Arc::new(
             MockWritebackStore,
         )));
+        let review = Some(ReviewService::new(Arc::new(MockReviewStore)));
         ArchiveApplication {
             artifacts: crate::app::artifacts::ArtifactQueryService::new(Arc::new(
                 MockArtifactReadStore,
@@ -970,6 +1442,7 @@ mod tests {
             artifact_detail,
             context_pack,
             object_search,
+            review,
             writeback,
         }
     }
@@ -1148,6 +1621,73 @@ mod tests {
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn list_review_items_returns_items_with_compact_summary_text() {
+        let response = call_tool(
+            &test_app(),
+            json!({
+                "name": "list_review_items",
+                "arguments": {
+                    "kinds": ["artifact_needs_attention"],
+                    "limit": 10
+                }
+            }),
+        );
+
+        assert_eq!(response["isError"], Value::Bool(false));
+        assert_eq!(response["content"][0]["text"], "1 review items");
+        assert_eq!(
+            response["structuredContent"]["items"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn record_review_decision_surfaces_invalid_params() {
+        let response = call_tool(
+            &test_app(),
+            json!({
+                "name": "record_review_decision",
+                "arguments": {
+                    "kind": "artifact_needs_attention",
+                    "artifact_id": "artifact-1",
+                    "decision_status": "noted"
+                }
+            }),
+        );
+
+        assert_eq!(response["isError"], Value::Bool(true));
+        assert_eq!(
+            response["structuredContent"]["message"],
+            "review notes require non-empty note_text"
+        );
+    }
+
+    #[test]
+    fn retry_artifact_enrichment_returns_job_id() {
+        let response = call_tool(
+            &test_app(),
+            json!({
+                "name": "retry_artifact_enrichment",
+                "arguments": {
+                    "artifact_id": "artifact-9"
+                }
+            }),
+        );
+
+        assert_eq!(response["isError"], Value::Bool(false));
+        assert_eq!(
+            response["structuredContent"],
+            json!({
+                "queued": true,
+                "job_id": "job-retry-artifact-9"
+            })
+        );
+        assert_eq!(response["content"][0]["text"], "queued");
     }
 
     struct MockSearchReadStore;
@@ -1379,6 +1919,67 @@ mod tests {
             _entity: &crate::storage::NewAgentEntity,
         ) -> crate::error::StorageResult<()> {
             Ok(())
+        }
+    }
+
+    struct MockReviewStore;
+    impl crate::storage::ReviewReadStore for MockReviewStore {
+        fn list_review_candidates(
+            &self,
+            filters: &crate::storage::ReviewQueueFilters,
+            limit: usize,
+        ) -> crate::error::StorageResult<Vec<crate::storage::ReviewCandidate>> {
+            let mut items = vec![
+                crate::storage::ReviewCandidate {
+                    kind: crate::storage::ReviewItemKind::ArtifactNeedsAttention,
+                    artifact_id: "artifact-1".to_string(),
+                    derived_object_id: None,
+                    source_type: crate::storage::SourceType::ChatGptExport,
+                    captured_at: "2026-03-24T10:00:00.000000+00".to_string(),
+                    title: Some("Artifact failed".to_string()),
+                    body_text: None,
+                    derived_object_type: None,
+                    candidate_key: None,
+                    enrichment_status: Some(crate::storage::EnrichmentStatus::Failed),
+                    confidence_score: None,
+                    related_artifact_count: None,
+                },
+                crate::storage::ReviewCandidate {
+                    kind: crate::storage::ReviewItemKind::ObjectLowConfidence,
+                    artifact_id: "artifact-2".to_string(),
+                    derived_object_id: Some("obj-2".to_string()),
+                    source_type: crate::storage::SourceType::ClaudeExport,
+                    captured_at: "2026-03-23T10:00:00.000000+00".to_string(),
+                    title: Some("Weak object".to_string()),
+                    body_text: Some("body".to_string()),
+                    derived_object_type: Some(crate::storage::DerivedObjectType::Memory),
+                    candidate_key: None,
+                    enrichment_status: None,
+                    confidence_score: Some(0.42),
+                    related_artifact_count: None,
+                },
+            ];
+            if let Some(kinds) = filters.kinds.as_ref() {
+                items.retain(|item| kinds.contains(&item.kind));
+            }
+            items.truncate(limit);
+            Ok(items)
+        }
+    }
+
+    impl crate::storage::ReviewWriteStore for MockReviewStore {
+        fn record_review_decision(
+            &self,
+            _decision: &crate::storage::NewReviewDecision,
+        ) -> crate::error::StorageResult<()> {
+            Ok(())
+        }
+
+        fn retry_artifact_enrichment(
+            &self,
+            artifact_id: &str,
+        ) -> crate::error::StorageResult<String> {
+            Ok(format!("job-retry-{artifact_id}"))
         }
     }
 }

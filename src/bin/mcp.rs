@@ -11,10 +11,17 @@ fn main() -> Result<(), anyhow::Error> {
     // spawned processes (e.g. from Claude Desktop) find the project .env
     // regardless of their working directory.
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(project_dir) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+        if let Some(project_dir) = exe
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+        {
             let env_path = project_dir.join(".env");
             if env_path.exists() {
-                info!("[open-archive-mcp] loading .env from {}", env_path.display());
+                info!(
+                    "[open-archive-mcp] loading .env from {}",
+                    env_path.display()
+                );
                 let _ = dotenvy::from_path(&env_path);
             }
         }

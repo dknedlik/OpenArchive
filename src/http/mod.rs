@@ -1,20 +1,29 @@
 use std::io::Cursor;
 
 use tiny_http::{Header, Method, Request, Response, StatusCode};
+use url::form_urlencoded;
 
-use crate::app::ArchiveApplication;
+use crate::app::{review, ArchiveApplication};
 use crate::error::OpenArchiveError;
 
 pub fn build_response(
     request: &mut Request,
     app: &ArchiveApplication,
 ) -> Response<Cursor<Vec<u8>>> {
-    match (request.method(), request.url()) {
+    let (path, query) = split_request_url(request.url());
+    match (request.method(), path) {
         (&Method::Post, "/imports/chatgpt") => handle_post_imports_chatgpt(request, app),
         (&Method::Post, "/imports/claude") => handle_post_imports_claude(request, app),
         (&Method::Post, "/imports/grok") => handle_post_imports_grok(request, app),
         (&Method::Post, "/imports/gemini") => handle_post_imports_gemini(request, app),
+        (&Method::Post, "/imports/text") => handle_post_imports_text(request, app),
+        (&Method::Post, "/imports/markdown") => handle_post_imports_markdown(request, app),
         (&Method::Get, "/artifacts") => handle_get_artifacts(app),
+        (&Method::Get, "/review/items") => handle_get_review_items(query, app),
+        (&Method::Post, "/review/decisions") => handle_post_review_decisions(request, app),
+        (&Method::Post, "/review/artifacts/retry") => {
+            handle_post_review_artifact_retry(request, app)
+        }
         _ => text_response(StatusCode(404), "not found"),
     }
 }
@@ -75,6 +84,34 @@ fn handle_post_imports_gemini(
     }
 }
 
+fn handle_post_imports_text(
+    request: &mut Request,
+    app: &ArchiveApplication,
+) -> Response<Cursor<Vec<u8>>> {
+    match read_request_body(request).and_then(|body| {
+        app.imports
+            .import_text_payload(&body)
+            .map_err(HttpError::from)
+    }) {
+        Ok(result) => json_response(StatusCode(200), &result),
+        Err(err) => err.into_response(),
+    }
+}
+
+fn handle_post_imports_markdown(
+    request: &mut Request,
+    app: &ArchiveApplication,
+) -> Response<Cursor<Vec<u8>>> {
+    match read_request_body(request).and_then(|body| {
+        app.imports
+            .import_markdown_payload(&body)
+            .map_err(HttpError::from)
+    }) {
+        Ok(result) => json_response(StatusCode(200), &result),
+        Err(err) => err.into_response(),
+    }
+}
+
 fn handle_get_artifacts(app: &ArchiveApplication) -> Response<Cursor<Vec<u8>>> {
     #[derive(serde::Serialize)]
     struct ArtifactListResponse {
@@ -83,6 +120,96 @@ fn handle_get_artifacts(app: &ArchiveApplication) -> Response<Cursor<Vec<u8>>> {
 
     match app.artifacts.list_artifacts().map_err(HttpError::from) {
         Ok(artifacts) => json_response(StatusCode(200), &ArtifactListResponse { artifacts }),
+        Err(err) => err.into_response(),
+    }
+}
+
+fn handle_get_review_items(
+    query: Option<&str>,
+    app: &ArchiveApplication,
+) -> Response<Cursor<Vec<u8>>> {
+    let service = match app.review.as_ref() {
+        Some(service) => service,
+        None => {
+            return HttpError::ServiceUnavailable(
+                "review service is unavailable for the configured provider".to_string(),
+            )
+            .into_response()
+        }
+    };
+
+    match parse_review_query_request(query)
+        .and_then(|request| service.list(request).map_err(review_http_error))
+    {
+        Ok(response) => json_response(StatusCode(200), &response),
+        Err(err) => err.into_response(),
+    }
+}
+
+fn handle_post_review_decisions(
+    request: &mut Request,
+    app: &ArchiveApplication,
+) -> Response<Cursor<Vec<u8>>> {
+    #[derive(serde::Serialize)]
+    struct RecordDecisionResponse {
+        recorded: bool,
+        review_decision_id: String,
+    }
+
+    let service = match app.review.as_ref() {
+        Some(service) => service,
+        None => {
+            return HttpError::ServiceUnavailable(
+                "review service is unavailable for the configured provider".to_string(),
+            )
+            .into_response()
+        }
+    };
+
+    match read_json_body::<review::ReviewDecisionRequest>(request)
+        .and_then(|decision| service.record_decision(decision).map_err(review_http_error))
+    {
+        Ok(review_decision_id) => json_response(
+            StatusCode(200),
+            &RecordDecisionResponse {
+                recorded: true,
+                review_decision_id,
+            },
+        ),
+        Err(err) => err.into_response(),
+    }
+}
+
+fn handle_post_review_artifact_retry(
+    request: &mut Request,
+    app: &ArchiveApplication,
+) -> Response<Cursor<Vec<u8>>> {
+    #[derive(serde::Serialize)]
+    struct RetryArtifactResponse {
+        queued: bool,
+        job_id: String,
+    }
+
+    let service = match app.review.as_ref() {
+        Some(service) => service,
+        None => {
+            return HttpError::ServiceUnavailable(
+                "review service is unavailable for the configured provider".to_string(),
+            )
+            .into_response()
+        }
+    };
+
+    match read_json_body::<review::RetryArtifactRequest>(request)
+        .and_then(|retry| service.retry_artifact(retry).map_err(review_http_error))
+    {
+        Ok(job_id) => json_response(
+            StatusCode(200),
+            &RetryArtifactResponse {
+                queued: true,
+                job_id,
+            },
+        ),
         Err(err) => err.into_response(),
     }
 }
@@ -99,6 +226,75 @@ fn read_request_body(request: &mut Request) -> Result<Vec<u8>, HttpError> {
     }
 
     Ok(bytes)
+}
+
+fn read_json_body<T>(request: &mut Request) -> Result<T, HttpError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let bytes = read_request_body(request)?;
+    serde_json::from_slice(&bytes)
+        .map_err(|err| HttpError::BadRequest(format!("invalid JSON body: {err}")))
+}
+
+fn split_request_url(url: &str) -> (&str, Option<&str>) {
+    match url.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (url, None),
+    }
+}
+
+fn parse_review_query_request(
+    query: Option<&str>,
+) -> Result<review::ReviewQueueRequest, HttpError> {
+    let mut limit = 20_usize;
+    let mut kinds = Vec::new();
+
+    if let Some(query) = query {
+        for (key, value) in form_urlencoded::parse(query.as_bytes()) {
+            match key.as_ref() {
+                "limit" => {
+                    limit = value
+                        .parse::<usize>()
+                        .map_err(|_| HttpError::BadRequest(format!("invalid limit: {value}")))?;
+                }
+                "kind" => kinds.push(parse_review_kind(value.as_ref())?),
+                "kinds" => {
+                    for raw_kind in value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        kinds.push(parse_review_kind(raw_kind)?);
+                    }
+                }
+                unknown => {
+                    return Err(HttpError::BadRequest(format!(
+                        "unknown review query parameter: {unknown}"
+                    )))
+                }
+            }
+        }
+    }
+
+    Ok(review::ReviewQueueRequest {
+        filters: crate::storage::ReviewQueueFilters {
+            kinds: if kinds.is_empty() { None } else { Some(kinds) },
+        },
+        limit,
+    })
+}
+
+fn parse_review_kind(value: &str) -> Result<crate::storage::ReviewItemKind, HttpError> {
+    crate::storage::ReviewItemKind::from_str(value)
+        .ok_or_else(|| HttpError::BadRequest(format!("invalid review kind: {value}")))
+}
+
+fn review_http_error(err: OpenArchiveError) -> HttpError {
+    match err {
+        OpenArchiveError::Invariant(detail) => HttpError::BadRequest(detail),
+        other => HttpError::from(other),
+    }
 }
 
 fn json_response<T>(status: StatusCode, value: &T) -> Response<Cursor<Vec<u8>>>
@@ -125,6 +321,7 @@ enum HttpError {
     EmptyBody,
     ReadBody(std::io::Error),
     BadRequest(String),
+    ServiceUnavailable(String),
     Internal(String),
 }
 
@@ -138,7 +335,7 @@ impl From<OpenArchiveError> for HttpError {
             OpenArchiveError::ObjectStore(err) => Self::Internal(err.to_string()),
             OpenArchiveError::Storage(err) => Self::Internal(err.to_string()),
             OpenArchiveError::Embedding(err) => Self::Internal(err.to_string()),
-            OpenArchiveError::Invariant(err) => Self::Internal(err),
+            OpenArchiveError::Invariant(err) => Self::BadRequest(err),
         }
     }
 }
@@ -158,6 +355,7 @@ impl HttpError {
                 format!("failed to read request body: {err}"),
             ),
             Self::BadRequest(detail) => text_response(StatusCode(400), detail),
+            Self::ServiceUnavailable(detail) => text_response(StatusCode(503), detail),
             Self::Internal(detail) => text_response(StatusCode(500), detail),
         }
     }
@@ -171,7 +369,8 @@ mod tests {
     use crate::storage::{
         ArchiveRetrievalStore, ArtifactIngestResult, ArtifactListItem, ArtifactReadStore,
         EnrichmentStatus, ImportStatus, ImportWriteResult, ImportWriteStore, ImportedArtifact,
-        RetrievalIntent, RetrievedContextItem, WriteImportSet,
+        NewReviewDecision, RetrievalIntent, RetrievedContextItem, ReviewCandidate, ReviewItemKind,
+        ReviewQueueFilters, ReviewReadStore, ReviewWriteStore, SourceType, WriteImportSet,
     };
     use std::io::Read;
     use std::sync::Arc;
@@ -179,6 +378,7 @@ mod tests {
 
     struct MockStore {
         artifacts: Vec<ArtifactListItem>,
+        review_candidates: Vec<ReviewCandidate>,
     }
 
     impl ImportWriteStore for MockStore {
@@ -277,10 +477,42 @@ mod tests {
         }
     }
 
+    impl ReviewReadStore for MockStore {
+        fn list_review_candidates(
+            &self,
+            filters: &ReviewQueueFilters,
+            limit: usize,
+        ) -> crate::error::StorageResult<Vec<ReviewCandidate>> {
+            let mut items = self.review_candidates.clone();
+            if let Some(kinds) = filters.kinds.as_ref() {
+                items.retain(|item| kinds.contains(&item.kind));
+            }
+            items.truncate(limit);
+            Ok(items)
+        }
+    }
+
+    impl ReviewWriteStore for MockStore {
+        fn record_review_decision(
+            &self,
+            _decision: &NewReviewDecision,
+        ) -> crate::error::StorageResult<()> {
+            Ok(())
+        }
+
+        fn retry_artifact_enrichment(
+            &self,
+            artifact_id: &str,
+        ) -> crate::error::StorageResult<String> {
+            Ok(format!("job-retry-{artifact_id}"))
+        }
+    }
+
     #[test]
     fn post_imports_chatgpt_returns_json_payload() {
         let store = MockStore {
             artifacts: Vec::new(),
+            review_candidates: Vec::new(),
         };
         let mut request = TestRequest::new()
             .with_method(Method::Post)
@@ -297,6 +529,7 @@ mod tests {
     fn post_imports_chatgpt_rejects_malformed_json() {
         let store = MockStore {
             artifacts: Vec::new(),
+            review_candidates: Vec::new(),
         };
         let mut request = TestRequest::new()
             .with_method(Method::Post)
@@ -313,6 +546,7 @@ mod tests {
     fn post_imports_claude_returns_json_payload() {
         let store = MockStore {
             artifacts: Vec::new(),
+            review_candidates: Vec::new(),
         };
         let mut request = TestRequest::new()
             .with_method(Method::Post)
@@ -332,6 +566,7 @@ mod tests {
     fn post_imports_grok_returns_json_payload() {
         let store = MockStore {
             artifacts: Vec::new(),
+            review_candidates: Vec::new(),
         };
         let mut request = TestRequest::new()
             .with_method(Method::Post)
@@ -351,6 +586,7 @@ mod tests {
     fn post_imports_gemini_returns_json_payload() {
         let store = MockStore {
             artifacts: Vec::new(),
+            review_candidates: Vec::new(),
         };
         let mut request = TestRequest::new()
             .with_method(Method::Post)
@@ -367,9 +603,44 @@ mod tests {
     }
 
     #[test]
+    fn post_imports_text_returns_json_payload() {
+        let store = MockStore {
+            artifacts: Vec::new(),
+            review_candidates: Vec::new(),
+        };
+        let mut request = TestRequest::new()
+            .with_method(Method::Post)
+            .with_path("/imports/text")
+            .with_body("First paragraph.\n\nSecond paragraph.")
+            .into();
+
+        let app = test_app(store);
+        let response = build_response(&mut request, app.as_ref());
+        assert_eq!(response.status_code(), StatusCode(200));
+    }
+
+    #[test]
+    fn post_imports_markdown_returns_json_payload() {
+        let store = MockStore {
+            artifacts: Vec::new(),
+            review_candidates: Vec::new(),
+        };
+        let mut request = TestRequest::new()
+            .with_method(Method::Post)
+            .with_path("/imports/markdown")
+            .with_body("# Title\n\nParagraph text.\n\n- one\n- two")
+            .into();
+
+        let app = test_app(store);
+        let response = build_response(&mut request, app.as_ref());
+        assert_eq!(response.status_code(), StatusCode(200));
+    }
+
+    #[test]
     fn unknown_route_returns_404() {
         let store = MockStore {
             artifacts: Vec::new(),
+            review_candidates: Vec::new(),
         };
         let mut request = TestRequest::new().with_path("/missing").into();
         let app = test_app(store);
@@ -381,6 +652,7 @@ mod tests {
     fn get_artifacts_returns_empty_envelope() {
         let store = MockStore {
             artifacts: Vec::new(),
+            review_candidates: Vec::new(),
         };
         let mut request = TestRequest::new()
             .with_method(Method::Get)
@@ -414,6 +686,7 @@ mod tests {
                     enrichment_status: EnrichmentStatus::Pending,
                 },
             ],
+            review_candidates: Vec::new(),
         };
         let mut request = TestRequest::new()
             .with_method(Method::Get)
@@ -445,6 +718,7 @@ mod tests {
         let read_store: Arc<dyn ArtifactReadStore + Send + Sync> = store.clone();
         let retrieval_store: Arc<dyn crate::storage::ArchiveRetrievalStore + Send + Sync> =
             store.clone();
+        let review_store: Arc<dyn crate::storage::ReviewStore + Send + Sync> = store.clone();
         let object_store: Arc<dyn ObjectStore + Send + Sync> = store;
         Arc::new(ArchiveApplication::new(
             import_store,
@@ -455,10 +729,108 @@ mod tests {
             None,
             None,
             None,
+            Some(review_store),
             None,
             object_store,
             None,
         ))
+    }
+
+    #[test]
+    fn get_review_items_returns_filtered_review_queue() {
+        let store = MockStore {
+            artifacts: Vec::new(),
+            review_candidates: vec![
+                ReviewCandidate {
+                    kind: ReviewItemKind::ArtifactNeedsAttention,
+                    artifact_id: "artifact-1".to_string(),
+                    derived_object_id: None,
+                    source_type: SourceType::ChatGptExport,
+                    captured_at: "2026-03-23T10:00:00.000000+00".to_string(),
+                    title: Some("Failed artifact".to_string()),
+                    body_text: None,
+                    derived_object_type: None,
+                    candidate_key: None,
+                    enrichment_status: Some(EnrichmentStatus::Failed),
+                    confidence_score: None,
+                    related_artifact_count: None,
+                },
+                ReviewCandidate {
+                    kind: ReviewItemKind::ObjectLowConfidence,
+                    artifact_id: "artifact-2".to_string(),
+                    derived_object_id: Some("obj-2".to_string()),
+                    source_type: SourceType::ClaudeExport,
+                    captured_at: "2026-03-22T10:00:00.000000+00".to_string(),
+                    title: Some("Weak object".to_string()),
+                    body_text: Some("body".to_string()),
+                    derived_object_type: Some(crate::storage::DerivedObjectType::Memory),
+                    candidate_key: None,
+                    enrichment_status: None,
+                    confidence_score: Some(0.42),
+                    related_artifact_count: None,
+                },
+            ],
+        };
+        let mut request = TestRequest::new()
+            .with_method(Method::Get)
+            .with_path("/review/items?kind=artifact_needs_attention&limit=5")
+            .into();
+
+        let app = test_app(store);
+        let response = build_response(&mut request, app.as_ref());
+        assert_eq!(response.status_code(), StatusCode(200));
+
+        let body: serde_json::Value =
+            serde_json::from_str(&response_body_string(response)).expect("review items json");
+        assert_eq!(body["items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            body["items"][0]["item_id"],
+            serde_json::Value::String("review:artifact_needs_attention:artifact-1".to_string())
+        );
+    }
+
+    #[test]
+    fn post_review_decisions_rejects_invalid_noted_request() {
+        let store = MockStore {
+            artifacts: Vec::new(),
+            review_candidates: Vec::new(),
+        };
+        let mut request = TestRequest::new()
+            .with_method(Method::Post)
+            .with_path("/review/decisions")
+            .with_body(
+                r#"{"kind":"artifact_needs_attention","artifact_id":"artifact-1","decision_status":"noted"}"#,
+            )
+            .into();
+
+        let app = test_app(store);
+        let response = build_response(&mut request, app.as_ref());
+        assert_eq!(response.status_code(), StatusCode(400));
+        assert_eq!(
+            response_body_string(response),
+            "review notes require non-empty note_text"
+        );
+    }
+
+    #[test]
+    fn post_review_artifact_retry_returns_job_id() {
+        let store = MockStore {
+            artifacts: Vec::new(),
+            review_candidates: Vec::new(),
+        };
+        let mut request = TestRequest::new()
+            .with_method(Method::Post)
+            .with_path("/review/artifacts/retry")
+            .with_body(r#"{"artifact_id":"artifact-77"}"#)
+            .into();
+
+        let app = test_app(store);
+        let response = build_response(&mut request, app.as_ref());
+        assert_eq!(response.status_code(), StatusCode(200));
+        assert_eq!(
+            response_body_string(response),
+            r#"{"queued":true,"job_id":"job-retry-artifact-77"}"#
+        );
     }
 
     fn response_body_string(response: Response<Cursor<Vec<u8>>>) -> String {

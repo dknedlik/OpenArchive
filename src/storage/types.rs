@@ -23,6 +23,8 @@ pub enum SourceType {
     ClaudeExport,
     GrokExport,
     GeminiTakeout,
+    TextFile,
+    MarkdownFile,
 }
 
 impl SourceType {
@@ -32,6 +34,8 @@ impl SourceType {
             SourceType::ClaudeExport => "claude_export",
             SourceType::GrokExport => "grok_export",
             SourceType::GeminiTakeout => "gemini_takeout",
+            SourceType::TextFile => "text_file",
+            SourceType::MarkdownFile => "markdown_file",
         }
     }
 
@@ -41,6 +45,8 @@ impl SourceType {
             "claude_export" => Some(Self::ClaudeExport),
             "grok_export" => Some(Self::GrokExport),
             "gemini_takeout" => Some(Self::GeminiTakeout),
+            "text_file" => Some(Self::TextFile),
+            "markdown_file" => Some(Self::MarkdownFile),
             _ => None,
         }
     }
@@ -54,6 +60,8 @@ pub enum PayloadFormat {
     ClaudeExportJson,
     GrokExportJson,
     GeminiTakeoutJson,
+    TextPlain,
+    MarkdownText,
 }
 
 impl PayloadFormat {
@@ -65,6 +73,8 @@ impl PayloadFormat {
             PayloadFormat::ClaudeExportJson => "claude_export_json",
             PayloadFormat::GrokExportJson => "grok_export_json",
             PayloadFormat::GeminiTakeoutJson => "gemini_takeout_json",
+            PayloadFormat::TextPlain => "text_plain",
+            PayloadFormat::MarkdownText => "markdown_text",
         }
     }
 }
@@ -93,12 +103,14 @@ impl ImportStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactClass {
     Conversation,
+    Document,
 }
 
 impl ArtifactClass {
     pub fn as_str(&self) -> &'static str {
         match self {
             ArtifactClass::Conversation => "conversation",
+            ArtifactClass::Document => "document",
         }
     }
 }
@@ -182,15 +194,15 @@ impl ArtifactIngestResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegmentType {
-    Message,
-    MessageWindow,
+    ContentBlock,
+    ContentWindow,
 }
 
 impl SegmentType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            SegmentType::Message => "message",
-            SegmentType::MessageWindow => "message_window",
+            SegmentType::ContentBlock => "content_block",
+            SegmentType::ContentWindow => "content_window",
         }
     }
 }

@@ -30,6 +30,7 @@ pub mod job_store;
 pub mod oracle;
 pub mod postgres;
 pub mod retrieval_read_store;
+pub mod review_read_store;
 pub mod segment_store;
 pub mod types;
 pub mod writeback_store;
@@ -61,6 +62,10 @@ pub use retrieval_read_store::{
     ArtifactDetailSegment, ArtifactDetailView, CrossArtifactReadStore, DerivedObjectSearchResult,
     DerivedObjectSearchStore, GraphRelatedEntry, MvpRetrievalReadStore, ObjectSearchFilters,
     RelatedDerivedObject, SearchCandidateKind, SearchFilters,
+};
+pub use review_read_store::{
+    NewReviewDecision, ReviewCandidate, ReviewDecisionStatus, ReviewItemKind, ReviewQueueFilters,
+    ReviewReadStore, ReviewStore, ReviewWriteStore,
 };
 pub use segment_store::SegmentStore;
 pub use types::{

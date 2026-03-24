@@ -4,6 +4,7 @@ pub mod embedding;
 pub mod import;
 pub mod job;
 pub mod retrieval;
+pub mod review;
 pub mod segment;
 pub mod writeback;
 
@@ -21,8 +22,11 @@ use crate::storage::job_store::EnrichmentJobLifecycleStore;
 use crate::storage::retrieval_read_store::{
     ArchiveSearchCandidate, ArchiveSearchReadStore, ArtifactContextPackMaterial,
     ArtifactContextPackReadStore, ArtifactDetailReadStore, ArtifactDetailView,
-    CrossArtifactReadStore, DerivedObjectSearchResult, DerivedObjectSearchStore,
-    GraphRelatedEntry, ObjectSearchFilters, RelatedDerivedObject, SearchFilters,
+    CrossArtifactReadStore, DerivedObjectSearchResult, DerivedObjectSearchStore, GraphRelatedEntry,
+    ObjectSearchFilters, RelatedDerivedObject, SearchFilters,
+};
+use crate::storage::review_read_store::{
+    NewReviewDecision, ReviewCandidate, ReviewQueueFilters, ReviewReadStore, ReviewWriteStore,
 };
 use crate::storage::types::{
     ArtifactExtractionResult, ClaimedJob, NewEnrichmentBatch, PersistedEnrichmentBatch,
@@ -432,6 +436,32 @@ impl CrossArtifactReadStore for PostgresRetrievalReadStore {
                 candidate_keys,
                 limit,
             )
+        })
+    }
+}
+
+impl ReviewReadStore for PostgresRetrievalReadStore {
+    fn list_review_candidates(
+        &self,
+        filters: &ReviewQueueFilters,
+        limit: usize,
+    ) -> StorageResult<Vec<ReviewCandidate>> {
+        self.client.with_client(|client| {
+            review::list_review_candidates(client, self.client.connection_string(), filters, limit)
+        })
+    }
+}
+
+impl ReviewWriteStore for PostgresRetrievalReadStore {
+    fn record_review_decision(&self, decision: &NewReviewDecision) -> StorageResult<()> {
+        self.client.with_client(|client| {
+            review::record_review_decision(client, self.client.connection_string(), decision)
+        })
+    }
+
+    fn retry_artifact_enrichment(&self, artifact_id: &str) -> StorageResult<String> {
+        self.client.with_client(|client| {
+            review::retry_artifact_enrichment(client, self.client.connection_string(), artifact_id)
         })
     }
 }

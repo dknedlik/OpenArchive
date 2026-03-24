@@ -120,7 +120,9 @@ pub enum ObjectStoreError {
     #[error("failed to parse multipart upload response for object {object_id}: {detail}")]
     ParseMultipartResponse { object_id: String, detail: String },
 
-    #[error("multipart upload failed for object {object_id} at part {part}/{total_parts}: {detail}")]
+    #[error(
+        "multipart upload failed for object {object_id} at part {part}/{total_parts}: {detail}"
+    )]
     MultipartUploadFailed {
         object_id: String,
         part: u16,
@@ -528,6 +530,9 @@ pub enum ParserError {
 
     #[error("export contains no conversations")]
     EmptyExport,
+
+    #[error("document contains no usable text")]
+    EmptyDocument,
 
     #[error("conversation {conversation_id} has an empty mapping")]
     EmptyConversation { conversation_id: String },

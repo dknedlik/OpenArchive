@@ -6,6 +6,7 @@
 
 pub mod chatgpt;
 pub mod claude;
+pub mod document;
 pub mod gemini;
 pub mod grok;
 

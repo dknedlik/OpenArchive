@@ -199,11 +199,7 @@ impl S3CompatibleObjectStore {
 }
 
 impl S3CompatibleObjectStore {
-    fn put_single(
-        &self,
-        remote_key: &str,
-        object: &NewObject,
-    ) -> ObjectStoreResult<()> {
+    fn put_single(&self, remote_key: &str, object: &NewObject) -> ObjectStoreResult<()> {
         let response = self
             .client
             .put(self.upload_url(remote_key, &object.mime_type))
@@ -227,11 +223,7 @@ impl S3CompatibleObjectStore {
         Ok(())
     }
 
-    fn put_multipart(
-        &self,
-        remote_key: &str,
-        object: &NewObject,
-    ) -> ObjectStoreResult<()> {
+    fn put_multipart(&self, remote_key: &str, object: &NewObject) -> ObjectStoreResult<()> {
         let ttl = Duration::from_secs(S3_SIGNED_URL_TTL_SECS);
 
         // 1. Initiate multipart upload
@@ -240,15 +232,13 @@ impl S3CompatibleObjectStore {
             .create_multipart_upload(Some(&self.credentials), remote_key);
         let create_url = create_action.sign(ttl);
 
-        let create_resp = self
-            .client
-            .post(create_url)
-            .send()
-            .map_err(|source| ObjectStoreError::SendRequest {
+        let create_resp = self.client.post(create_url).send().map_err(|source| {
+            ObjectStoreError::SendRequest {
                 operation: "create_multipart_upload",
                 object_id: object.object_id.clone(),
                 source,
-            })?;
+            }
+        })?;
 
         if create_resp.status() != StatusCode::OK {
             return Err(ObjectStoreError::UnexpectedStatus {
@@ -258,13 +248,14 @@ impl S3CompatibleObjectStore {
             });
         }
 
-        let create_body = create_resp
-            .bytes()
-            .map_err(|source| ObjectStoreError::ReadResponseBody {
-                operation: "create_multipart_upload",
-                object_id: object.object_id.clone(),
-                source,
-            })?;
+        let create_body =
+            create_resp
+                .bytes()
+                .map_err(|source| ObjectStoreError::ReadResponseBody {
+                    operation: "create_multipart_upload",
+                    object_id: object.object_id.clone(),
+                    source,
+                })?;
 
         let parsed = CreateMultipartUpload::parse_response(&create_body).map_err(|e| {
             ObjectStoreError::ParseMultipartResponse {
@@ -396,11 +387,9 @@ impl S3CompatibleObjectStore {
         object_id: &str,
     ) -> ObjectStoreResult<()> {
         let ttl = Duration::from_secs(S3_SIGNED_URL_TTL_SECS);
-        let abort_action = self.bucket.abort_multipart_upload(
-            Some(&self.credentials),
-            remote_key,
-            upload_id,
-        );
+        let abort_action =
+            self.bucket
+                .abort_multipart_upload(Some(&self.credentials), remote_key, upload_id);
         let abort_url = abort_action.sign(ttl);
 
         log::warn!(
@@ -409,15 +398,13 @@ impl S3CompatibleObjectStore {
             upload_id,
         );
 
-        let resp = self
-            .client
-            .delete(abort_url)
-            .send()
-            .map_err(|source| ObjectStoreError::SendRequest {
+        let resp = self.client.delete(abort_url).send().map_err(|source| {
+            ObjectStoreError::SendRequest {
                 operation: "abort_multipart_upload",
                 object_id: object_id.to_string(),
                 source,
-            })?;
+            }
+        })?;
 
         match resp.status() {
             StatusCode::OK | StatusCode::NO_CONTENT => Ok(()),

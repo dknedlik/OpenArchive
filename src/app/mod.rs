@@ -3,6 +3,7 @@ pub mod artifacts;
 pub mod context_pack;
 pub mod imports;
 pub mod retrieval;
+pub mod review;
 pub mod search;
 pub mod writeback;
 
@@ -13,7 +14,7 @@ use crate::object_store::ObjectStore;
 use crate::storage::{
     ArchiveRetrievalStore, ArchiveSearchReadStore, ArtifactContextPackReadStore,
     ArtifactDetailReadStore, ArtifactReadStore, CrossArtifactReadStore, DerivedObjectSearchStore,
-    ImportWriteStore, WritebackStore,
+    ImportWriteStore, ReviewStore, WritebackStore,
 };
 
 pub struct ArchiveApplication {
@@ -24,6 +25,7 @@ pub struct ArchiveApplication {
     pub artifact_detail: Option<artifact_detail::ArtifactDetailService>,
     pub context_pack: Option<context_pack::ContextPackService>,
     pub object_search: Option<search::ObjectSearchService>,
+    pub review: Option<review::ReviewService>,
     pub writeback: Option<writeback::WritebackService>,
 }
 
@@ -37,6 +39,7 @@ impl ArchiveApplication {
         context_pack_store: Option<Arc<dyn ArtifactContextPackReadStore + Send + Sync>>,
         cross_artifact_store: Option<Arc<dyn CrossArtifactReadStore + Send + Sync>>,
         object_search_store: Option<Arc<dyn DerivedObjectSearchStore + Send + Sync>>,
+        review_store: Option<Arc<dyn ReviewStore + Send + Sync>>,
         object_search_embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
         object_store: Arc<dyn ObjectStore + Send + Sync>,
         writeback_store: Option<Arc<dyn WritebackStore + Send + Sync>>,
@@ -58,6 +61,7 @@ impl ArchiveApplication {
             object_search: object_search_store.map(|store| {
                 search::ObjectSearchService::new(store, object_search_embedding_provider.clone())
             }),
+            review: review_store.map(review::ReviewService::new),
             writeback: writeback_store.map(writeback::WritebackService::new),
         }
     }

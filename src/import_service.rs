@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::domain::SourceTimestamp;
 use crate::error::OpenArchiveError;
 use crate::object_store::{NewObject, ObjectStore, PutObjectResult};
-use crate::parser::{self, ParsedConversation, ParsedMessage};
+use crate::parser::{self, document::DocumentFormat, ParsedConversation, ParsedMessage};
 use crate::storage::{
     ArtifactClass, ArtifactExtractPayload, ArtifactStatus, EnrichmentStatus, ImportStatus,
     ImportWriteStore, JobStatus, JobType, NewArtifact, NewEnrichmentJob, NewImport,
@@ -36,6 +36,8 @@ pub struct ImportResponse {
 struct SourceImportSpec {
     source_type: SourceType,
     payload_format: PayloadFormat,
+    artifact_class: ArtifactClass,
+    payload_mime_type: &'static str,
     normalization_version: &'static str,
     content_hash_version: &'static str,
     content_facets: &'static [&'static str],
@@ -150,6 +152,82 @@ where
     )
 }
 
+pub fn import_text_payload<S, O>(
+    store: &S,
+    object_store: &O,
+    payload_bytes: &[u8],
+) -> Result<ImportResponse, OpenArchiveError>
+where
+    S: ImportWriteStore + ?Sized,
+    O: ObjectStore + ?Sized,
+{
+    import_document_payload(
+        store,
+        object_store,
+        SourceType::TextFile,
+        PayloadFormat::TextPlain,
+        DocumentFormat::PlainText,
+        payload_bytes,
+    )
+}
+
+pub fn import_markdown_payload<S, O>(
+    store: &S,
+    object_store: &O,
+    payload_bytes: &[u8],
+) -> Result<ImportResponse, OpenArchiveError>
+where
+    S: ImportWriteStore + ?Sized,
+    O: ObjectStore + ?Sized,
+{
+    import_document_payload(
+        store,
+        object_store,
+        SourceType::MarkdownFile,
+        PayloadFormat::MarkdownText,
+        DocumentFormat::Markdown,
+        payload_bytes,
+    )
+}
+
+fn import_document_payload<S, O>(
+    store: &S,
+    object_store: &O,
+    source_type: SourceType,
+    payload_format: PayloadFormat,
+    document_format: DocumentFormat,
+    payload_bytes: &[u8],
+) -> Result<ImportResponse, OpenArchiveError>
+where
+    S: ImportWriteStore + ?Sized,
+    O: ObjectStore + ?Sized,
+{
+    let spec = source_import_spec(source_type, payload_format);
+    let parsed = parser::document::parse_document(payload_bytes, document_format)?;
+    let prepared = build_document_import_set(payload_bytes, spec, parsed, object_store)?;
+    let result = match store.write_import(prepared.write_set) {
+        Ok(result) => result,
+        Err(err) => {
+            cleanup_unreferenced_payload_object(object_store, &prepared.payload_put, &err);
+            return Err(err.into());
+        }
+    };
+
+    Ok(ImportResponse {
+        import_id: result.import_id,
+        import_status: result.import_status.as_str().to_string(),
+        artifacts: result
+            .artifacts
+            .into_iter()
+            .map(|artifact| ImportArtifactStatus {
+                artifact_id: artifact.artifact_id,
+                enrichment_status: artifact.enrichment_status.as_str().to_string(),
+                ingest_result: artifact.ingest_result.as_str().to_string(),
+            })
+            .collect(),
+    })
+}
+
 struct PreparedImportSet {
     write_set: WriteImportSet,
     payload_put: PutObjectResult,
@@ -169,6 +247,7 @@ fn build_import_set(
         &payload_object_id,
         payload_bytes,
         &payload_sha256,
+        spec.payload_mime_type,
     )?;
     let content_facets_json = serde_json::to_string(spec.content_facets).map_err(|err| {
         OpenArchiveError::Invariant(format!("failed to serialize content facets: {err}"))
@@ -186,7 +265,7 @@ fn build_import_set(
             payload_object: NewImportObjectRef {
                 object_id: payload_object_id.clone(),
                 payload_format: spec.payload_format,
-                mime_type: "application/json".to_string(),
+                mime_type: spec.payload_mime_type.to_string(),
                 size_bytes: payload_bytes.len() as i64,
                 sha256: payload_sha256.clone(),
                 stored_object: payload_put.stored_object.clone(),
@@ -206,17 +285,65 @@ fn build_import_set(
     })
 }
 
+fn build_document_import_set(
+    payload_bytes: &[u8],
+    spec: SourceImportSpec,
+    document: parser::document::ParsedDocument,
+    object_store: &(impl ObjectStore + ?Sized),
+) -> Result<PreparedImportSet, OpenArchiveError> {
+    let payload_sha256 = sha256_hex(payload_bytes);
+    let payload_object_id = new_id("payload");
+    let import_id = new_id("import");
+    let payload_put = persist_raw_payload(
+        object_store,
+        &payload_object_id,
+        payload_bytes,
+        &payload_sha256,
+        spec.payload_mime_type,
+    )?;
+    let content_facets_json = serde_json::to_string(spec.content_facets).map_err(|err| {
+        OpenArchiveError::Invariant(format!("failed to serialize content facets: {err}"))
+    })?;
+    let artifact_set =
+        build_document_artifact_set(&import_id, &content_facets_json, spec, document)?;
+
+    Ok(PreparedImportSet {
+        write_set: WriteImportSet {
+            payload_object: NewImportObjectRef {
+                object_id: payload_object_id.clone(),
+                payload_format: spec.payload_format,
+                mime_type: spec.payload_mime_type.to_string(),
+                size_bytes: payload_bytes.len() as i64,
+                sha256: payload_sha256.clone(),
+                stored_object: payload_put.stored_object.clone(),
+            },
+            import: NewImport {
+                import_id,
+                source_type: spec.source_type,
+                import_status: ImportStatus::Pending,
+                payload_object_id,
+                source_filename: None,
+                source_content_hash: payload_sha256,
+                conversation_count_detected: 1,
+            },
+            artifact_sets: vec![artifact_set],
+        },
+        payload_put,
+    })
+}
+
 fn persist_raw_payload(
     object_store: &(impl ObjectStore + ?Sized),
     object_id: &str,
     payload_bytes: &[u8],
     payload_sha256: &str,
+    mime_type: &str,
 ) -> Result<PutObjectResult, OpenArchiveError> {
     object_store
         .put_object(NewObject {
             object_id: object_id.to_string(),
             namespace: "import-payloads".to_string(),
-            mime_type: "application/json".to_string(),
+            mime_type: mime_type.to_string(),
             bytes: payload_bytes.to_vec(),
             sha256: payload_sha256.to_string(),
         })
@@ -293,7 +420,7 @@ fn build_artifact_set(
         artifact: NewArtifact {
             artifact_id: artifact_id.clone(),
             import_id: import_id.to_string(),
-            artifact_class: ArtifactClass::Conversation,
+            artifact_class: spec.artifact_class,
             source_type: spec.source_type,
             artifact_status: ArtifactStatus::Captured,
             enrichment_status: EnrichmentStatus::Pending,
@@ -336,13 +463,20 @@ fn parse_conversations_for_source(
     source_type: SourceType,
     payload_bytes: &[u8],
 ) -> Result<Vec<ParsedConversation>, OpenArchiveError> {
-    match source_type {
+    let parsed = match source_type {
         SourceType::ChatGptExport => parser::chatgpt::parse_conversations(payload_bytes),
         SourceType::ClaudeExport => parser::claude::parse_conversations(payload_bytes),
         SourceType::GrokExport => parser::grok::parse_conversations(payload_bytes),
         SourceType::GeminiTakeout => parser::gemini::parse_conversations(payload_bytes),
-    }
-    .map_err(OpenArchiveError::from)
+        SourceType::TextFile | SourceType::MarkdownFile => {
+            return Err(OpenArchiveError::Invariant(format!(
+                "conversation parser requested for non-conversation source {}",
+                source_type.as_str()
+            )))
+        }
+    };
+
+    parsed.map_err(OpenArchiveError::from)
 }
 
 fn source_import_spec(source_type: SourceType, payload_format: PayloadFormat) -> SourceImportSpec {
@@ -350,6 +484,8 @@ fn source_import_spec(source_type: SourceType, payload_format: PayloadFormat) ->
         SourceType::ChatGptExport => SourceImportSpec {
             source_type,
             payload_format,
+            artifact_class: ArtifactClass::Conversation,
+            payload_mime_type: "application/json",
             normalization_version: parser::CHATGPT_NORMALIZATION_VERSION,
             content_hash_version: parser::CHATGPT_CONTENT_HASH_VERSION,
             content_facets: parser::CHATGPT_CONTENT_FACETS,
@@ -357,6 +493,8 @@ fn source_import_spec(source_type: SourceType, payload_format: PayloadFormat) ->
         SourceType::ClaudeExport => SourceImportSpec {
             source_type,
             payload_format,
+            artifact_class: ArtifactClass::Conversation,
+            payload_mime_type: "application/json",
             normalization_version: parser::claude::CLAUDE_NORMALIZATION_VERSION,
             content_hash_version: parser::claude::CLAUDE_CONTENT_HASH_VERSION,
             content_facets: parser::claude::CLAUDE_CONTENT_FACETS,
@@ -364,6 +502,8 @@ fn source_import_spec(source_type: SourceType, payload_format: PayloadFormat) ->
         SourceType::GrokExport => SourceImportSpec {
             source_type,
             payload_format,
+            artifact_class: ArtifactClass::Conversation,
+            payload_mime_type: "application/json",
             normalization_version: parser::grok::GROK_NORMALIZATION_VERSION,
             content_hash_version: parser::grok::GROK_CONTENT_HASH_VERSION,
             content_facets: parser::grok::GROK_CONTENT_FACETS,
@@ -371,9 +511,29 @@ fn source_import_spec(source_type: SourceType, payload_format: PayloadFormat) ->
         SourceType::GeminiTakeout => SourceImportSpec {
             source_type,
             payload_format,
+            artifact_class: ArtifactClass::Conversation,
+            payload_mime_type: "application/json",
             normalization_version: parser::gemini::GEMINI_NORMALIZATION_VERSION,
             content_hash_version: parser::gemini::GEMINI_CONTENT_HASH_VERSION,
             content_facets: parser::gemini::GEMINI_CONTENT_FACETS,
+        },
+        SourceType::TextFile => SourceImportSpec {
+            source_type,
+            payload_format,
+            artifact_class: ArtifactClass::Document,
+            payload_mime_type: "text/plain",
+            normalization_version: parser::document::TEXT_NORMALIZATION_VERSION,
+            content_hash_version: parser::document::TEXT_CONTENT_HASH_VERSION,
+            content_facets: parser::document::TEXT_CONTENT_FACETS,
+        },
+        SourceType::MarkdownFile => SourceImportSpec {
+            source_type,
+            payload_format,
+            artifact_class: ArtifactClass::Document,
+            payload_mime_type: "text/markdown",
+            normalization_version: parser::document::MARKDOWN_NORMALIZATION_VERSION,
+            content_hash_version: parser::document::MARKDOWN_CONTENT_HASH_VERSION,
+            content_facets: parser::document::MARKDOWN_CONTENT_FACETS,
         },
     }
 }
@@ -411,7 +571,7 @@ fn build_segment(
         segment_id: new_id("segment"),
         artifact_id: artifact_id.to_string(),
         participant_id: Some(participant_id),
-        segment_type: SegmentType::Message,
+        segment_type: SegmentType::ContentBlock,
         source_segment_key: Some(message.source_node_id.clone()),
         parent_segment_id: None,
         sequence_no: sequence_no as i32,
@@ -423,6 +583,77 @@ fn build_segment(
         ),
         visibility_status: message.visibility,
         unsupported_content_json,
+    })
+}
+
+fn build_document_artifact_set(
+    import_id: &str,
+    content_facets_json: &str,
+    spec: SourceImportSpec,
+    document: parser::document::ParsedDocument,
+) -> Result<WriteArtifactSet, OpenArchiveError> {
+    let artifact_id = new_id("artifact");
+    let segments = document
+        .blocks
+        .into_iter()
+        .enumerate()
+        .map(|(sequence_no, block)| NewSegment {
+            segment_id: new_id("segment"),
+            artifact_id: artifact_id.clone(),
+            participant_id: None,
+            segment_type: SegmentType::ContentBlock,
+            source_segment_key: Some(format!("block-{sequence_no}")),
+            parent_segment_id: None,
+            sequence_no: sequence_no as i32,
+            created_at_source: None,
+            text_content_hash: sha256_hex(block.text_content.as_bytes()),
+            text_content: block.text_content,
+            locator_json: block.locator_json,
+            visibility_status: crate::domain::VisibilityStatus::Visible,
+            unsupported_content_json: None,
+        })
+        .collect();
+
+    Ok(WriteArtifactSet {
+        artifact: NewArtifact {
+            artifact_id: artifact_id.clone(),
+            import_id: import_id.to_string(),
+            artifact_class: spec.artifact_class,
+            source_type: spec.source_type,
+            artifact_status: ArtifactStatus::Captured,
+            enrichment_status: EnrichmentStatus::Pending,
+            source_conversation_key: None,
+            source_conversation_hash: document.content_hash,
+            title: document.title,
+            created_at_source: None,
+            started_at: None,
+            ended_at: None,
+            primary_language: None,
+            content_hash_version: spec.content_hash_version.to_string(),
+            content_facets_json: content_facets_json.to_string(),
+            normalization_version: spec.normalization_version.to_string(),
+        },
+        participants: Vec::new(),
+        segments,
+        job: NewEnrichmentJob {
+            job_id: new_id("job"),
+            artifact_id: artifact_id.clone(),
+            job_type: JobType::ArtifactExtract,
+            enrichment_tier: crate::storage::EnrichmentTier::Standard,
+            spawned_by_job_id: None,
+            job_status: JobStatus::Pending,
+            max_attempts: 3,
+            priority_no: 100,
+            required_capabilities: vec!["text".to_string()],
+            payload_json: ArtifactExtractPayload::new_v1(
+                &artifact_id,
+                import_id,
+                spec.source_type,
+                Vec::new(),
+                Vec::new(),
+            )
+            .to_json(),
+        },
     })
 }
 
@@ -611,6 +842,62 @@ mod tests {
             assert!(payload.conversation_windows.is_empty());
             assert!(payload.topic_threads.is_empty());
         }
+    }
+
+    #[test]
+    fn import_text_payload_builds_document_artifact_without_participants() {
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+        let response = import_text_payload(
+            &store,
+            &object_store,
+            b"First paragraph.\n\nSecond paragraph.",
+        )
+        .unwrap();
+
+        assert_eq!(response.import_status, "completed");
+
+        let captured = store.captured.lock().unwrap();
+        let import_set = captured.first().unwrap();
+        assert_eq!(import_set.import.source_type, SourceType::TextFile);
+        assert_eq!(
+            import_set.payload_object.payload_format,
+            PayloadFormat::TextPlain
+        );
+        assert_eq!(import_set.payload_object.mime_type, "text/plain");
+        assert_eq!(import_set.artifact_sets.len(), 1);
+        assert!(import_set.artifact_sets[0].participants.is_empty());
+        assert_eq!(
+            import_set.artifact_sets[0].artifact.artifact_class,
+            ArtifactClass::Document
+        );
+        assert_eq!(import_set.artifact_sets[0].segments.len(), 2);
+    }
+
+    #[test]
+    fn import_markdown_payload_preserves_heading_title_and_markdown_mime_type() {
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+        import_markdown_payload(
+            &store,
+            &object_store,
+            b"# Project Notes\n\nParagraph text.\n\n- one\n- two",
+        )
+        .unwrap();
+
+        let captured = store.captured.lock().unwrap();
+        let import_set = captured.first().unwrap();
+        assert_eq!(import_set.import.source_type, SourceType::MarkdownFile);
+        assert_eq!(
+            import_set.payload_object.payload_format,
+            PayloadFormat::MarkdownText
+        );
+        assert_eq!(import_set.payload_object.mime_type, "text/markdown");
+        assert_eq!(
+            import_set.artifact_sets[0].artifact.title.as_deref(),
+            Some("Project Notes")
+        );
+        assert_eq!(import_set.artifact_sets[0].segments.len(), 3);
     }
 
     fn single_conversation_export() -> &'static str {

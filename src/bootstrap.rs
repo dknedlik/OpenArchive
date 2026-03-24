@@ -170,6 +170,8 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
             let object_search_store: Arc<
                 dyn crate::storage::DerivedObjectSearchStore + Send + Sync,
             > = retrieval_impl.clone();
+            let review_store: Arc<dyn crate::storage::ReviewStore + Send + Sync> =
+                retrieval_impl.clone();
             let embedding_store: Arc<dyn crate::storage::DerivedObjectEmbeddingStore> =
                 Arc::new(PostgresDerivedObjectEmbeddingStore::new(pg_config.clone()));
             let writeback_store: Arc<dyn crate::storage::WritebackStore + Send + Sync> =
@@ -183,6 +185,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 Some(context_pack_store),
                 Some(cross_artifact_store),
                 Some(object_search_store),
+                Some(review_store),
                 embedding_provider.clone(),
                 Arc::clone(&object_store),
                 Some(writeback_store),
@@ -219,6 +222,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 Arc::clone(&import_store),
                 Arc::clone(&read_store),
                 retrieval_store,
+                None,
                 None,
                 None,
                 None,

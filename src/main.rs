@@ -455,6 +455,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             object_store,
             None,
         ))

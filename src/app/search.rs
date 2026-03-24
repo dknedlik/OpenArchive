@@ -175,11 +175,14 @@ fn merge_results(
     semantic: Vec<DerivedObjectSearchResult>,
     limit: usize,
 ) -> Vec<DerivedObjectSearchResult> {
-    use std::collections::HashSet;
     use std::collections::HashMap;
+    use std::collections::HashSet;
 
     // Collect semantic IDs so we can tell which lexical results had no semantic match.
-    let semantic_ids: HashSet<&str> = semantic.iter().map(|r| r.derived_object_id.as_str()).collect();
+    let semantic_ids: HashSet<&str> = semantic
+        .iter()
+        .map(|r| r.derived_object_id.as_str())
+        .collect();
 
     let mut merged: HashMap<String, DerivedObjectSearchResult> = HashMap::new();
 

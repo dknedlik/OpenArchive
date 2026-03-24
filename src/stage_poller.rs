@@ -21,9 +21,8 @@ use crate::enrichment_worker::{
     build_extraction_result as worker_build_extraction_result,
     build_reconciliation_decisions as worker_build_reconciliation_decisions,
     build_reconciliation_input as worker_build_reconciliation_input,
-    complete_job as worker_complete_job,
-    merge_chunk_outputs as worker_merge_chunk_outputs, new_id as worker_new_id,
-    try_enqueue_embedding_job as worker_try_enqueue_embedding_job,
+    complete_job as worker_complete_job, merge_chunk_outputs as worker_merge_chunk_outputs,
+    new_id as worker_new_id, try_enqueue_embedding_job as worker_try_enqueue_embedding_job,
 };
 use crate::processor::{
     ArtifactProcessorInput, BatchHandle, BatchPollResult, ExtractionBatchSubmitter, ProcessorError,
