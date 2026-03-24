@@ -1,41 +1,48 @@
 # OpenArchive
 
-OpenArchive is a local-first archive and memory layer for AI-era personal
-data. It ingests exports and transcripts, preserves the raw payloads, builds a
-canonical archive, runs asynchronous enrichment, and exposes the result
-through a machine-first interface.
+OpenArchive is a local-first archive and memory layer for personal data in the
+AI era. It ingests source material — conversation exports, text documents, and
+other personal artifacts — preserves the raw payloads, normalizes them into a
+canonical model, runs asynchronous enrichment, and exposes the result through a
+machine-first interface.
 
-The point is not just to make old chats searchable. The point is to build a
-grounded archive that can accumulate durable knowledge over time: summaries,
+The goal is not just to make old files searchable. It is to build a grounded
+personal archive that accumulates durable knowledge over time: summaries,
 classifications, entities, relationships, memories, evidence links, and
-user- or agent-authored writebacks.
+user- or agent-authored writebacks. Source material goes in; structured,
+retrievable understanding comes out and grows with every import.
 
-## What OpenArchive Is
+## What OpenArchive Does
 
-OpenArchive does five things:
-
-- Import source material through source-specific adapters.
+- Import source material through format-specific adapters (conversation
+  exports today, with text documents and other formats following).
 - Preserve raw payload bytes outside the relational database.
 - Normalize source material into a canonical artifact and segment model.
-- Run a durable enrichment pipeline over stored artifacts.
+- Run a durable enrichment pipeline that extracts, reconciles, and embeds
+  structured knowledge from stored artifacts.
 - Expose retrieval and writeback through MCP, with a small HTTP surface for
   imports and basic listing.
 
-## Why This Is Not Just RAG
+## How This Relates to RAG
 
-OpenArchive is adjacent to retrieval-augmented generation, but it is not just
-"put embeddings on documents and return chunks."
+OpenArchive overlaps with retrieval-augmented generation but sits at a
+different level. A typical RAG system chunks documents, embeds the chunks,
+and returns the nearest neighbors at query time. That works well for
+prompt-stuffing, but it treats the retrieved material as disposable context.
 
-OpenArchive keeps a stronger set of invariants:
+OpenArchive treats ingested material as a long-lived archive:
 
 - Raw source payloads are preserved for audit and reprocessing.
 - Canonical archive rows are separated from object storage.
-- Derived objects are typed and evidence-backed.
-- Retrieval is shaped around artifacts, context packs, and archive objects,
+- Derived objects (summaries, memories, entities, relationships) are typed,
+  evidence-linked, and individually addressable.
+- Retrieval is shaped around artifacts, context packs, and archive objects —
   not only chunk similarity.
-- MCP clients can write back memories, entities, and links into the archive.
-- The system is built as an archive and memory substrate, not only as a
-  prompt-prep utility.
+- MCP clients can write back into the archive, creating new memories,
+  entities, and links that become part of the knowledge base.
+
+Embedding-backed search is available as one retrieval path, but it is a
+component of the system rather than the whole story.
 
 ## V1 Status
 
