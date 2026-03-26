@@ -9,12 +9,12 @@ use crate::storage::types::EnrichmentTier;
 
 use super::{
     allowed_artifact_evidence_refs, build_two_phase_candidate_user_prompt,
-    candidate_output_schema_with_allowed_refs, parse_candidate_output, ArtifactProcessor,
-    ArtifactProcessorFactory, BatchHandle, BatchPollResult, ConversationEnrichmentStrategy,
-    ExtractionBatchSubmitter, HostedArtifactProcessor, HostedReconciliationProcessor,
-    InferenceClient, InferenceResult, InferenceUsage, ProcessorError, ReconciliationBatchSubmitter,
-    ReconciliationProcessor, ANTHROPIC_PROMPT_VERSION, RECONCILIATION_SYSTEM_PROMPT,
-    TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
+    candidate_output_schema_with_allowed_refs, candidate_system_prompt, parse_candidate_output,
+    ArtifactProcessor, ArtifactProcessorFactory, BatchHandle, BatchPollResult,
+    ConversationEnrichmentStrategy, ExtractionBatchSubmitter, HostedArtifactProcessor,
+    HostedReconciliationProcessor, InferenceClient, InferenceResult, InferenceUsage,
+    ProcessorError, ReconciliationBatchSubmitter, ReconciliationProcessor,
+    ANTHROPIC_PROMPT_VERSION, RECONCILIATION_SYSTEM_PROMPT,
 };
 
 pub struct AnthropicProcessorFactory {
@@ -360,7 +360,7 @@ impl ExtractionBatchSubmitter for AnthropicExtractionSubmitter {
     ) -> Result<BatchHandle, ProcessorError> {
         let requests = build_anthropic_batch_requests(inputs, &self.candidate_model, |input| {
             Ok((
-                TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
+                candidate_system_prompt(input),
                 build_two_phase_candidate_user_prompt(input)?,
                 candidate_output_schema_with_allowed_refs(&allowed_artifact_evidence_refs(input)),
             ))

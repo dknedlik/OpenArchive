@@ -452,6 +452,9 @@ pub enum StorageError {
     #[error("invalid source_type '{value}' for artifact {artifact_id}")]
     InvalidSourceType { artifact_id: String, value: String },
 
+    #[error("invalid artifact_class '{value}' for artifact {artifact_id}")]
+    InvalidArtifactClass { artifact_id: String, value: String },
+
     #[error("invalid participant_role '{value}' for participant {participant_id}")]
     InvalidParticipantRole {
         participant_id: String,

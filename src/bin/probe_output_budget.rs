@@ -83,6 +83,7 @@ fn main() -> Result<()> {
         let input = ArtifactProcessorInput {
             artifact_id: loaded.artifact.artifact_id.clone(),
             import_id: loaded.artifact.import_id.clone(),
+            artifact_class: loaded.artifact.artifact_class,
             source_type: loaded.artifact.source_type,
             title: loaded.artifact.title.clone(),
             participants: loaded.participants,

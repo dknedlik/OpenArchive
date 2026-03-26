@@ -100,7 +100,8 @@ impl ImportStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ArtifactClass {
     Conversation,
     Document,
@@ -111,6 +112,14 @@ impl ArtifactClass {
         match self {
             ArtifactClass::Conversation => "conversation",
             ArtifactClass::Document => "document",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "conversation" => Some(Self::Conversation),
+            "document" => Some(Self::Document),
+            _ => None,
         }
     }
 }
@@ -1132,6 +1141,7 @@ pub struct TimelineFilters {
 pub struct LoadedArtifactRecord {
     pub artifact_id: String,
     pub import_id: String,
+    pub artifact_class: ArtifactClass,
     pub source_type: SourceType,
     pub title: Option<String>,
 }

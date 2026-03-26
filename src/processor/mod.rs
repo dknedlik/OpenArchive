@@ -12,8 +12,8 @@ use thiserror::Error;
 
 use crate::config::{OpenAiConfig, OpenAiReasoningEffort};
 use crate::storage::types::{
-    EnrichmentTier, LoadedParticipant, LoadedSegment, ReconciliationDecisionKind, RetrievalIntent,
-    ScopeType, SourceType,
+    ArtifactClass, EnrichmentTier, LoadedParticipant, LoadedSegment, ReconciliationDecisionKind,
+    RetrievalIntent, ScopeType, SourceType,
 };
 
 mod anthropic;
@@ -29,6 +29,7 @@ pub use grok::GrokProcessorFactory;
 pub struct ArtifactProcessorInput {
     pub artifact_id: String,
     pub import_id: String,
+    pub artifact_class: ArtifactClass,
     pub source_type: SourceType,
     pub title: Option<String>,
     pub participants: Vec<LoadedParticipant>,
@@ -546,7 +547,7 @@ impl HostedArtifactProcessor {
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
         let candidate_result = self.client.complete_json(
             &self.model,
-            TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
+            candidate_system_prompt(input),
             user_prompt,
             &candidate_output_schema_wrapper(input),
         )?;
@@ -1294,7 +1295,7 @@ impl OpenAiArtifactProcessor {
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
         let candidate_result = self.client.complete_json_with_max_output_tokens(
             &self.candidate_model,
-            TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
+            candidate_system_prompt(input),
             user_prompt,
             &candidate_output_schema_wrapper(input),
             max_output_tokens.max(TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS),
@@ -1340,7 +1341,7 @@ impl ExtractionBatchSubmitter for OpenAiExtractionSubmitter {
                 url: "/v1/responses".to_string(),
                 body: self.client.build_responses_request(
                     &self.candidate_model,
-                    TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
+                    candidate_system_prompt(input),
                     &user_prompt,
                     &candidate_output_schema_wrapper(input),
                 ),
@@ -3314,7 +3315,6 @@ pub fn memory_candidate_key_from_fields(
     format!("mem:{}", hex_prefix(&digest[..16]))
 }
 
-#[cfg(test)]
 pub(crate) fn build_conversation_user_prompt(
     input: &ArtifactProcessorInput,
 ) -> Result<String, ProcessorError> {
@@ -3344,6 +3344,7 @@ pub(crate) fn build_conversation_user_prompt(
 
     Ok(format!(
         "Input artifact:\n\
+         artifact_class: conversation\n\
          artifact_id: {artifact_id}\n\
          source_type: {source_type}\n\
          title: {title}\n\
@@ -3376,12 +3377,84 @@ pub(crate) fn build_conversation_user_prompt(
         source_type = input.source_type.as_str(),
         title = input.title.as_deref().unwrap_or(""),
         segments_json = segments_json,
+         allowed_refs_json = serde_json::to_string(&allowed_artifact_evidence_refs(input))
+            .map_err(|source| ProcessorError::SerializePrompt { source })?,
+    ))
+}
+
+pub(crate) fn build_document_user_prompt(
+    input: &ArtifactProcessorInput,
+) -> Result<String, ProcessorError> {
+    #[derive(Serialize)]
+    struct PromptSegment<'a> {
+        evidence_ref: String,
+        text: &'a str,
+    }
+
+    let prompt_segments: Vec<_> = input
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| PromptSegment {
+            evidence_ref: segment_alias(index),
+            text: segment.text_content.as_str(),
+        })
+        .collect();
+
+    let segments_json = serde_json::to_string_pretty(&prompt_segments)
+        .map_err(|source| ProcessorError::SerializePrompt { source })?;
+
+    Ok(format!(
+        "Input artifact:\n\
+         artifact_class: document\n\
+         artifact_id: {artifact_id}\n\
+         source_type: {source_type}\n\
+         title: {title}\n\
+         \n\
+         segments:\n\
+         {segments_json}\n\
+         \n\
+         Output guidance:\n\
+         - summarize the document, not a dialogue; capture its purpose, key claims, decisions, action items, and durable references\n\
+         - first infer what kind of document this is from the text itself, such as meeting notes, call notes, work log, research notes, design notes, journal entry, or general reference material, and adapt extraction accordingly\n\
+         - summary is not a substitute for memories; memories should stay atomic and independently retrievable later\n\
+         - classifications should capture document form and durable topical lenses, not one-off details\n\
+         - memories: extract every durable fact, decision, commitment, requirement, constraint, ongoing state, action item owner, reference detail, or background context that could matter in future retrieval\n\
+         - if the document appears to be meeting notes or a call log, treat attendees, speakers, owners, discussed systems, and recorded decisions as likely entity and relationship candidates when explicitly supported\n\
+         - entities: include explicit named people, teams, organizations, projects, systems, repositories, vendors, and domain-specific proper nouns with likely future retrieval value\n\
+         - relationships: include explicit or strongly supported links such as ownership, participation, dependency, decision impact, coordination, or affiliation between emitted entities\n\
+         - retrieval_intents: ask archive-only follow-up questions that would help connect this document to prior decisions, prior states, duplicate notes, or related entities\n\
+         - importance: be conservative, but documents with durable project context, commitments, or personal history can still be high value\n\
+         - evidence_segment_ids must use only the evidence_ref values shown in segments\n\
+         - allowed evidence_ref values for this artifact: {allowed_refs_json}\n\
+         - copy evidence_ref values exactly as shown, for example evidence_ref_1 and evidence_ref_2\n\
+         - never invent, abbreviate, transform, or combine evidence refs\n\
+         - cite every segment that directly supports each derived object, not just the primary one\n\
+         - memory_scope_value must be {artifact_id}\n\
+         ",
+        artifact_id = input.artifact_id,
+        source_type = input.source_type.as_str(),
+        title = input.title.as_deref().unwrap_or(""),
+        segments_json = segments_json,
         allowed_refs_json = serde_json::to_string(&allowed_artifact_evidence_refs(input))
             .map_err(|source| ProcessorError::SerializePrompt { source })?,
     ))
 }
 
-pub(crate) fn should_shape_conversation_input(input: &ArtifactProcessorInput) -> bool {
+pub(crate) fn build_candidate_user_prompt(
+    input: &ArtifactProcessorInput,
+) -> Result<String, ProcessorError> {
+    match input.artifact_class {
+        ArtifactClass::Conversation => build_conversation_user_prompt(input),
+        ArtifactClass::Document => build_document_user_prompt(input),
+    }
+}
+
+pub(crate) fn should_shape_artifact_input(input: &ArtifactProcessorInput) -> bool {
+    if input.artifact_class == ArtifactClass::Document {
+        return false;
+    }
+
     let char_count: usize = input
         .segments
         .iter()
@@ -3532,53 +3605,17 @@ pub(crate) const TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS: u32 = 7000;
 #[allow(dead_code)]
 pub(crate) const TWO_PHASE_FINALIZER_MAX_OUTPUT_TOKENS: u32 = 4000;
 
+pub(crate) fn candidate_system_prompt(input: &ArtifactProcessorInput) -> &'static str {
+    match input.artifact_class {
+        ArtifactClass::Conversation => CONVERSATION_CANDIDATE_SYSTEM_PROMPT,
+        ArtifactClass::Document => DOCUMENT_CANDIDATE_SYSTEM_PROMPT,
+    }
+}
+
 pub(crate) fn build_two_phase_candidate_user_prompt(
     input: &ArtifactProcessorInput,
 ) -> Result<String, ProcessorError> {
-    #[derive(Serialize)]
-    struct PromptSegment<'a> {
-        evidence_ref: String,
-        participant_role: &'a str,
-        text: &'a str,
-    }
-
-    let prompt_segments: Vec<_> = input
-        .segments
-        .iter()
-        .enumerate()
-        .map(|(index, segment)| PromptSegment {
-            evidence_ref: segment_alias(index),
-            participant_role: segment
-                .participant_role
-                .map(|role| role.as_str())
-                .unwrap_or("unknown"),
-            text: segment.text_content.as_str(),
-        })
-        .collect();
-    let segments_json = serde_json::to_string_pretty(&prompt_segments)
-        .map_err(|source| ProcessorError::SerializePrompt { source })?;
-
-    Ok(format!(
-        "Input artifact:\n\
-         artifact_id: {artifact_id}\n\
-         source_type: {source_type}\n\
-         title: {title}\n\
-         \n\
-         segments:\n\
-         {segments_json}\n\
-         \n\
-         Output guidance:\n\
-         - the artifact text is divided into segments; each segment has an evidence_ref identifier\n\
-         - every emitted item must include evidence_segment_ids using only evidence_ref values shown in segments\n\
-         - preserve evidence_ref values exactly\n\
-         - do not invent unsupported claims; every emitted item must be directly supported or strongly supported by artifact content\n\
-         - be exhaustive on durable, retrieval-worthy content\n\
-         - avoid obvious duplicates and broad rollups when a more specific candidate works\n",
-        artifact_id = input.artifact_id,
-        source_type = input.source_type.as_str(),
-        title = input.title.as_deref().unwrap_or(""),
-        segments_json = segments_json,
-    ))
+    build_candidate_user_prompt(input)
 }
 
 #[allow(dead_code)]
@@ -4119,12 +4156,13 @@ pub(crate) fn reconciliation_output_schema() -> serde_json::Value {
     })
 }
 
-const OPENAI_PROMPT_VERSION: &str = "openai-two-phase-v1";
-pub(crate) const ANTHROPIC_PROMPT_VERSION: &str = "anthropic-two-phase-v1";
-pub(crate) const GEMINI_PROMPT_VERSION: &str = "gemini-two-phase-v1";
-pub(crate) const GROK_PROMPT_VERSION: &str = "grok-two-phase-v1";
+const OPENAI_PROMPT_VERSION: &str = "openai-two-phase-v2";
+pub(crate) const ANTHROPIC_PROMPT_VERSION: &str = "anthropic-two-phase-v2";
+pub(crate) const GEMINI_PROMPT_VERSION: &str = "gemini-two-phase-v2";
+pub(crate) const GROK_PROMPT_VERSION: &str = "grok-two-phase-v2";
 
-pub(crate) const TWO_PHASE_CANDIDATE_SYSTEM_PROMPT: &str = "You are OpenArchive's candidate extraction engine. Read one artifact and return ONLY valid JSON.\n\nReturn these sections:\n- summary_draft\n- classification_candidates\n- memory_candidates\n- entity_candidates\n- relationship_candidates\n- retrieval_candidates\n- importance_score\n\nGeneral rules:\n1. Output valid JSON only.\n2. The artifact text is divided into segments. Every emitted item must include evidence_segment_ids that reference the provided segment identifiers exactly.\n3. Do not invent unsupported claims. Every emitted item must be directly supported or strongly supported by artifact content.\n4. Treat the output families as different jobs. A good summary does not replace memories, classifications, entities, relationships, or retrieval intents.\n5. Prefer recall over concision at this stage. It is acceptable to surface more candidates than the final extraction will keep.\n6. Be exhaustive, not representative.\n7. Avoid obvious duplicates, but do not suppress distinct candidates just because they are related.\n\nObject guidance:\n- summary_draft: Produce a coherent, human-readable synthesis of the artifact's central topics, actors, stakes, and outcomes. Do not turn it into a list of every fact.\n- classification_candidates: Emit useful browse or filter lenses. Do not over-prune.\n- memory_candidates: Emit every distinct durable or reusable fact, state, constraint, decision, preference, background detail, history item, or ongoing condition that could be retrieved independently later. Each candidate must be atomic and standalone. Do not collapse several concrete items into one broad rollup. When in doubt between including and omitting, include. For each memory candidate, assign: durability_label = one of high|medium|low; retrieval_value_label = one of high|medium|low; consequentiality_label = one of high|medium|low; temporal_scope = one of ephemeral|time_bound|ongoing|enduring.\n- entity_candidates: Emit salient entities that could matter as independent retrieval targets later. It is acceptable to include candidates that may later be pruned.\n- relationship_candidates: Emit explicit or strongly supported relationships between emitted entities. It is acceptable to include related candidates that may later be simplified.\n- retrieval_candidates: Emit plausible future questions that a user or system may ask later. They should help retrieval and follow-up reasoning, not just restate the summary.\n- importance_score: Reflect how useful this artifact is likely to be for future retrieval and personalization.";
+pub(crate) const CONVERSATION_CANDIDATE_SYSTEM_PROMPT: &str = "You are OpenArchive's candidate extraction engine for conversational artifacts. Read one artifact and return ONLY valid JSON.\n\nReturn these sections:\n- summary_draft\n- classification_candidates\n- memory_candidates\n- entity_candidates\n- relationship_candidates\n- retrieval_candidates\n- importance_score\n\nGeneral rules:\n1. Output valid JSON only.\n2. The artifact text is divided into segments. Every emitted item must include evidence_segment_ids that reference the provided segment identifiers exactly.\n3. Do not invent unsupported claims. Every emitted item must be directly supported or strongly supported by artifact content.\n4. Treat the output families as different jobs. A good summary does not replace memories, classifications, entities, relationships, or retrieval intents.\n5. Prefer recall over concision at this stage. It is acceptable to surface more candidates than the final extraction will keep.\n6. Be exhaustive, not representative.\n7. Avoid obvious duplicates, but do not suppress distinct candidates just because they are related.\n\nObject guidance:\n- summary_draft: Produce a coherent, human-readable synthesis of the conversation's central topics, actors, stakes, and outcomes. Do not turn it into a list of every fact.\n- classification_candidates: Emit useful browse or filter lenses. Do not over-prune.\n- memory_candidates: Emit every distinct durable or reusable fact, state, constraint, decision, preference, background detail, history item, or ongoing condition that could be retrieved independently later. Each candidate must be atomic and standalone. Do not collapse several concrete items into one broad rollup. When in doubt between including and omitting, include. For each memory candidate, assign: durability_label = one of high|medium|low; retrieval_value_label = one of high|medium|low; consequentiality_label = one of high|medium|low; temporal_scope = one of ephemeral|time_bound|ongoing|enduring.\n- entity_candidates: Emit salient entities that could matter as independent retrieval targets later. It is acceptable to include candidates that may later be pruned.\n- relationship_candidates: Emit explicit or strongly supported relationships between emitted entities. It is acceptable to include related candidates that may later be simplified.\n- retrieval_candidates: Emit plausible future questions that a user or system may ask later. They should help retrieval and follow-up reasoning, not just restate the summary.\n- importance_score: Reflect how useful this artifact is likely to be for future retrieval and personalization.";
+pub(crate) const DOCUMENT_CANDIDATE_SYSTEM_PROMPT: &str = "You are OpenArchive's candidate extraction engine for document artifacts. Read one artifact and return ONLY valid JSON.\n\nReturn these sections:\n- summary_draft\n- classification_candidates\n- memory_candidates\n- entity_candidates\n- relationship_candidates\n- retrieval_candidates\n- importance_score\n\nGeneral rules:\n1. Output valid JSON only.\n2. The artifact text is divided into segments. Every emitted item must include evidence_segment_ids that reference the provided segment identifiers exactly.\n3. Do not invent unsupported claims. Every emitted item must be directly supported or strongly supported by artifact content.\n4. Treat the output families as different jobs. A good summary does not replace memories, classifications, entities, relationships, or retrieval intents.\n5. Prefer recall over concision at this stage. It is acceptable to surface more candidates than the final extraction will keep.\n6. Be exhaustive, not representative.\n7. Avoid obvious duplicates, but do not suppress distinct candidates just because they are related.\n\nObject guidance:\n- summary_draft: Produce a coherent synthesis of the document's purpose, main claims, decisions, action items, and durable context. Do not turn it into a list of every fact.\n- classification_candidates: Emit useful browse or filter lenses such as document form and durable topical domains. Do not over-prune.\n- memory_candidates: Emit every distinct durable or reusable fact, state, requirement, commitment, action item, constraint, decision, background detail, history item, or ongoing condition that could be retrieved independently later. Each candidate must be atomic and standalone. Do not collapse several concrete items into one broad rollup. When in doubt between including and omitting, include. For each memory candidate, assign: durability_label = one of high|medium|low; retrieval_value_label = one of high|medium|low; consequentiality_label = one of high|medium|low; temporal_scope = one of ephemeral|time_bound|ongoing|enduring.\n- entity_candidates: Emit salient entities that could matter as independent retrieval targets later, including named people, teams, projects, systems, organizations, vendors, or other proper nouns explicitly supported by the document.\n- relationship_candidates: Emit explicit or strongly supported relationships between emitted entities, including ownership, participation, coordination, dependency, affiliation, or decision impact when supported.\n- retrieval_candidates: Emit plausible future questions that a user or system may ask later. They should help retrieval and follow-up reasoning, not just restate the summary.\n- importance_score: Reflect how useful this artifact is likely to be for future retrieval and personalization, including meeting notes, call logs, and reference documents.";
 
 #[allow(dead_code)]
 pub(crate) const TWO_PHASE_FINALIZER_SYSTEM_PROMPT: &str = "You are OpenArchive's extraction finalizer. Use only the provided candidate bundle and return ONLY valid JSON in the requested final schema.\n\nGeneral rules:\n1. Do not invent facts, evidence refs, or objects not supported by the candidate bundle.\n2. Preserve evidence refs exactly.\n3. Do not treat any count limit as a target. Keep the strongest distinct items that belong; do not pad, and do not collapse unrelated facts merely to be shorter.\n4. When several candidates are individually valid, prefer the set with higher long-term retrieval value, clearer future usefulness, and greater downstream consequence.\n5. The candidate bundle is already a first-pass extraction. Pruning is optional, not required. If the candidate count is already within the schema limit, you do not need to remove anything. Drop or merge only when candidates are genuine duplicates, clear near-duplicates, unsupported by the bundle, or clearly low-value and local to this artifact.\n\nObject guidance:\n- summary: Keep it coherent and central. Preserve the main story of the artifact without turning the summary into a dump of all candidates.\n- classifications: Keep only useful browse or filter lenses. Remove generic, weak, or redundant classifications.\n- memories: Keep distinct, durable, retrieval-worthy memories. Use the candidate labels for durability, retrieval value, consequentiality, and temporal scope as editorial signals, not rigid rules. Candidates marked high on durability, retrieval value, or consequentiality should usually be retained unless they duplicate another stronger candidate. Deprioritize transient logistics, one-off setup details, low-value inventories, and items whose future usefulness is narrowly local to this artifact. Keep separate memories when candidates would answer meaningfully different future retrieval questions, even if they are related or appear close together in the source. Merge only genuine duplicates or near-duplicates. Do not collapse multiple important facts into an umbrella memory when keeping them separate would improve future retrieval.\n- entities: Keep only salient entities that stand on their own as future retrieval targets, but be conservative about dropping supported entities when they anchor retained memories, relationships, or retrieval intents.\n- relationships: Keep semantically clean, well-supported relationships between retained entities. Prefer retaining a supported relationship over dropping it merely for brevity.\n- retrieval_intents: Keep questions that are likely future lookups or follow-ups, not paraphrases of the summary. Prefer preserving intents that map to retained memories or relationships.\n\nSchema guidance:\n- Fix bad type assignments and choose memory_type only from the allowed schema values.\n- Output valid JSON only.";
@@ -4263,6 +4301,7 @@ mod tests {
         ArtifactProcessorInput {
             artifact_id: "artifact-1".to_string(),
             import_id: "import-1".to_string(),
+            artifact_class: ArtifactClass::Conversation,
             source_type: SourceType::ChatGptExport,
             title: Some("Architecture direction".to_string()),
             participants: Vec::new(),
@@ -4282,6 +4321,40 @@ mod tests {
                     participant_role: None,
                     sequence_no: 1,
                     text_content: "Task 12 should use GPT-4.1 mini.".to_string(),
+                    created_at_source: None,
+                    visibility_status: crate::VisibilityStatus::Visible,
+                },
+            ],
+        }
+    }
+
+    fn sample_document_input() -> ArtifactProcessorInput {
+        ArtifactProcessorInput {
+            artifact_id: "artifact-doc-1".to_string(),
+            import_id: "import-doc-1".to_string(),
+            artifact_class: ArtifactClass::Document,
+            source_type: SourceType::MarkdownFile,
+            title: Some("Sprint planning notes".to_string()),
+            participants: Vec::new(),
+            segments: vec![
+                LoadedSegment {
+                    segment_id: "seg-1".to_string(),
+                    participant_id: None,
+                    participant_role: None,
+                    sequence_no: 0,
+                    text_content: "Sprint planning with Alice and Bob for OpenArchive ingestion work."
+                        .to_string(),
+                    created_at_source: None,
+                    visibility_status: crate::VisibilityStatus::Visible,
+                },
+                LoadedSegment {
+                    segment_id: "seg-2".to_string(),
+                    participant_id: None,
+                    participant_role: None,
+                    sequence_no: 1,
+                    text_content:
+                        "Decision: ship markdown and text ingestion before docx. Alice owns parser work."
+                            .to_string(),
                     created_at_source: None,
                     visibility_status: crate::VisibilityStatus::Visible,
                 },
@@ -4520,6 +4593,17 @@ mod tests {
         assert!(prompt.contains("classifications are broad topical labels only"));
         assert!(prompt.contains("choose the closest memory_type from the schema"));
         assert!(prompt.contains("biographical and health history belongs in durable memories"));
+    }
+
+    #[test]
+    fn document_prompt_mentions_meeting_notes_and_entities() {
+        let prompt =
+            build_document_user_prompt(&sample_document_input()).expect("prompt should build");
+
+        assert!(prompt.contains("artifact_class: document"));
+        assert!(prompt.contains("meeting notes, call notes"));
+        assert!(prompt.contains("attendees, speakers, owners"));
+        assert!(prompt.contains("entities: include explicit named people"));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 use crate::error::StorageResult;
 use crate::storage::types::{
-    ArtifactListItem, EnrichmentStatus, LoadedArtifactForEnrichment, LoadedArtifactRecord,
-    LoadedParticipant, LoadedSegment, NewArtifact, NewParticipant, SourceType,
+    ArtifactClass, ArtifactListItem, EnrichmentStatus, LoadedArtifactForEnrichment,
+    LoadedArtifactRecord, LoadedParticipant, LoadedSegment, NewArtifact, NewParticipant,
+    SourceType,
 };
 use crate::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 
@@ -249,7 +250,7 @@ pub fn load_artifact_for_enrichment(
 ) -> StorageResult<Option<LoadedArtifactForEnrichment>> {
     let artifact_row = client
         .query_opt(
-            "SELECT artifact_id, import_id, source_type, title \
+            "SELECT artifact_id, import_id, artifact_class, source_type, title \
              FROM oa_artifact WHERE artifact_id = $1",
             &[&artifact_id],
         )
@@ -261,7 +262,14 @@ pub fn load_artifact_for_enrichment(
 
     let artifact_id_value: String = artifact_row.get(0);
     let import_id: String = artifact_row.get(1);
-    let source_type_str: String = artifact_row.get(2);
+    let artifact_class_str: String = artifact_row.get(2);
+    let artifact_class = ArtifactClass::from_str(&artifact_class_str).ok_or_else(|| {
+        crate::error::StorageError::InvalidArtifactClass {
+            artifact_id: artifact_id_value.clone(),
+            value: artifact_class_str,
+        }
+    })?;
+    let source_type_str: String = artifact_row.get(3);
     let source_type = SourceType::from_str(&source_type_str).ok_or_else(|| {
         crate::error::StorageError::InvalidSourceType {
             artifact_id: artifact_id_value.clone(),
@@ -271,8 +279,9 @@ pub fn load_artifact_for_enrichment(
     let artifact = LoadedArtifactRecord {
         artifact_id: artifact_id_value.clone(),
         import_id,
+        artifact_class,
         source_type,
-        title: artifact_row.get(3),
+        title: artifact_row.get(4),
     };
 
     let participant_rows = client

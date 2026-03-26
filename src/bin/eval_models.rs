@@ -266,6 +266,7 @@ fn build_processor_input(fixture: &EvalFixture) -> Result<ArtifactProcessorInput
     Ok(ArtifactProcessorInput {
         artifact_id: fixture.artifact_id.clone(),
         import_id: format!("eval-import-{}", fixture.artifact_id),
+        artifact_class: open_archive::storage::ArtifactClass::Conversation,
         source_type,
         title: fixture.title.clone(),
         participants,

@@ -10,13 +10,13 @@ use crate::storage::types::EnrichmentTier;
 use super::{
     allowed_artifact_evidence_refs, build_two_phase_candidate_user_prompt,
     candidate_output_schema_with_allowed_refs, candidate_output_schema_wrapper,
-    parse_candidate_output, ArtifactProcessor, ArtifactProcessorFactory, ArtifactProcessorInput,
-    ArtifactProcessorOutput, BatchHandle, BatchPollResult, ExtractionBatchSubmitter,
-    HostedReconciliationProcessor, InferenceClient, InferenceResult, InferenceUsage,
-    OpenRouterResponsesContentItem, OpenRouterResponsesInputItem, OpenRouterResponsesRequest,
-    OpenRouterResponsesResponse, OpenRouterResponsesTextConfig, ProcessorError,
-    ReconciliationBatchSubmitter, ReconciliationProcessor, RECONCILIATION_SYSTEM_PROMPT,
-    TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS, TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
+    candidate_system_prompt, parse_candidate_output, ArtifactProcessor, ArtifactProcessorFactory,
+    ArtifactProcessorInput, ArtifactProcessorOutput, BatchHandle, BatchPollResult,
+    ExtractionBatchSubmitter, HostedReconciliationProcessor, InferenceClient, InferenceResult,
+    InferenceUsage, OpenRouterResponsesContentItem, OpenRouterResponsesInputItem,
+    OpenRouterResponsesRequest, OpenRouterResponsesResponse, OpenRouterResponsesTextConfig,
+    ProcessorError, ReconciliationBatchSubmitter, ReconciliationProcessor,
+    RECONCILIATION_SYSTEM_PROMPT, TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS,
 };
 
 pub struct GrokProcessorFactory {
@@ -406,7 +406,7 @@ impl GrokArtifactProcessor {
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
         let candidate_result = self.client.complete_json_with_max_output_tokens(
             &self.candidate_model,
-            TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
+            candidate_system_prompt(input),
             user_prompt,
             &candidate_output_schema_wrapper(input),
             max_output_tokens.max(TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS),
@@ -447,7 +447,7 @@ impl ExtractionBatchSubmitter for GrokExtractionSubmitter {
         let requests = build_grok_requests(inputs, &self.candidate_model, |input| {
             Ok(self.client.build_chat_completion_body(
                 &self.candidate_model,
-                TWO_PHASE_CANDIDATE_SYSTEM_PROMPT,
+                candidate_system_prompt(input),
                 &build_two_phase_candidate_user_prompt(input)?,
                 &candidate_output_schema_with_allowed_refs(&allowed_artifact_evidence_refs(input)),
                 self.client

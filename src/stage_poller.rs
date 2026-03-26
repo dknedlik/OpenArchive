@@ -593,6 +593,7 @@ impl ExtractStage {
             ArtifactProcessorInput {
                 artifact_id: loaded.artifact.artifact_id.clone(),
                 import_id: payload.import_id.clone(),
+                artifact_class: loaded.artifact.artifact_class,
                 source_type,
                 title: loaded.artifact.title.clone(),
                 participants: loaded.participants,

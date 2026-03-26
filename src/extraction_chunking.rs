@@ -39,6 +39,7 @@ pub(crate) fn build_chunk_inputs(
             let chunk = ArtifactProcessorInput {
                 artifact_id: input.artifact_id.clone(),
                 import_id: input.import_id.clone(),
+                artifact_class: input.artifact_class,
                 source_type: input.source_type,
                 title: input.title.clone(),
                 participants: input.participants.clone(),
@@ -87,6 +88,7 @@ pub(crate) fn build_topic_thread_inputs(
         let chunk = ArtifactProcessorInput {
             artifact_id: input.artifact_id.clone(),
             import_id: input.import_id.clone(),
+            artifact_class: input.artifact_class,
             source_type: input.source_type,
             title: Some(match &input.title {
                 Some(title) => format!("{title} [{}]", thread.label),
@@ -115,6 +117,7 @@ pub(crate) fn build_topic_thread_inputs(
         let chunk = ArtifactProcessorInput {
             artifact_id: input.artifact_id.clone(),
             import_id: input.import_id.clone(),
+            artifact_class: input.artifact_class,
             source_type: input.source_type,
             title: input.title.clone(),
             participants: input.participants.clone(),
@@ -218,6 +221,7 @@ fn split_chunk_input(
         outputs.push(ArtifactProcessorInput {
             artifact_id: input.artifact_id.clone(),
             import_id: input.import_id.clone(),
+            artifact_class: input.artifact_class,
             source_type: input.source_type,
             title: Some(match &input.title {
                 Some(title) => {
@@ -254,7 +258,7 @@ fn total_chars(segments: &[LoadedSegment]) -> usize {
 mod tests {
     use super::*;
     use crate::domain::{ParticipantRole, VisibilityStatus};
-    use crate::storage::{LoadedParticipant, SourceType};
+    use crate::storage::{ArtifactClass, LoadedParticipant, SourceType};
 
     fn chunking() -> ExtractionChunkingConfig {
         ExtractionChunkingConfig {
@@ -268,6 +272,7 @@ mod tests {
         ArtifactProcessorInput {
             artifact_id: "artifact-1".to_string(),
             import_id: "import-1".to_string(),
+            artifact_class: ArtifactClass::Conversation,
             source_type: SourceType::ClaudeExport,
             title: Some("Title".to_string()),
             participants: vec![LoadedParticipant {

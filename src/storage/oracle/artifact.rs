@@ -2,8 +2,9 @@ use crate::error::{StorageError, StorageResult};
 use oracle::Connection;
 
 use crate::storage::types::{
-    ArtifactListItem, EnrichmentStatus, LoadedArtifactForEnrichment, LoadedArtifactRecord,
-    LoadedParticipant, LoadedSegment, NewArtifact, NewParticipant, SourceType,
+    ArtifactClass, ArtifactListItem, EnrichmentStatus, LoadedArtifactForEnrichment,
+    LoadedArtifactRecord, LoadedParticipant, LoadedSegment, NewArtifact, NewParticipant,
+    SourceType,
 };
 use crate::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 
@@ -166,8 +167,8 @@ pub fn load_artifact_for_enrichment(
     artifact_id: &str,
 ) -> StorageResult<Option<LoadedArtifactForEnrichment>> {
     let artifact_row = conn
-        .query_row_as::<(String, String, String, Option<String>)>(
-            "SELECT artifact_id, import_id, source_type, title \
+        .query_row_as::<(String, String, String, String, Option<String>)>(
+            "SELECT artifact_id, import_id, artifact_class, source_type, title \
              FROM oa_artifact WHERE artifact_id = :1",
             &[&artifact_id],
         )
@@ -177,9 +178,17 @@ pub fn load_artifact_for_enrichment(
             _ => Err(StorageError::ListArtifacts { source }),
         })?;
 
-    let Some((artifact_id_value, import_id, source_type_str, title)) = artifact_row else {
+    let Some((artifact_id_value, import_id, artifact_class_str, source_type_str, title)) =
+        artifact_row
+    else {
         return Ok(None);
     };
+    let artifact_class = ArtifactClass::from_str(&artifact_class_str).ok_or_else(|| {
+        StorageError::InvalidArtifactClass {
+            artifact_id: artifact_id_value.clone(),
+            value: artifact_class_str,
+        }
+    })?;
     let source_type =
         SourceType::from_str(&source_type_str).ok_or_else(|| StorageError::InvalidSourceType {
             artifact_id: artifact_id_value.clone(),
@@ -188,6 +197,7 @@ pub fn load_artifact_for_enrichment(
     let artifact = LoadedArtifactRecord {
         artifact_id: artifact_id_value,
         import_id,
+        artifact_class,
         source_type,
         title,
     };

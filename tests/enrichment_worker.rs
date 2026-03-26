@@ -617,6 +617,7 @@ impl FixedReadStore {
                 artifact: LoadedArtifactRecord {
                     artifact_id: "artifact-1".to_string(),
                     import_id: "import-1".to_string(),
+                    artifact_class: open_archive::storage::ArtifactClass::Conversation,
                     source_type: SourceType::ChatGptExport,
                     title: Some("Test artifact".to_string()),
                 },

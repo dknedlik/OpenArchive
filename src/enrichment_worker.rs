@@ -8,7 +8,7 @@ use crate::extraction_chunking::{
 };
 use crate::processor::{
     cleanup_artifact_processor_output, memory_candidate_key_from_fields,
-    should_shape_conversation_input, ArtifactProcessorFactory, ArtifactProcessorInput,
+    should_shape_artifact_input, ArtifactProcessorFactory, ArtifactProcessorInput,
     ArtifactProcessorOutput, ClassificationOutput, EntityOutput, MemoryOutput, ProcessorError,
     ReconciliationProcessorInput, RelationshipOutput, StubProcessorFactory, SummaryOutput,
 };
@@ -335,6 +335,7 @@ fn process_extract_job_batch(
         let input = ArtifactProcessorInput {
             artifact_id: loaded.artifact.artifact_id.clone(),
             import_id: payload.import_id.clone(),
+            artifact_class: loaded.artifact.artifact_class,
             source_type,
             title: loaded.artifact.title.clone(),
             participants: loaded.participants,
@@ -718,6 +719,7 @@ fn process_extract_job(
     let processor_input = ArtifactProcessorInput {
         artifact_id: loaded.artifact.artifact_id.clone(),
         import_id: payload.import_id.clone(),
+        artifact_class: loaded.artifact.artifact_class,
         source_type,
         title: loaded.artifact.title.clone(),
         participants: loaded.participants,
@@ -1562,7 +1564,7 @@ fn maybe_gap_fill_extraction_output(
     chunking: &ExtractionChunkingConfig,
     coverage_policy: &ExtractCoveragePolicy,
 ) -> std::result::Result<ArtifactProcessorOutput, String> {
-    if coverage_policy.max_gap_fill_passes == 0 || !should_shape_conversation_input(input) {
+    if coverage_policy.max_gap_fill_passes == 0 || !should_shape_artifact_input(input) {
         return Ok(output);
     }
 
