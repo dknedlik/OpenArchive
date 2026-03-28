@@ -1,7 +1,10 @@
+#![deny(warnings)]
+
 use open_archive::app::retrieval::ArchiveRetrievalServiceApi;
 use open_archive::config::HttpConfig;
 use open_archive::enrichment_worker::{
     format_worker_id, start_enrichment_workers, start_enrichment_workers_with_factory,
+    EnrichmentPipelineResources, WorkerStartConfig,
 };
 use open_archive::error::StorageResult;
 use open_archive::processor::{ArtifactProcessor, ArtifactProcessorFactory, ProcessorError};
@@ -146,14 +149,20 @@ fn test_worker_fails_job_when_factory_rejects_claimed_tier() {
     let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store;
 
     let workers = start_enrichment_workers_with_factory(
-        &config,
-        job_store_trait,
-        read_store_trait,
-        retrieval_store_trait,
-        state_store_trait,
-        derived_store_trait,
-        shutdown.clone(),
-        Arc::new(RejectAllFactory),
+        WorkerStartConfig {
+            http: &config,
+            shutdown: shutdown.clone(),
+            processor_factory: Arc::new(RejectAllFactory),
+        },
+        EnrichmentPipelineResources {
+            job_store: job_store_trait,
+            read_store: read_store_trait,
+            retrieval_service: retrieval_store_trait,
+            state_store: state_store_trait,
+            derived_store: derived_store_trait,
+            embedding_store: None,
+            embedding_provider: None,
+        },
     )
     .expect("worker should start");
 
@@ -183,14 +192,20 @@ fn test_worker_marks_job_retryable_for_transient_inference_failures() {
     let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store;
 
     let workers = start_enrichment_workers_with_factory(
-        &config,
-        job_store_trait,
-        read_store_trait,
-        retrieval_store_trait,
-        state_store_trait,
-        derived_store_trait,
-        shutdown.clone(),
-        Arc::new(RetryableProcessorFactory),
+        WorkerStartConfig {
+            http: &config,
+            shutdown: shutdown.clone(),
+            processor_factory: Arc::new(RetryableProcessorFactory),
+        },
+        EnrichmentPipelineResources {
+            job_store: job_store_trait,
+            read_store: read_store_trait,
+            retrieval_service: retrieval_store_trait,
+            state_store: state_store_trait,
+            derived_store: derived_store_trait,
+            embedding_store: None,
+            embedding_provider: None,
+        },
     )
     .expect("worker should start");
 

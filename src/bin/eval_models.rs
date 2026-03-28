@@ -1,3 +1,5 @@
+#![deny(warnings)]
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -222,14 +224,14 @@ fn run_model(
 }
 
 fn build_processor_input(fixture: &EvalFixture) -> Result<ArtifactProcessorInput> {
-    let source_type = SourceType::from_str(&fixture.source_type)
+    let source_type = SourceType::parse(&fixture.source_type)
         .ok_or_else(|| anyhow!("unsupported source_type {}", fixture.source_type))?;
 
     let mut participants_by_role: BTreeMap<String, String> = BTreeMap::new();
     let mut participants = Vec::new();
 
     for segment in &fixture.segments {
-        let role = ParticipantRole::from_str(&segment.participant_role)
+        let role = ParticipantRole::parse(&segment.participant_role)
             .ok_or_else(|| anyhow!("unsupported participant_role {}", segment.participant_role))?;
         if !participants_by_role.contains_key(&segment.participant_role) {
             let participant_id = format!("participant-{}", participants_by_role.len() + 1);
@@ -248,7 +250,7 @@ fn build_processor_input(fixture: &EvalFixture) -> Result<ArtifactProcessorInput
         .iter()
         .enumerate()
         .map(|(index, segment)| {
-            let role = ParticipantRole::from_str(&segment.participant_role).ok_or_else(|| {
+            let role = ParticipantRole::parse(&segment.participant_role).ok_or_else(|| {
                 anyhow!("unsupported participant_role {}", segment.participant_role)
             })?;
             Ok(LoadedSegment {

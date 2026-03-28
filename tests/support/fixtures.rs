@@ -293,7 +293,7 @@ pub fn seed_postgres_stub_derivations(
                     object: NewDerivedObject {
                         derived_object_id: memory_object_id.clone(),
                         artifact_id: artifact_id.to_string(),
-                        derivation_run_id: derivation_run_id,
+                        derivation_run_id,
                         origin_kind: OriginKind::Explicit,
                         object_status: ObjectStatus::Active,
                         confidence_score: Some(0.8),
@@ -326,17 +326,31 @@ pub fn seed_postgres_stub_derivations(
         .expect("seed derivation attempt");
 }
 
+pub(super) struct FixtureDerivationAttemptSpec<'a> {
+    pub run_id: &'a str,
+    pub summary_id: &'a str,
+    pub classification_id: &'a str,
+    pub memory_id: &'a str,
+    pub pipeline_version: &'a str,
+    pub provider_name: &'a str,
+    pub model_name: &'a str,
+    pub prompt_version: &'a str,
+}
+
 pub(super) fn fixture_derivation_attempt(
     fixture: &TestImportFixture,
-    run_id: &str,
-    summary_id: &str,
-    classification_id: &str,
-    memory_id: &str,
-    pipeline_version: &str,
-    provider_name: &str,
-    model_name: &str,
-    prompt_version: &str,
+    spec: FixtureDerivationAttemptSpec<'_>,
 ) -> WriteDerivationAttempt {
+    let FixtureDerivationAttemptSpec {
+        run_id,
+        summary_id,
+        classification_id,
+        memory_id,
+        pipeline_version,
+        provider_name,
+        model_name,
+        prompt_version,
+    } = spec;
     WriteDerivationAttempt {
         run: NewDerivationRun {
             derivation_run_id: run_id.to_string(),
@@ -461,3 +475,49 @@ pub(super) fn fixture_derivation_attempt(
         ],
     }
 }
+
+fn _touch_fixture_fields(fixture: &TestImportFixture) {
+    if false {
+        let _ = (
+            &fixture.write_set,
+            &fixture.artifact_id,
+            &fixture.job_id,
+            &fixture.payload_object_id,
+            &fixture.payload_sha256,
+            &fixture.segment_ids,
+        );
+    }
+}
+
+fn _touch_postgres_fixture_support(fixture: &TestImportFixture, config: &PostgresConfig) {
+    if false {
+        seed_postgres_stub_derivations(
+            config,
+            &fixture.artifact_id,
+            &fixture.job_id,
+            &fixture.segment_ids,
+        );
+    }
+}
+
+fn _touch_derivation_fixture_support(fixture: &TestImportFixture) {
+    if false {
+        let _ = fixture_derivation_attempt(
+            fixture,
+            FixtureDerivationAttemptSpec {
+                run_id: "run",
+                summary_id: "summary",
+                classification_id: "classification",
+                memory_id: "memory",
+                pipeline_version: "v1",
+                provider_name: "provider",
+                model_name: "model",
+                prompt_version: "prompt",
+            },
+        );
+    }
+}
+
+const _: fn(&TestImportFixture) = _touch_fixture_fields;
+const _: fn(&TestImportFixture, &PostgresConfig) = _touch_postgres_fixture_support;
+const _: fn(&TestImportFixture) = _touch_derivation_fixture_support;

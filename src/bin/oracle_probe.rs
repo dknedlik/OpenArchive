@@ -1,3 +1,5 @@
+#![deny(warnings)]
+
 use anyhow::{Context, Result};
 use open_archive::config::OracleConfig;
 use open_archive::db;

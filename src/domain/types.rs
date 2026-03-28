@@ -46,7 +46,7 @@ impl ParticipantRole {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "user" => Some(Self::User),
             "assistant" => Some(Self::Assistant),
@@ -75,7 +75,7 @@ impl VisibilityStatus {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "visible" => Some(Self::Visible),
             "hidden" => Some(Self::Hidden),

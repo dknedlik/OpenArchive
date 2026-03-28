@@ -58,6 +58,6 @@ pub(in crate::storage::postgres) fn storage_db_error(
 ) -> StorageError {
     StorageError::Db(DbError::ConnectPostgres {
         connection_string: connection_string.to_string(),
-        source,
+        source: Box::new(source),
     })
 }

@@ -216,7 +216,7 @@ fn normalize_conversation(raw: &RawConversation) -> ParserResult<ParsedConversat
 
 /// Flatten the conversation tree into the active path: the sequence of nodes
 /// from root to the current leaf that represents what the user last saw.
-fn flatten_active_path<'a>(conv: &'a RawConversation) -> ParserResult<Vec<&'a RawMappingNode>> {
+fn flatten_active_path(conv: &RawConversation) -> ParserResult<Vec<&RawMappingNode>> {
     if conv.mapping.is_empty() {
         return Err(ParserError::EmptyConversation {
             conversation_id: conv.id.clone(),
@@ -274,7 +274,7 @@ fn walk_from_current_node<'a>(
     Ok(path)
 }
 
-fn walk_from_root<'a>(conv: &'a RawConversation) -> ParserResult<Vec<&'a RawMappingNode>> {
+fn walk_from_root(conv: &RawConversation) -> ParserResult<Vec<&RawMappingNode>> {
     let root = conv
         .mapping
         .values()

@@ -29,21 +29,37 @@ pub struct ArchiveApplication {
     pub writeback: Option<writeback::WritebackService>,
 }
 
+pub struct ArchiveApplicationDeps {
+    pub import_store: Arc<dyn ImportWriteStore + Send + Sync>,
+    pub read_store: Arc<dyn ArtifactReadStore + Send + Sync>,
+    pub retrieval_store: Arc<dyn ArchiveRetrievalStore + Send + Sync>,
+    pub search_read_store: Option<Arc<dyn ArchiveSearchReadStore + Send + Sync>>,
+    pub artifact_detail_store: Option<Arc<dyn ArtifactDetailReadStore + Send + Sync>>,
+    pub context_pack_store: Option<Arc<dyn ArtifactContextPackReadStore + Send + Sync>>,
+    pub cross_artifact_store: Option<Arc<dyn CrossArtifactReadStore + Send + Sync>>,
+    pub object_search_store: Option<Arc<dyn DerivedObjectSearchStore + Send + Sync>>,
+    pub review_store: Option<Arc<dyn ReviewStore + Send + Sync>>,
+    pub object_search_embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    pub object_store: Arc<dyn ObjectStore + Send + Sync>,
+    pub writeback_store: Option<Arc<dyn WritebackStore + Send + Sync>>,
+}
+
 impl ArchiveApplication {
-    pub fn new(
-        import_store: Arc<dyn ImportWriteStore + Send + Sync>,
-        read_store: Arc<dyn ArtifactReadStore + Send + Sync>,
-        retrieval_store: Arc<dyn ArchiveRetrievalStore + Send + Sync>,
-        search_read_store: Option<Arc<dyn ArchiveSearchReadStore + Send + Sync>>,
-        artifact_detail_store: Option<Arc<dyn ArtifactDetailReadStore + Send + Sync>>,
-        context_pack_store: Option<Arc<dyn ArtifactContextPackReadStore + Send + Sync>>,
-        cross_artifact_store: Option<Arc<dyn CrossArtifactReadStore + Send + Sync>>,
-        object_search_store: Option<Arc<dyn DerivedObjectSearchStore + Send + Sync>>,
-        review_store: Option<Arc<dyn ReviewStore + Send + Sync>>,
-        object_search_embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
-        object_store: Arc<dyn ObjectStore + Send + Sync>,
-        writeback_store: Option<Arc<dyn WritebackStore + Send + Sync>>,
-    ) -> Self {
+    pub fn new(deps: ArchiveApplicationDeps) -> Self {
+        let ArchiveApplicationDeps {
+            import_store,
+            read_store,
+            retrieval_store,
+            search_read_store,
+            artifact_detail_store,
+            context_pack_store,
+            cross_artifact_store,
+            object_search_store,
+            review_store,
+            object_search_embedding_provider,
+            object_store,
+            writeback_store,
+        } = deps;
         let context_pack = match (context_pack_store, cross_artifact_store) {
             (Some(cp), Some(ca)) => Some(
                 context_pack::ContextPackService::with_cross_artifact_store(cp, ca),

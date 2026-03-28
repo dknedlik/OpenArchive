@@ -1,3 +1,5 @@
+#![deny(warnings)]
+
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs;

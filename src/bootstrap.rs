@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::app::ArchiveApplication;
+use crate::app::{ArchiveApplication, ArchiveApplicationDeps};
 use crate::config::{AppConfig, InferenceConfig, ObjectStoreConfig, RelationalStoreConfig};
 use crate::embedding::{build_embedding_provider, EmbeddingProvider};
 use crate::error::{ConfigError, ConfigResult};
@@ -176,20 +176,20 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 Arc::new(PostgresDerivedObjectEmbeddingStore::new(pg_config.clone()));
             let writeback_store: Arc<dyn crate::storage::WritebackStore + Send + Sync> =
                 Arc::new(PostgresWritebackStore::new(pg_config.clone()));
-            let app = Arc::new(ArchiveApplication::new(
-                Arc::clone(&import_store),
-                Arc::clone(&read_store),
+            let app = Arc::new(ArchiveApplication::new(ArchiveApplicationDeps {
+                import_store: Arc::clone(&import_store),
+                read_store: Arc::clone(&read_store),
                 retrieval_store,
-                Some(search_read_store),
-                Some(artifact_detail_store),
-                Some(context_pack_store),
-                Some(cross_artifact_store),
-                Some(object_search_store),
-                Some(review_store),
-                embedding_provider.clone(),
-                Arc::clone(&object_store),
-                Some(writeback_store),
-            ));
+                search_read_store: Some(search_read_store),
+                artifact_detail_store: Some(artifact_detail_store),
+                context_pack_store: Some(context_pack_store),
+                cross_artifact_store: Some(cross_artifact_store),
+                object_search_store: Some(object_search_store),
+                review_store: Some(review_store),
+                object_search_embedding_provider: embedding_provider.clone(),
+                object_store: Arc::clone(&object_store),
+                writeback_store: Some(writeback_store),
+            }));
             Ok(ServiceBundle {
                 app,
                 read_store,
@@ -218,20 +218,20 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 } else {
                     primary_factory
                 };
-            let app = Arc::new(ArchiveApplication::new(
-                Arc::clone(&import_store),
-                Arc::clone(&read_store),
+            let app = Arc::new(ArchiveApplication::new(ArchiveApplicationDeps {
+                import_store: Arc::clone(&import_store),
+                read_store: Arc::clone(&read_store),
                 retrieval_store,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Arc::clone(&object_store),
-                None,
-            ));
+                search_read_store: None,
+                artifact_detail_store: None,
+                context_pack_store: None,
+                cross_artifact_store: None,
+                object_search_store: None,
+                review_store: None,
+                object_search_embedding_provider: None,
+                object_store: Arc::clone(&object_store),
+                writeback_store: None,
+            }));
             Ok(ServiceBundle {
                 app,
                 read_store,

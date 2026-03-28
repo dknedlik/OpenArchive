@@ -44,7 +44,7 @@ pub fn insert_derivation_run(conn: &Connection, run: &NewDerivationRun) -> Stora
     .map_err(|source| StorageError::InsertDerivationRun {
         derivation_run_id: run.derivation_run_id.clone(),
         artifact_id: run.artifact_id.clone(),
-        source,
+        source: Box::new(source),
     })?;
 
     Ok(())
@@ -85,7 +85,7 @@ pub fn insert_derived_object(conn: &Connection, object: &NewDerivedObject) -> St
     .map_err(|source| StorageError::InsertDerivedObject {
         derived_object_id: object.derived_object_id.clone(),
         artifact_id: object.artifact_id.clone(),
-        source,
+        source: Box::new(source),
     })?;
 
     Ok(())
@@ -100,7 +100,7 @@ pub fn supersede_active_derived_objects(conn: &Connection, artifact_id: &str) ->
     )
     .map_err(|source| StorageError::UpdateDerivedObjectStatus {
         artifact_id: artifact_id.to_string(),
-        source,
+        source: Box::new(source),
     })?;
 
     Ok(())
@@ -126,7 +126,7 @@ pub fn insert_evidence_link(conn: &Connection, link: &NewEvidenceLink) -> Storag
     .map_err(|source| StorageError::InsertEvidenceLink {
         evidence_link_id: link.evidence_link_id.clone(),
         derived_object_id: link.derived_object_id.clone(),
-        source,
+        source: Box::new(source),
     })?;
 
     Ok(())
@@ -247,7 +247,7 @@ fn artifact_exists(conn: &Connection, artifact_id: &str) -> StorageResult<bool> 
         oracle::ErrorKind::NoDataFound => Ok(false),
         _ => Err(StorageError::ValidateArtifactOwnership {
             artifact_id: artifact_id.to_string(),
-            source,
+            source: Box::new(source),
         }),
     })
 }
@@ -262,7 +262,7 @@ fn load_segment_artifact_id(conn: &Connection, segment_id: &str) -> StorageResul
         oracle::ErrorKind::NoDataFound => Ok(None),
         _ => Err(StorageError::ValidateSegmentOwnership {
             segment_id: segment_id.to_string(),
-            source,
+            source: Box::new(source),
         }),
     })
 }

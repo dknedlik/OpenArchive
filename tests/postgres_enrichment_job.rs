@@ -1,11 +1,18 @@
-mod support;
+#![deny(warnings)]
 
+#[path = "support/contracts.rs"]
+mod contracts;
+#[path = "support/fixtures.rs"]
+mod fixtures;
+#[path = "support/harness.rs"]
+mod harness;
+
+use harness::{ImportRecord, JobRecord, ProviderHarness};
 use open_archive::config::PostgresConfig;
 use open_archive::migrations;
 use open_archive::storage::{EnrichmentJobLifecycleStore, ImportWriteStore};
 use postgres::NoTls;
 use std::sync::OnceLock;
-use support::{ImportRecord, JobRecord, ProviderHarness};
 
 fn postgres_config() -> Option<PostgresConfig> {
     if std::env::var("OA_POSTGRES_INTEGRATION_TESTS").is_err() {
@@ -51,7 +58,7 @@ fn recreate_test_database(config: &PostgresConfig) {
 fn harness() -> Option<PostgresHarness> {
     static CONFIG: OnceLock<Option<PostgresConfig>> = OnceLock::new();
     CONFIG
-        .get_or_init(|| postgres_config())
+        .get_or_init(postgres_config)
         .clone()
         .map(PostgresHarness)
 }
@@ -135,61 +142,61 @@ impl ProviderHarness for PostgresHarness {
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_claim_complete_happy_path() {
     let Some(harness) = harness() else { return };
-    support::contract_claim_complete_happy_path(&harness);
+    contracts::contract_claim_complete_happy_path(&harness);
 }
 
 #[test]
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_claim_fail_terminal() {
     let Some(harness) = harness() else { return };
-    support::contract_claim_fail_terminal(&harness);
+    contracts::contract_claim_fail_terminal(&harness);
 }
 
 #[test]
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_claim_retryable_reclaim_complete() {
     let Some(harness) = harness() else { return };
-    support::contract_claim_retryable_reclaim_complete(&harness);
+    contracts::contract_claim_retryable_reclaim_complete(&harness);
 }
 
 #[test]
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_retryable_exhausted_becomes_terminal() {
     let Some(harness) = harness() else { return };
-    support::contract_retryable_exhausted_becomes_terminal(&harness);
+    contracts::contract_retryable_exhausted_becomes_terminal(&harness);
 }
 
 #[test]
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_claim_returns_none_when_empty() {
     let Some(harness) = harness() else { return };
-    support::contract_claim_returns_none_when_empty(&harness);
+    contracts::contract_claim_returns_none_when_empty(&harness);
 }
 
 #[test]
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_concurrent_claim_protection() {
     let Some(harness) = harness() else { return };
-    support::contract_concurrent_claim_protection(&harness);
+    contracts::contract_concurrent_claim_protection(&harness);
 }
 
 #[test]
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_payload_matches_documented_schema() {
     let Some(harness) = harness() else { return };
-    support::contract_payload_matches_documented_schema(&harness);
+    contracts::contract_payload_matches_documented_schema(&harness);
 }
 
 #[test]
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_claim_skips_future_available_at() {
     let Some(harness) = harness() else { return };
-    support::contract_claim_skips_future_available_at(&harness);
+    contracts::contract_claim_skips_future_available_at(&harness);
 }
 
 #[test]
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_non_claiming_worker_cannot_complete_job() {
     let Some(harness) = harness() else { return };
-    support::contract_non_claiming_worker_cannot_complete_job(&harness);
+    contracts::contract_non_claiming_worker_cannot_complete_job(&harness);
 }

@@ -70,7 +70,7 @@ impl LocalFsObjectStore {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|source| ObjectStoreError::CreateDir {
                 path: parent.to_path_buf(),
-                source,
+                source: Box::new(source),
             })?;
         }
         Ok(())
@@ -88,7 +88,7 @@ impl ObjectStore for LocalFsObjectStore {
             fs::write(&path, &object.bytes).map_err(|source| ObjectStoreError::WriteObject {
                 object_id: object.object_id.clone(),
                 path: path.clone(),
-                source,
+                source: Box::new(source),
             })?;
         }
 
@@ -110,7 +110,7 @@ impl ObjectStore for LocalFsObjectStore {
         fs::read(&path).map_err(|source| ObjectStoreError::ReadObject {
             object_id: object.object_id.clone(),
             path,
-            source,
+            source: Box::new(source),
         })
     }
 
@@ -122,7 +122,7 @@ impl ObjectStore for LocalFsObjectStore {
             Err(source) => Err(ObjectStoreError::DeleteObject {
                 object_id: object.object_id.clone(),
                 path,
-                source,
+                source: Box::new(source),
             }),
         }
     }
@@ -159,9 +159,11 @@ impl S3CompatibleObjectStore {
         Ok(Self {
             bucket,
             credentials: Credentials::new(config.access_key_id, config.secret_access_key),
-            client: Client::builder()
-                .build()
-                .map_err(|source| ObjectStoreError::BuildHttpClient { source })?,
+            client: Client::builder().build().map_err(|source| {
+                ObjectStoreError::BuildHttpClient {
+                    source: Box::new(source),
+                }
+            })?,
             key_prefix: config.key_prefix.map(normalize_prefix),
         })
     }
@@ -210,7 +212,7 @@ impl S3CompatibleObjectStore {
             .map_err(|source| ObjectStoreError::SendRequest {
                 operation: "put_object",
                 object_id: object.object_id.clone(),
-                source,
+                source: Box::new(source),
             })?;
 
         if response.status() != StatusCode::OK {
@@ -236,7 +238,7 @@ impl S3CompatibleObjectStore {
             ObjectStoreError::SendRequest {
                 operation: "create_multipart_upload",
                 object_id: object.object_id.clone(),
-                source,
+                source: Box::new(source),
             }
         })?;
 
@@ -254,7 +256,7 @@ impl S3CompatibleObjectStore {
                 .map_err(|source| ObjectStoreError::ReadResponseBody {
                     operation: "create_multipart_upload",
                     object_id: object.object_id.clone(),
-                    source,
+                    source: Box::new(source),
                 })?;
 
         let parsed = CreateMultipartUpload::parse_response(&create_body).map_err(|e| {
@@ -302,7 +304,7 @@ impl S3CompatibleObjectStore {
                     return Err(ObjectStoreError::SendRequest {
                         operation: "upload_part",
                         object_id: object.object_id.clone(),
-                        source,
+                        source: Box::new(source),
                     });
                 }
             };
@@ -362,7 +364,7 @@ impl S3CompatibleObjectStore {
                 return Err(ObjectStoreError::SendRequest {
                     operation: "complete_multipart_upload",
                     object_id: object.object_id.clone(),
-                    source,
+                    source: Box::new(source),
                 });
             }
         };
@@ -402,7 +404,7 @@ impl S3CompatibleObjectStore {
             ObjectStoreError::SendRequest {
                 operation: "abort_multipart_upload",
                 object_id: object_id.to_string(),
-                source,
+                source: Box::new(source),
             }
         })?;
 
@@ -429,7 +431,7 @@ impl ObjectStore for S3CompatibleObjectStore {
             .map_err(|source| ObjectStoreError::SendRequest {
                 operation: "head_object",
                 object_id: object.object_id.clone(),
-                source,
+                source: Box::new(source),
             })?;
 
         let already_exists = match head_response.status() {
@@ -479,7 +481,7 @@ impl ObjectStore for S3CompatibleObjectStore {
             .map_err(|source| ObjectStoreError::SendRequest {
                 operation: "get_object_bytes",
                 object_id: object.object_id.clone(),
-                source,
+                source: Box::new(source),
             })?;
 
         if response.status() != StatusCode::OK {
@@ -496,7 +498,7 @@ impl ObjectStore for S3CompatibleObjectStore {
             .map_err(|source| ObjectStoreError::ReadResponseBody {
                 operation: "get_object_bytes",
                 object_id: object.object_id.clone(),
-                source,
+                source: Box::new(source),
             })
     }
 
@@ -509,7 +511,7 @@ impl ObjectStore for S3CompatibleObjectStore {
             .map_err(|source| ObjectStoreError::SendRequest {
                 operation: "delete_object",
                 object_id: object.object_id.clone(),
-                source,
+                source: Box::new(source),
             })?;
 
         match response.status() {

@@ -11,12 +11,14 @@ pub fn connect(config: &OracleConfig) -> DbResult<Connection> {
     let pool = pool_for(config)?;
     let conn = pool.get().map_err(|source| DbError::AcquireConnection {
         connect_string: config.connect_string.clone(),
-        source,
+        source: Box::new(source),
     })?;
 
     if let Some(timeout) = config.call_timeout {
         conn.set_call_timeout(Some(timeout))
-            .map_err(|source| DbError::SetCallTimeout { source })?;
+            .map_err(|source| DbError::SetCallTimeout {
+                source: Box::new(source),
+            })?;
     }
 
     Ok(conn)
@@ -41,11 +43,13 @@ fn pool_for(config: &OracleConfig) -> DbResult<Pool> {
     builder.get_mode(GetMode::TimedWait(config.pool.get_timeout));
     builder
         .ping_interval(Some(config.pool.ping_interval))
-        .map_err(|source| DbError::ConfigurePoolPingInterval { source })?;
+        .map_err(|source| DbError::ConfigurePoolPingInterval {
+            source: Box::new(source),
+        })?;
 
     let pool = builder.build().map_err(|source| DbError::CreatePool {
         connect_string: config.connect_string.clone(),
-        source,
+        source: Box::new(source),
     })?;
     guard.insert(config.clone(), pool.clone());
     Ok(pool)

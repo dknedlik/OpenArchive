@@ -38,7 +38,7 @@ pub fn insert_job(conn: &Connection, j: &NewEnrichmentJob) -> StorageResult<()> 
     .map_err(|source| StorageError::InsertJob {
         job_id: j.job_id.clone(),
         artifact_id: j.artifact_id.clone(),
-        source,
+        source: Box::new(source),
     })?;
     Ok(())
 }
@@ -69,10 +69,14 @@ pub fn claim_next_job(conn: &Connection, worker_id: &str) -> StorageResult<Optio
              FOR UPDATE SKIP LOCKED",
             &[],
         )
-        .map_err(|source| StorageError::ClaimJob { source })?;
+        .map_err(|source| StorageError::ClaimJob {
+            source: Box::new(source),
+        })?;
 
     let row = match rows.next() {
-        Some(row_result) => row_result.map_err(|source| StorageError::ClaimJob { source })?,
+        Some(row_result) => row_result.map_err(|source| StorageError::ClaimJob {
+            source: Box::new(source),
+        })?,
         None => return Ok(None),
     };
     let (
@@ -97,16 +101,17 @@ pub fn claim_next_job(conn: &Connection, worker_id: &str) -> StorageResult<Optio
             String,
             String,
         )>()
-        .map_err(|source| StorageError::ClaimJob { source })?;
+        .map_err(|source| StorageError::ClaimJob {
+            source: Box::new(source),
+        })?;
 
     // Validate job_type BEFORE any update to avoid stranding invalid jobs in running state
-    let job_type =
-        JobType::from_str(&job_type_str).ok_or_else(|| StorageError::InvalidJobType {
-            job_id: job_id.clone(),
-            job_type: job_type_str.clone(),
-        })?;
+    let job_type = JobType::parse(&job_type_str).ok_or_else(|| StorageError::InvalidJobType {
+        job_id: job_id.clone(),
+        job_type: job_type_str.clone(),
+    })?;
     let enrichment_tier =
-        EnrichmentTier::from_str(&tier_str).ok_or_else(|| StorageError::InvalidEnrichmentTier {
+        EnrichmentTier::parse(&tier_str).ok_or_else(|| StorageError::InvalidEnrichmentTier {
             job_id: job_id.clone(),
             value: tier_str.clone(),
         })?;
@@ -129,13 +134,13 @@ pub fn claim_next_job(conn: &Connection, worker_id: &str) -> StorageResult<Optio
     )
     .map_err(|source| StorageError::UpdateJobStatus {
         job_id: job_id.clone(),
-        source,
+        source: Box::new(source),
     })?;
 
     recompute_artifact_enrichment_status(conn, &artifact_id)?;
     conn.commit().map_err(|source| StorageError::Commit {
         operation: "claim enrichment job",
-        source,
+        source: Box::new(source),
     })?;
 
     Ok(Some(ClaimedJob {
@@ -185,10 +190,14 @@ pub fn claim_matching_jobs(
                     &required_capabilities,
                 ],
             )
-            .map_err(|source| StorageError::ClaimJob { source })?;
+            .map_err(|source| StorageError::ClaimJob {
+                source: Box::new(source),
+            })?;
 
         let row = match rows.next() {
-            Some(row_result) => row_result.map_err(|source| StorageError::ClaimJob { source })?,
+            Some(row_result) => row_result.map_err(|source| StorageError::ClaimJob {
+                source: Box::new(source),
+            })?,
             None => break,
         };
         let (
@@ -213,14 +222,16 @@ pub fn claim_matching_jobs(
                 String,
                 String,
             )>()
-            .map_err(|source| StorageError::ClaimJob { source })?;
+            .map_err(|source| StorageError::ClaimJob {
+                source: Box::new(source),
+            })?;
 
         let job_type =
-            JobType::from_str(&job_type_str).ok_or_else(|| StorageError::InvalidJobType {
+            JobType::parse(&job_type_str).ok_or_else(|| StorageError::InvalidJobType {
                 job_id: job_id.clone(),
                 job_type: job_type_str.clone(),
             })?;
-        let enrichment_tier = EnrichmentTier::from_str(&tier_str).ok_or_else(|| {
+        let enrichment_tier = EnrichmentTier::parse(&tier_str).ok_or_else(|| {
             StorageError::InvalidEnrichmentTier {
                 job_id: job_id.clone(),
                 value: tier_str.clone(),
@@ -243,7 +254,7 @@ pub fn claim_matching_jobs(
         )
         .map_err(|source| StorageError::UpdateJobStatus {
             job_id: job_id.clone(),
-            source,
+            source: Box::new(source),
         })?;
 
         recompute_artifact_enrichment_status(conn, &artifact_id)?;
@@ -262,7 +273,7 @@ pub fn claim_matching_jobs(
 
     conn.commit().map_err(|source| StorageError::Commit {
         operation: "claim matching enrichment jobs",
-        source,
+        source: Box::new(source),
     })?;
 
     Ok(claimed)
@@ -296,7 +307,9 @@ pub fn claim_jobs_by_type(
                  FOR UPDATE SKIP LOCKED",
                 &[&job_type.as_str(), &tier.as_str()],
             )
-            .map_err(|source| StorageError::ClaimJob { source })?
+            .map_err(|source| StorageError::ClaimJob {
+                source: Box::new(source),
+            })?
         } else {
             conn.query(
                 "SELECT job_id, artifact_id, job_type, enrichment_tier, spawned_by_job_id, \
@@ -309,11 +322,15 @@ pub fn claim_jobs_by_type(
                  FOR UPDATE SKIP LOCKED",
                 &[&job_type.as_str()],
             )
-            .map_err(|source| StorageError::ClaimJob { source })?
+            .map_err(|source| StorageError::ClaimJob {
+                source: Box::new(source),
+            })?
         };
 
         let row = match rows.next() {
-            Some(row_result) => row_result.map_err(|source| StorageError::ClaimJob { source })?,
+            Some(row_result) => row_result.map_err(|source| StorageError::ClaimJob {
+                source: Box::new(source),
+            })?,
             None => break,
         };
         let (
@@ -338,14 +355,16 @@ pub fn claim_jobs_by_type(
                 String,
                 String,
             )>()
-            .map_err(|source| StorageError::ClaimJob { source })?;
+            .map_err(|source| StorageError::ClaimJob {
+                source: Box::new(source),
+            })?;
 
         let job_type =
-            JobType::from_str(&job_type_str).ok_or_else(|| StorageError::InvalidJobType {
+            JobType::parse(&job_type_str).ok_or_else(|| StorageError::InvalidJobType {
                 job_id: job_id.clone(),
                 job_type: job_type_str.clone(),
             })?;
-        let enrichment_tier = EnrichmentTier::from_str(&tier_str).ok_or_else(|| {
+        let enrichment_tier = EnrichmentTier::parse(&tier_str).ok_or_else(|| {
             StorageError::InvalidEnrichmentTier {
                 job_id: job_id.clone(),
                 value: tier_str.clone(),
@@ -368,7 +387,7 @@ pub fn claim_jobs_by_type(
         )
         .map_err(|source| StorageError::UpdateJobStatus {
             job_id: job_id.clone(),
-            source,
+            source: Box::new(source),
         })?;
 
         recompute_artifact_enrichment_status(conn, &artifact_id)?;
@@ -387,7 +406,7 @@ pub fn claim_jobs_by_type(
 
     conn.commit().map_err(|source| StorageError::Commit {
         operation: "claim enrichment jobs by type",
-        source,
+        source: Box::new(source),
     })?;
 
     Ok(claimed)
@@ -403,7 +422,7 @@ pub fn complete_job(conn: &Connection, worker_id: &str, job_id: &str) -> Storage
         )
         .map_err(|source| StorageError::UpdateJobStatus {
             job_id: job_id.to_string(),
-            source,
+            source: Box::new(source),
         })?
         .0;
 
@@ -419,13 +438,13 @@ pub fn complete_job(conn: &Connection, worker_id: &str, job_id: &str) -> Storage
     )
     .map_err(|source| StorageError::UpdateJobStatus {
         job_id: job_id.to_string(),
-        source,
+        source: Box::new(source),
     })?;
 
     recompute_artifact_enrichment_status(conn, &artifact_id)?;
     conn.commit().map_err(|source| StorageError::Commit {
         operation: "complete enrichment job",
-        source,
+        source: Box::new(source),
     })?;
 
     Ok(())
@@ -446,7 +465,7 @@ pub fn fail_job(
         )
         .map_err(|source| StorageError::UpdateJobStatus {
             job_id: job_id.to_string(),
-            source,
+            source: Box::new(source),
         })?
         .0;
 
@@ -462,13 +481,13 @@ pub fn fail_job(
     )
     .map_err(|source| StorageError::UpdateJobStatus {
         job_id: job_id.to_string(),
-        source,
+        source: Box::new(source),
     })?;
 
     recompute_artifact_enrichment_status(conn, &artifact_id)?;
     conn.commit().map_err(|source| StorageError::Commit {
         operation: "fail enrichment job",
-        source,
+        source: Box::new(source),
     })?;
 
     Ok(())
@@ -495,7 +514,7 @@ pub fn mark_job_retryable(
         )
         .map_err(|source| StorageError::UpdateJobStatus {
             job_id: job_id.to_string(),
-            source,
+            source: Box::new(source),
         })?;
     let artifact_id: String = conn
         .query_row_as::<(String,)>(
@@ -504,7 +523,7 @@ pub fn mark_job_retryable(
         )
         .map_err(|source| StorageError::UpdateJobStatus {
             job_id: job_id.to_string(),
-            source,
+            source: Box::new(source),
         })?
         .0;
 
@@ -522,13 +541,13 @@ pub fn mark_job_retryable(
         )
         .map_err(|source| StorageError::UpdateJobStatus {
             job_id: job_id.to_string(),
-            source,
+            source: Box::new(source),
         })?;
 
         recompute_artifact_enrichment_status(conn, &artifact_id)?;
         conn.commit().map_err(|source| StorageError::Commit {
             operation: "fail exhausted enrichment job",
-            source,
+            source: Box::new(source),
         })?;
 
         return Ok(RetryOutcome::RetriesExhausted);
@@ -554,13 +573,13 @@ pub fn mark_job_retryable(
     )
     .map_err(|source| StorageError::UpdateJobStatus {
         job_id: job_id.to_string(),
-        source,
+        source: Box::new(source),
     })?;
 
     recompute_artifact_enrichment_status(conn, &artifact_id)?;
     conn.commit().map_err(|source| StorageError::Commit {
         operation: "mark enrichment job retryable",
-        source,
+        source: Box::new(source),
     })?;
 
     Ok(RetryOutcome::Retried)
@@ -581,7 +600,7 @@ pub fn reschedule_running_job(
         )
         .map_err(|source| StorageError::UpdateJobStatus {
             job_id: job_id.to_string(),
-            source,
+            source: Box::new(source),
         })?
         .0;
 
@@ -604,13 +623,13 @@ pub fn reschedule_running_job(
     )
     .map_err(|source| StorageError::UpdateJobStatus {
         job_id: job_id.to_string(),
-        source,
+        source: Box::new(source),
     })?;
 
     recompute_artifact_enrichment_status(conn, &artifact_id)?;
     conn.commit().map_err(|source| StorageError::Commit {
         operation: "reschedule enrichment job",
-        source,
+        source: Box::new(source),
     })?;
     Ok(())
 }
@@ -626,12 +645,12 @@ fn lock_owned_running_job(conn: &Connection, worker_id: &str, job_id: &str) -> S
         Err(source) if source.kind() == ErrorKind::NoDataFound => {
             Err(StorageError::UpdateJobStatus {
                 job_id: job_id.to_string(),
-                source,
+                source: Box::new(source),
             })
         }
         Err(source) => Err(StorageError::UpdateJobStatus {
             job_id: job_id.to_string(),
-            source,
+            source: Box::new(source),
         }),
     }
 }
@@ -656,7 +675,9 @@ fn recompute_artifact_enrichment_status(conn: &Connection, artifact_id: &str) ->
         "UPDATE oa_artifact SET enrichment_status = :1 WHERE artifact_id = :2",
         &[&next_status.as_str(), &artifact_id],
     )
-    .map_err(|source| StorageError::ListArtifacts { source })?;
+    .map_err(|source| StorageError::ListArtifacts {
+        source: Box::new(source),
+    })?;
     Ok(())
 }
 
@@ -679,7 +700,7 @@ fn load_artifact_enrichment_snapshot(
              FROM dual",
             &[&artifact_id],
         )
-        .map_err(|source| StorageError::ListArtifacts { source })?;
+        .map_err(|source| StorageError::ListArtifacts { source: Box::new(source) })?;
     Ok(ArtifactEnrichmentSnapshot {
         pending_jobs: row.0,
         running_jobs: row.1,

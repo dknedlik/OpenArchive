@@ -112,7 +112,7 @@ impl ImportWriteStore for OracleImportWriteStore {
                         .rollback()
                         .map_err(|source| StorageError::Rollback {
                             operation: format!("failed artifact set {artifact_id}"),
-                            source,
+                            source: Box::new(source),
                         })?;
                     failed_artifact_ids.push(artifact_id.clone());
                     count_failed += 1;

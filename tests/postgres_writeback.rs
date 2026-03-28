@@ -1,4 +1,7 @@
-mod support;
+#![deny(warnings)]
+
+#[path = "support/fixtures.rs"]
+mod fixtures;
 
 use open_archive::config::PostgresConfig;
 use open_archive::migrations;
@@ -77,10 +80,10 @@ impl PostgresHarness {
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn postgres_writeback_store_persists_agent_memory_with_derivation_run() {
     let Some(harness) = harness() else { return };
-    let _guard = support::lock_live_test();
+    let _guard = fixtures::lock_live_test();
     harness.reset_schema();
 
-    let fixture = support::make_test_import_fixture(&support::unique_suffix("wbmem"));
+    let fixture = fixtures::make_test_import_fixture(&fixtures::unique_suffix("wbmem"));
     let artifact_id = fixture.artifact_id.clone();
 
     PostgresImportWriteStore::new(harness.0.clone())
@@ -88,7 +91,7 @@ fn postgres_writeback_store_persists_agent_memory_with_derivation_run() {
         .expect("seed import should succeed");
 
     let store = PostgresWritebackStore::new(harness.0.clone());
-    let derived_object_id = format!("dobj-{}", support::unique_suffix("agentmem"));
+    let derived_object_id = format!("dobj-{}", fixtures::unique_suffix("agentmem"));
     store
         .store_agent_memory(&NewAgentMemory {
             derived_object_id: derived_object_id.clone(),
@@ -144,11 +147,11 @@ fn postgres_writeback_store_persists_agent_memory_with_derivation_run() {
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn postgres_writeback_link_upsert_keeps_one_canonical_row() {
     let Some(harness) = harness() else { return };
-    let _guard = support::lock_live_test();
+    let _guard = fixtures::lock_live_test();
     harness.reset_schema();
 
-    let fixture_a = support::make_test_import_fixture(&support::unique_suffix("wblka"));
-    let fixture_b = support::make_test_import_fixture(&support::unique_suffix("wblkb"));
+    let fixture_a = fixtures::make_test_import_fixture(&fixtures::unique_suffix("wblka"));
+    let fixture_b = fixtures::make_test_import_fixture(&fixtures::unique_suffix("wblkb"));
 
     let import_store = PostgresImportWriteStore::new(harness.0.clone());
     import_store
@@ -159,8 +162,8 @@ fn postgres_writeback_link_upsert_keeps_one_canonical_row() {
         .expect("seed import B should succeed");
 
     let store = PostgresWritebackStore::new(harness.0.clone());
-    let source_object_id = format!("dobj-{}", support::unique_suffix("srcmem"));
-    let target_object_id = format!("dobj-{}", support::unique_suffix("tgtmem"));
+    let source_object_id = format!("dobj-{}", fixtures::unique_suffix("srcmem"));
+    let target_object_id = format!("dobj-{}", fixtures::unique_suffix("tgtmem"));
 
     store
         .store_agent_memory(&NewAgentMemory {
@@ -187,7 +190,7 @@ fn postgres_writeback_link_upsert_keeps_one_canonical_row() {
         })
         .expect("target memory write should succeed");
 
-    let first_link_id = format!("alink-{}", support::unique_suffix("first"));
+    let first_link_id = format!("alink-{}", fixtures::unique_suffix("first"));
     store
         .store_archive_link(&NewArchiveLink {
             archive_link_id: first_link_id.clone(),
@@ -202,7 +205,7 @@ fn postgres_writeback_link_upsert_keeps_one_canonical_row() {
 
     store
         .store_archive_link(&NewArchiveLink {
-            archive_link_id: format!("alink-{}", support::unique_suffix("second")),
+            archive_link_id: format!("alink-{}", fixtures::unique_suffix("second")),
             source_object_id: source_object_id.clone(),
             target_object_id: target_object_id.clone(),
             link_type: "same_topic".to_string(),

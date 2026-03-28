@@ -1,4 +1,7 @@
-mod support;
+#![deny(warnings)]
+
+#[path = "support/fixtures.rs"]
+mod fixtures;
 
 use open_archive::app::retrieval::{ArchiveRetrievalService, ArchiveRetrievalServiceApi};
 use open_archive::config::{HttpConfig, PostgresConfig};
@@ -109,10 +112,10 @@ impl PostgresHarness {
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_stub_worker_persists_derivations_and_completes_job() {
     let Some(harness) = harness() else { return };
-    let _guard = support::lock_live_test();
+    let _guard = fixtures::lock_live_test();
     harness.reset_schema();
 
-    let fixture = support::make_test_import_fixture(&support::unique_suffix("wrkpg"));
+    let fixture = fixtures::make_test_import_fixture(&fixtures::unique_suffix("wrkpg"));
     let job_id = fixture.job_id.clone();
     harness
         .import_store()

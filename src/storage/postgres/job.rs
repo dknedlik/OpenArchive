@@ -68,13 +68,13 @@ pub fn claim_next_job(
     let required_capabilities_json: String = row.get(7);
     let payload_json: String = row.get(8);
 
-    let job_type = JobType::from_str(&job_type_str).ok_or_else(|| {
+    let job_type = JobType::parse(&job_type_str).ok_or_else(|| {
         crate::error::StorageError::InvalidJobType {
             job_id: job_id.clone(),
             job_type: job_type_str.clone(),
         }
     })?;
-    let enrichment_tier = EnrichmentTier::from_str(&tier_str).ok_or_else(|| {
+    let enrichment_tier = EnrichmentTier::parse(&tier_str).ok_or_else(|| {
         crate::error::StorageError::InvalidEnrichmentTier {
             job_id: job_id.clone(),
             value: tier_str.clone(),
@@ -166,13 +166,13 @@ pub fn claim_matching_jobs(
         let required_capabilities_json: String = row.get(7);
         let payload_json: String = row.get(8);
 
-        let job_type = JobType::from_str(&job_type_str).ok_or_else(|| {
+        let job_type = JobType::parse(&job_type_str).ok_or_else(|| {
             crate::error::StorageError::InvalidJobType {
                 job_id: job_id.clone(),
                 job_type: job_type_str.clone(),
             }
         })?;
-        let enrichment_tier = EnrichmentTier::from_str(&tier_str).ok_or_else(|| {
+        let enrichment_tier = EnrichmentTier::parse(&tier_str).ok_or_else(|| {
             crate::error::StorageError::InvalidEnrichmentTier {
                 job_id: job_id.clone(),
                 value: tier_str.clone(),
@@ -276,13 +276,13 @@ pub fn claim_jobs_by_type(
         let required_capabilities_json: String = row.get(7);
         let payload_json: String = row.get(8);
 
-        let job_type = JobType::from_str(&job_type_str).ok_or_else(|| {
+        let job_type = JobType::parse(&job_type_str).ok_or_else(|| {
             crate::error::StorageError::InvalidJobType {
                 job_id: job_id.clone(),
                 job_type: job_type_str.clone(),
             }
         })?;
-        let enrichment_tier = EnrichmentTier::from_str(&tier_str).ok_or_else(|| {
+        let enrichment_tier = EnrichmentTier::parse(&tier_str).ok_or_else(|| {
             crate::error::StorageError::InvalidEnrichmentTier {
                 job_id: job_id.clone(),
                 value: tier_str.clone(),
@@ -606,13 +606,13 @@ pub fn load_running_batches(
         let required_capabilities_json: String = row.get(13);
         let payload_json: String = row.get(14);
 
-        let job_type = JobType::from_str(&job_type_str).ok_or_else(|| {
+        let job_type = JobType::parse(&job_type_str).ok_or_else(|| {
             crate::error::StorageError::InvalidJobType {
                 job_id: job_id.clone(),
                 job_type: job_type_str.clone(),
             }
         })?;
-        let enrichment_tier = EnrichmentTier::from_str(&tier_str).ok_or_else(|| {
+        let enrichment_tier = EnrichmentTier::parse(&tier_str).ok_or_else(|| {
             crate::error::StorageError::InvalidEnrichmentTier {
                 job_id: job_id.clone(),
                 value: tier_str.clone(),
@@ -950,6 +950,17 @@ fn derive_artifact_enrichment_status(snapshot: ArtifactEnrichmentSnapshot) -> En
     EnrichmentStatus::Pending
 }
 
+fn map_pg_storage_err(source: postgres::Error) -> crate::error::StorageError {
+    crate::error::StorageError::Db(map_postgres_error(source))
+}
+
+fn map_postgres_error(source: postgres::Error) -> crate::error::DbError {
+    crate::error::DbError::ConnectPostgres {
+        connection_string: "postgres".to_string(),
+        source: Box::new(source),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{derive_artifact_enrichment_status, ArtifactEnrichmentSnapshot};
@@ -1044,16 +1055,5 @@ mod tests {
             derive_artifact_enrichment_status(snapshot),
             EnrichmentStatus::Completed
         );
-    }
-}
-
-fn map_pg_storage_err(source: postgres::Error) -> crate::error::StorageError {
-    crate::error::StorageError::Db(map_postgres_error(source))
-}
-
-fn map_postgres_error(source: postgres::Error) -> crate::error::DbError {
-    crate::error::DbError::ConnectPostgres {
-        connection_string: "postgres".to_string(),
-        source,
     }
 }

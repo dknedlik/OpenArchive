@@ -395,17 +395,19 @@ fn sanitize_gemini_schema_value(value: &serde_json::Value) -> serde_json::Value 
                                 .filter(|value| *value != "null");
                             let first = non_null.next();
                             let second = non_null.next();
-                            if first.is_some()
-                                && second.is_none()
-                                && values.iter().any(|value| value.as_str() == Some("null"))
-                            {
-                                sanitized
-                                    .insert("nullable".to_string(), serde_json::Value::Bool(true));
-                                serde_json::Value::String(
-                                    first.expect("checked is_some").to_ascii_uppercase(),
-                                )
-                            } else {
-                                sanitize_gemini_schema_value(child)
+                            match (first, second) {
+                                (Some(first), None)
+                                    if values
+                                        .iter()
+                                        .any(|value| value.as_str() == Some("null")) =>
+                                {
+                                    sanitized.insert(
+                                        "nullable".to_string(),
+                                        serde_json::Value::Bool(true),
+                                    );
+                                    serde_json::Value::String(first.to_ascii_uppercase())
+                                }
+                                _ => sanitize_gemini_schema_value(child),
                             }
                         }
                         _ => sanitize_gemini_schema_value(child),

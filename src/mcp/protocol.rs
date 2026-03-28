@@ -47,12 +47,19 @@ fn read_jsonrpc_line_message(reader: &mut impl BufRead) -> io::Result<Option<Jso
         payload.pop();
     }
 
-    serde_json::from_slice(&payload).map(Some).map_err(|err| {
+    let request: JsonRpcRequest = serde_json::from_slice(&payload).map_err(|err| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("invalid newline-delimited JSON-RPC payload: {err}"),
         )
-    })
+    })?;
+    if request.jsonrpc.as_deref() != Some("2.0") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "newline-delimited MCP input must declare jsonrpc version 2.0",
+        ));
+    }
+    Ok(Some(request))
 }
 
 pub(in crate::mcp) fn write_jsonrpc_message(
@@ -86,7 +93,6 @@ pub(in crate::mcp) fn jsonrpc_error(id: Value, code: i32, message: String) -> Va
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct JsonRpcRequest {
-    #[allow(dead_code)]
     pub(super) jsonrpc: Option<String>,
     pub(super) id: Option<Value>,
     pub(super) method: String,

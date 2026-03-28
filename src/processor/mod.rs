@@ -35,16 +35,19 @@ pub(crate) use openai::{
     OpenRouterResponsesResponse, OpenRouterResponsesTextConfig, OpenRouterUsage,
 };
 pub(crate) use pipeline::{
-    allowed_artifact_evidence_refs, attach_output_preview, build_conversation_user_prompt,
-    build_document_user_prompt, build_reconciliation_prompt, build_repair_prompt,
-    build_two_phase_candidate_user_prompt, candidate_output_schema_with_allowed_refs,
-    candidate_output_schema_wrapper, candidate_system_prompt, canonicalize_memory_type,
-    cleanup_artifact_processor_output, parse_candidate_output, preview,
+    allowed_artifact_evidence_refs, attach_output_preview, build_reconciliation_prompt,
+    build_repair_prompt, build_two_phase_candidate_user_prompt,
+    candidate_output_schema_with_allowed_refs, candidate_output_schema_wrapper,
+    candidate_system_prompt, cleanup_artifact_processor_output, parse_candidate_output, preview,
     reconciliation_output_schema, reconciliation_output_schema_wrapper, should_retry_with_repair,
-    should_shape_artifact_input, validate_input, ModelReconciliationDecision,
-    ModelReconciliationOutput, ANTHROPIC_PROMPT_VERSION, GEMINI_PROMPT_VERSION,
-    GROK_PROMPT_VERSION, OPENAI_PROMPT_VERSION, RECONCILIATION_SYSTEM_PROMPT,
-    TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS,
+    should_shape_artifact_input, validate_input, ModelReconciliationOutput,
+    ANTHROPIC_PROMPT_VERSION, GEMINI_PROMPT_VERSION, GROK_PROMPT_VERSION, OPENAI_PROMPT_VERSION,
+    RECONCILIATION_SYSTEM_PROMPT, TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS,
+};
+#[cfg(test)]
+pub(crate) use pipeline::{
+    build_conversation_user_prompt, build_document_user_prompt, canonicalize_memory_type,
+    ModelReconciliationDecision,
 };
 pub(crate) use types::{
     artifact_processor_batch_custom_id, MAX_CLASSIFICATIONS, MAX_MEMORIES, MAX_RETRIEVAL_INTENTS,

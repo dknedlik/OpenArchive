@@ -33,12 +33,12 @@ pub(in crate::mcp::tools) fn handle_search_archive(
         .map(|value| value as usize)
         .unwrap_or(10)
         .clamp(1, SEARCH_LIMIT_CAP);
-    let object_type =
-        match parse_optional_enum(arguments, "object_type", DerivedObjectType::from_str) {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-    let source_type = match parse_optional_enum(arguments, "source_type", SourceType::from_str) {
+    let object_type = match parse_optional_enum(arguments, "object_type", DerivedObjectType::parse)
+    {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let source_type = match parse_optional_enum(arguments, "source_type", SourceType::parse) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -144,11 +144,11 @@ pub(in crate::mcp::tools) fn handle_search_objects(
         .get("query")
         .and_then(Value::as_str)
         .map(|s| s.to_string());
-    let object_type =
-        match parse_optional_enum(arguments, "object_type", DerivedObjectType::from_str) {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
+    let object_type = match parse_optional_enum(arguments, "object_type", DerivedObjectType::parse)
+    {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let candidate_key = arguments
         .get("candidate_key")
         .and_then(Value::as_str)
@@ -196,12 +196,12 @@ pub(in crate::mcp::tools) fn handle_list_artifacts(
     app: &ArchiveApplication,
     arguments: &Value,
 ) -> Value {
-    let source_type = match parse_optional_enum(arguments, "source_type", SourceType::from_str) {
+    let source_type = match parse_optional_enum(arguments, "source_type", SourceType::parse) {
         Ok(v) => v,
         Err(e) => return e,
     };
     let enrichment_status =
-        match parse_optional_enum(arguments, "enrichment_status", EnrichmentStatus::from_str) {
+        match parse_optional_enum(arguments, "enrichment_status", EnrichmentStatus::parse) {
             Ok(v) => v,
             Err(e) => return e,
         };
@@ -278,7 +278,7 @@ pub(in crate::mcp::tools) fn handle_get_timeline(
     app: &ArchiveApplication,
     arguments: &Value,
 ) -> Value {
-    let source_type = match parse_optional_enum(arguments, "source_type", SourceType::from_str) {
+    let source_type = match parse_optional_enum(arguments, "source_type", SourceType::parse) {
         Ok(v) => v,
         Err(e) => return e,
     };

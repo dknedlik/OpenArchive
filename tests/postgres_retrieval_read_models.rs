@@ -1,4 +1,7 @@
-mod support;
+#![deny(warnings)]
+
+#[path = "support/fixtures.rs"]
+mod fixtures;
 
 use open_archive::config::PostgresConfig;
 use open_archive::migrations;
@@ -77,10 +80,10 @@ impl PostgresHarness {
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn postgres_retrieval_read_models_load_search_detail_and_context_material() {
     let Some(harness) = harness() else { return };
-    let _guard = support::lock_live_test();
+    let _guard = fixtures::lock_live_test();
     harness.reset_schema();
 
-    let fixture = support::make_test_import_fixture(&support::unique_suffix("retpg"));
+    let fixture = fixtures::make_test_import_fixture(&fixtures::unique_suffix("retpg"));
     let artifact_id = fixture.artifact_id.clone();
     let job_id = fixture.job_id.clone();
     let segment_ids = fixture.segment_ids.clone();
@@ -88,7 +91,7 @@ fn postgres_retrieval_read_models_load_search_detail_and_context_material() {
     PostgresImportWriteStore::new(harness.0.clone())
         .write_import(fixture.write_set)
         .expect("seed import should succeed");
-    support::seed_postgres_stub_derivations(&harness.0, &artifact_id, &job_id, &segment_ids);
+    fixtures::seed_postgres_stub_derivations(&harness.0, &artifact_id, &job_id, &segment_ids);
 
     let read_store = PostgresRetrievalReadStore::new(harness.0.clone());
 

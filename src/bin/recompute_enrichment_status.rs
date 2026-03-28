@@ -1,3 +1,5 @@
+#![deny(warnings)]
+
 use anyhow::Context;
 use clap::Parser;
 use open_archive::config::{AppConfig, RelationalStoreConfig};

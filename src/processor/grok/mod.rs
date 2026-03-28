@@ -291,36 +291,6 @@ impl GrokClient {
             .map_err(|source| ProcessorError::SendInferenceRequest { source })?;
         batch::parse_grok_json_response(response)
     }
-
-    #[allow(dead_code)]
-    fn wait_for_batch(&self, batch_id: &str) -> Result<batch::GrokBatch, ProcessorError> {
-        let mut poll_count: u64 = 0;
-        loop {
-            let batch = match self.get_batch(batch_id) {
-                Ok(batch) => batch,
-                Err(err) if err.is_retryable() => {
-                    if poll_count == 0 || poll_count % 12 == 0 {
-                        log::warn!(
-                            "grok batch id={} poll={} transient poll error={}",
-                            batch_id,
-                            poll_count,
-                            err
-                        );
-                    }
-                    poll_count += 1;
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                    continue;
-                }
-                Err(err) => return Err(err),
-            };
-            if batch.state.num_pending == 0 {
-                return Ok(batch);
-            }
-            poll_count += 1;
-            std::thread::sleep(std::time::Duration::from_secs(5));
-        }
-    }
-
     fn list_results(
         &self,
         batch_id: &str,

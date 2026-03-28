@@ -1,10 +1,17 @@
-mod support;
+#![deny(warnings)]
 
+#[path = "support/contracts.rs"]
+mod contracts;
+#[path = "support/fixtures.rs"]
+mod fixtures;
+#[path = "support/harness.rs"]
+mod harness;
+
+use harness::{ImportRecord, ProviderHarness};
 use open_archive::config::OracleConfig;
 use open_archive::migrations;
 use open_archive::storage::{ImportWriteStore, OracleImportWriteStore};
 use std::sync::OnceLock;
-use support::{ImportRecord, ProviderHarness};
 
 fn oracle_config() -> Option<OracleConfig> {
     if std::env::var("OA_ORACLE_INTEGRATION_TESTS").is_err() {
@@ -138,7 +145,7 @@ impl ProviderHarness for OracleHarness {
         }
     }
 
-    fn fetch_job_record(&self, _job_id: &str) -> support::JobRecord {
+    fn fetch_job_record(&self, _job_id: &str) -> harness::JobRecord {
         unreachable!("import harness does not exercise job verification")
     }
 
@@ -207,26 +214,26 @@ impl ProviderHarness for OracleHarness {
 #[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_write_single_import_happy_path() {
     let Some(harness) = harness() else { return };
-    support::contract_write_single_import_happy_path(&harness);
+    contracts::contract_write_single_import_happy_path(&harness);
 }
 
 #[test]
 #[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_write_import_duplicate_payload_is_idempotent() {
     let Some(harness) = harness() else { return };
-    support::contract_write_import_duplicate_payload_is_idempotent(&harness);
+    contracts::contract_write_import_duplicate_payload_is_idempotent(&harness);
 }
 
 #[test]
 #[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_write_import_duplicate_artifact_hash_is_idempotent() {
     let Some(harness) = harness() else { return };
-    support::contract_write_import_duplicate_artifact_hash_is_idempotent(&harness);
+    contracts::contract_write_import_duplicate_artifact_hash_is_idempotent(&harness);
 }
 
 #[test]
 #[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn test_write_import_partial_success_finalizes_completed_with_errors() {
     let Some(harness) = harness() else { return };
-    support::contract_write_import_partial_success_finalizes_completed_with_errors(&harness);
+    contracts::contract_write_import_partial_success_finalizes_completed_with_errors(&harness);
 }

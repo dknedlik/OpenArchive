@@ -75,7 +75,7 @@ pub fn update_import_counts(
     )
     .map_err(|source| StorageError::UpdateImportCounts {
         import_id: import_id.to_string(),
-        source,
+        source: Box::new(source),
     })?;
     Ok(())
 }
@@ -101,7 +101,7 @@ pub fn finalize_import(
     )
     .map_err(|source| StorageError::FinalizeImport {
         import_id: import_id.to_string(),
-        source,
+        source: Box::new(source),
     })?;
     Ok(())
 }
@@ -120,7 +120,7 @@ pub fn complete_import(
     )
     .map_err(|source| StorageError::CompleteImport {
         import_id: import_id.to_string(),
-        source,
+        source: Box::new(source),
     })?;
     Ok(())
 }

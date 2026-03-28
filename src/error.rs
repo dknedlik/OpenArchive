@@ -17,25 +17,25 @@ pub type WorkerResult<T> = std::result::Result<T, WorkerError>;
 #[derive(Debug, Error)]
 pub enum OpenArchiveError {
     #[error(transparent)]
-    Config(#[from] ConfigError),
+    Config(ConfigError),
 
     #[error(transparent)]
-    Db(#[from] DbError),
+    Db(Box<DbError>),
 
     #[error(transparent)]
-    Migrations(#[from] MigrationsError),
+    Migrations(Box<MigrationsError>),
 
     #[error(transparent)]
-    ObjectStore(#[from] ObjectStoreError),
+    ObjectStore(Box<ObjectStoreError>),
 
     #[error(transparent)]
-    Storage(#[from] StorageError),
+    Storage(Box<StorageError>),
 
     #[error(transparent)]
-    Parser(#[from] ParserError),
+    Parser(ParserError),
 
     #[error(transparent)]
-    Embedding(#[from] EmbeddingError),
+    Embedding(Box<EmbeddingError>),
 
     #[error("internal invariant violated: {0}")]
     Invariant(String),
@@ -50,7 +50,7 @@ pub enum ObjectStoreError {
     CreateDir {
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: Box<std::io::Error>,
     },
 
     #[error("failed to write object {object_id} to {path}")]
@@ -58,7 +58,7 @@ pub enum ObjectStoreError {
         object_id: String,
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: Box<std::io::Error>,
     },
 
     #[error("failed to read object {object_id} from {path}")]
@@ -66,7 +66,7 @@ pub enum ObjectStoreError {
         object_id: String,
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: Box<std::io::Error>,
     },
 
     #[error("failed to delete object {object_id} at {path}")]
@@ -74,7 +74,7 @@ pub enum ObjectStoreError {
         object_id: String,
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: Box<std::io::Error>,
     },
 
     #[error("invalid {key} URL {value:?}")]
@@ -91,7 +91,7 @@ pub enum ObjectStoreError {
     #[error("failed to build object-store HTTP client")]
     BuildHttpClient {
         #[source]
-        source: reqwest::Error,
+        source: Box<reqwest::Error>,
     },
 
     #[error("failed to send {operation} request for object {object_id}: {source}")]
@@ -99,7 +99,7 @@ pub enum ObjectStoreError {
         operation: &'static str,
         object_id: String,
         #[source]
-        source: reqwest::Error,
+        source: Box<reqwest::Error>,
     },
 
     #[error("{operation} for object {object_id} returned unexpected HTTP status {status}")]
@@ -114,7 +114,7 @@ pub enum ObjectStoreError {
         operation: &'static str,
         object_id: String,
         #[source]
-        source: reqwest::Error,
+        source: Box<reqwest::Error>,
     },
 
     #[error("failed to parse multipart upload response for object {object_id}: {detail}")]
@@ -164,34 +164,34 @@ pub enum DbError {
     #[error("failed to configure Oracle pool ping interval")]
     ConfigurePoolPingInterval {
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to create Oracle pool for connect string {connect_string}")]
     CreatePool {
         connect_string: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to acquire Oracle connection for connect string {connect_string}")]
     AcquireConnection {
         connect_string: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to set Oracle call timeout")]
     SetCallTimeout {
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to use Postgres via {connection_string}: {source}")]
     ConnectPostgres {
         connection_string: String,
         #[source]
-        source: postgres::Error,
+        source: Box<postgres::Error>,
     },
 }
 
@@ -209,63 +209,63 @@ pub enum MigrationsError {
     #[error("failed to ensure oa_schema_migration exists")]
     EnsureSchemaMigrationTable {
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to commit oa_schema_migration bootstrap")]
     CommitSchemaMigrationBootstrap {
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to reset open_archive schema objects")]
     ResetSchemaObjects {
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to load applied migrations")]
     LoadAppliedMigrations {
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to read migration history row")]
     ReadMigrationHistoryRow {
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to read migration version")]
     ReadMigrationVersion {
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to read migration checksum")]
     ReadMigrationChecksum {
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to read migration directory {path}")]
     ReadMigrationsDir {
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: Box<std::io::Error>,
     },
 
     #[error("failed to read migration entry")]
     ReadMigrationEntry {
         #[source]
-        source: std::io::Error,
+        source: Box<std::io::Error>,
     },
 
     #[error("failed to read migration {path}")]
     ReadMigrationFile {
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: Box<std::io::Error>,
     },
 
     #[error("invalid migration filename: {path}")]
@@ -288,21 +288,21 @@ pub enum MigrationsError {
         filename: String,
         statement_preview: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to record migration {filename}")]
     RecordMigration {
         filename: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to commit migration {filename}")]
     CommitMigration {
         filename: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 }
 
@@ -329,34 +329,34 @@ pub enum StorageError {
     UpdateImportCounts {
         import_id: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to finalize import {import_id}")]
     FinalizeImport {
         import_id: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to complete import {import_id}")]
     CompleteImport {
         import_id: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to insert artifact {artifact_id}")]
     InsertArtifact {
         artifact_id: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to list artifacts")]
     ListArtifacts {
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to insert participant {participant_id} for artifact {artifact_id}")]
@@ -364,7 +364,7 @@ pub enum StorageError {
         participant_id: String,
         artifact_id: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to insert segment {segment_id} for artifact {artifact_id}")]
@@ -372,7 +372,7 @@ pub enum StorageError {
         segment_id: String,
         artifact_id: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to insert derivation run {derivation_run_id} for artifact {artifact_id}")]
@@ -380,7 +380,7 @@ pub enum StorageError {
         derivation_run_id: String,
         artifact_id: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to insert derived object {derived_object_id} for artifact {artifact_id}")]
@@ -388,14 +388,14 @@ pub enum StorageError {
         derived_object_id: String,
         artifact_id: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to update derived object status for artifact {artifact_id}")]
     UpdateDerivedObjectStatus {
         artifact_id: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error(
@@ -405,7 +405,7 @@ pub enum StorageError {
         evidence_link_id: String,
         derived_object_id: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("invalid derivation write: {detail}")]
@@ -415,14 +415,14 @@ pub enum StorageError {
     ValidateArtifactOwnership {
         artifact_id: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to validate segment ownership for {segment_id}")]
     ValidateSegmentOwnership {
         segment_id: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to insert enrichment job {job_id} for artifact {artifact_id}")]
@@ -430,20 +430,20 @@ pub enum StorageError {
         job_id: String,
         artifact_id: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to claim next enrichment job")]
     ClaimJob {
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to update enrichment job {job_id} status")]
     UpdateJobStatus {
         job_id: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("invalid job_type '{job_type}' for job {job_id}")]
@@ -477,14 +477,14 @@ pub enum StorageError {
     Commit {
         operation: &'static str,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to rollback after {operation}")]
     Rollback {
         operation: String,
         #[source]
-        source: oracle::Error,
+        source: Box<oracle::Error>,
     },
 
     #[error("failed to recover finalization for import {import_id}")]
@@ -516,7 +516,7 @@ pub enum StorageError {
         artifact_id: String,
         derived_object_id: String,
         #[source]
-        source: postgres::Error,
+        source: Box<postgres::Error>,
     },
 
     #[error("{store} storage does not support {operation}")]
@@ -573,19 +573,19 @@ pub enum EmbeddingError {
     #[error("failed to serialize embedding request")]
     SerializeRequest {
         #[source]
-        source: serde_json::Error,
+        source: Box<serde_json::Error>,
     },
 
     #[error("failed to send embedding request")]
     SendRequest {
         #[source]
-        source: reqwest::Error,
+        source: Box<reqwest::Error>,
     },
 
     #[error("failed to read embedding response")]
     ReadResponse {
         #[source]
-        source: reqwest::Error,
+        source: Box<reqwest::Error>,
     },
 
     #[error("embedding provider returned unexpected HTTP status {status}")]
@@ -594,7 +594,7 @@ pub enum EmbeddingError {
     #[error("failed to parse embedding response")]
     ParseResponse {
         #[source]
-        source: serde_json::Error,
+        source: Box<serde_json::Error>,
         body_preview: String,
     },
 
@@ -614,8 +614,50 @@ pub enum WorkerError {
     SpawnThread {
         worker_kind: String,
         #[source]
-        source: std::io::Error,
+        source: Box<std::io::Error>,
     },
+}
+
+impl From<ConfigError> for OpenArchiveError {
+    fn from(value: ConfigError) -> Self {
+        Self::Config(value)
+    }
+}
+
+impl From<DbError> for OpenArchiveError {
+    fn from(value: DbError) -> Self {
+        Self::Db(Box::new(value))
+    }
+}
+
+impl From<MigrationsError> for OpenArchiveError {
+    fn from(value: MigrationsError) -> Self {
+        Self::Migrations(Box::new(value))
+    }
+}
+
+impl From<ObjectStoreError> for OpenArchiveError {
+    fn from(value: ObjectStoreError) -> Self {
+        Self::ObjectStore(Box::new(value))
+    }
+}
+
+impl From<StorageError> for OpenArchiveError {
+    fn from(value: StorageError) -> Self {
+        Self::Storage(Box::new(value))
+    }
+}
+
+impl From<ParserError> for OpenArchiveError {
+    fn from(value: ParserError) -> Self {
+        Self::Parser(value)
+    }
+}
+
+impl From<EmbeddingError> for OpenArchiveError {
+    fn from(value: EmbeddingError) -> Self {
+        Self::Embedding(Box::new(value))
+    }
 }
 
 pub fn preview_sql_statement(statement: &str) -> String {

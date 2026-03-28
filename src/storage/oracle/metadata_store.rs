@@ -40,7 +40,9 @@ fn load_json_row<T: DeserializeOwned>(
         .map(|(json,)| json)
         .or_else(|source| match source.kind() {
             oracle::ErrorKind::NoDataFound => Ok(String::new()),
-            _ => Err(StorageError::ListArtifacts { source }),
+            _ => Err(StorageError::ListArtifacts {
+                source: Box::new(source),
+            }),
         })?;
     if row.is_empty() {
         return Ok(None);
@@ -130,7 +132,7 @@ impl EnrichmentStateStore for OracleDerivedMetadataStore {
                 &serde_json::to_string(result).expect("extraction result serializable"),
             ],
         )
-        .map_err(|source| StorageError::ListArtifacts { source })?;
+        .map_err(|source| StorageError::ListArtifacts { source: Box::new(source) })?;
         commit_connection(&conn, "save extraction result")?;
         Ok(())
     }
@@ -182,7 +184,7 @@ impl EnrichmentStateStore for OracleDerivedMetadataStore {
                 &serde_json::to_string(result_set).expect("retrieval result set serializable"),
             ],
         )
-        .map_err(|source| StorageError::ListArtifacts { source })?;
+        .map_err(|source| StorageError::ListArtifacts { source: Box::new(source) })?;
         commit_connection(&conn, "save retrieval result set")?;
         Ok(())
     }
@@ -258,7 +260,7 @@ impl EnrichmentStateStore for OracleDerivedMetadataStore {
                     &serde_json::to_string(decision).expect("decision serializable"),
                 ],
             )
-            .map_err(|source| StorageError::ListArtifacts { source })?;
+            .map_err(|source| StorageError::ListArtifacts { source: Box::new(source) })?;
         }
         commit_connection(&conn, "save reconciliation decisions")?;
         Ok(())
@@ -277,13 +279,19 @@ impl EnrichmentStateStore for OracleDerivedMetadataStore {
                  ORDER BY reconciliation_decision_id",
                 &[&extraction_result_id],
             )
-            .map_err(|source| StorageError::ListArtifacts { source })?;
+            .map_err(|source| StorageError::ListArtifacts {
+                source: Box::new(source),
+            })?;
         let mut decisions = Vec::new();
         for row_result in rows {
-            let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
-            let decision_json = row
-                .get::<_, String>(0)
-                .map_err(|source| StorageError::ListArtifacts { source })?;
+            let row = row_result.map_err(|source| StorageError::ListArtifacts {
+                source: Box::new(source),
+            })?;
+            let decision_json =
+                row.get::<_, String>(0)
+                    .map_err(|source| StorageError::ListArtifacts {
+                        source: Box::new(source),
+                    })?;
             decisions.push(deserialize_json(
                 &decision_json,
                 format!(

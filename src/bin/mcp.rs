@@ -1,3 +1,5 @@
+#![deny(warnings)]
+
 use anyhow::Context;
 use log::info;
 use open_archive::bootstrap::build_service_bundle;

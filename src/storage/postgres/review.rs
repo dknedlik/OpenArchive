@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 fn map_pg_err(connection_string: &str, source: postgres::Error) -> StorageError {
     StorageError::Db(DbError::ConnectPostgres {
         connection_string: connection_string.to_string(),
-        source,
+        source: Box::new(source),
     })
 }
 
@@ -343,7 +343,7 @@ fn list_object_low_confidence(
                 StorageError::ReadDerivedObjectConfidenceScore {
                     artifact_id: artifact_id.clone(),
                     derived_object_id: row.get(0),
-                    source,
+                    source: Box::new(source),
                 }
             })?,
             related_artifact_count: None,
@@ -472,21 +472,21 @@ fn list_object_missing_evidence(
 }
 
 fn parse_source_type(artifact_id: &str, value: String) -> StorageResult<SourceType> {
-    SourceType::from_str(&value).ok_or_else(|| StorageError::InvalidSourceType {
+    SourceType::parse(&value).ok_or_else(|| StorageError::InvalidSourceType {
         artifact_id: artifact_id.to_string(),
         value,
     })
 }
 
 fn parse_enrichment_status(artifact_id: &str, value: String) -> StorageResult<EnrichmentStatus> {
-    EnrichmentStatus::from_str(&value).ok_or_else(|| StorageError::InvalidEnrichmentStatus {
+    EnrichmentStatus::parse(&value).ok_or_else(|| StorageError::InvalidEnrichmentStatus {
         artifact_id: artifact_id.to_string(),
         value,
     })
 }
 
 fn parse_derived_object_type(artifact_id: &str, value: String) -> StorageResult<DerivedObjectType> {
-    DerivedObjectType::from_str(&value).ok_or_else(|| StorageError::InvalidDerivedObjectType {
+    DerivedObjectType::parse(&value).ok_or_else(|| StorageError::InvalidDerivedObjectType {
         artifact_id: artifact_id.to_string(),
         value,
     })

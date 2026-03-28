@@ -91,7 +91,7 @@ pub(in crate::mcp::tools) fn parse_evidence_array(
         let evidence_role = match item
             .get("evidence_role")
             .and_then(Value::as_str)
-            .and_then(EvidenceRole::from_str)
+            .and_then(EvidenceRole::parse)
         {
             Some(v) => v,
             None => {
@@ -104,7 +104,7 @@ pub(in crate::mcp::tools) fn parse_evidence_array(
         let support_strength = match item
             .get("support_strength")
             .and_then(Value::as_str)
-            .and_then(SupportStrength::from_str)
+            .and_then(SupportStrength::parse)
         {
             Some(v) => v,
             None => {

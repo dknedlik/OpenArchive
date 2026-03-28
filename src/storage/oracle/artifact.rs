@@ -27,7 +27,7 @@ pub fn find_artifact_by_source_hash(
     match row {
         Some((artifact_id, enrichment_status)) => {
             let artifact_id_clone = artifact_id.clone();
-            let status = EnrichmentStatus::from_str(&enrichment_status).ok_or_else(|| {
+            let status = EnrichmentStatus::parse(&enrichment_status).ok_or_else(|| {
                 StorageError::InvalidEnrichmentStatus {
                     artifact_id: artifact_id_clone,
                     value: enrichment_status,
@@ -79,7 +79,7 @@ pub fn insert_artifact(conn: &Connection, a: &NewArtifact) -> StorageResult<()> 
     )
     .map_err(|source| StorageError::InsertArtifact {
         artifact_id: a.artifact_id.clone(),
-        source,
+        source: Box::new(source),
     })?;
     Ok(())
 }
@@ -105,7 +105,7 @@ pub fn insert_participant(conn: &Connection, p: &NewParticipant) -> StorageResul
     .map_err(|source| StorageError::InsertParticipant {
         participant_id: p.participant_id.clone(),
         artifact_id: p.artifact_id.clone(),
-        source,
+        source: Box::new(source),
     })?;
     Ok(())
 }
@@ -123,34 +123,39 @@ pub fn list_artifacts(conn: &Connection) -> StorageResult<Vec<ArtifactListItem>>
              ORDER BY captured_at DESC, artifact_id ASC",
             &[],
         )
-        .map_err(|source| StorageError::ListArtifacts { source })?;
+        .map_err(|source| StorageError::ListArtifacts {
+            source: Box::new(source),
+        })?;
 
     let mut artifacts = Vec::new();
     for row_result in rows {
-        let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
-        let artifact_id: String = row
-            .get(0)
-            .map_err(|source| StorageError::ListArtifacts { source })?;
-        let enrichment_status: String = row
-            .get(5)
-            .map_err(|source| StorageError::ListArtifacts { source })?;
+        let row = row_result.map_err(|source| StorageError::ListArtifacts {
+            source: Box::new(source),
+        })?;
+        let artifact_id: String = row.get(0).map_err(|source| StorageError::ListArtifacts {
+            source: Box::new(source),
+        })?;
+        let enrichment_status: String =
+            row.get(5).map_err(|source| StorageError::ListArtifacts {
+                source: Box::new(source),
+            })?;
 
         let artifact_id_clone = artifact_id.clone();
         artifacts.push(ArtifactListItem {
             artifact_id,
-            title: row
-                .get(1)
-                .map_err(|source| StorageError::ListArtifacts { source })?,
-            source_type: row
-                .get(2)
-                .map_err(|source| StorageError::ListArtifacts { source })?,
-            created_at_source: row
-                .get(3)
-                .map_err(|source| StorageError::ListArtifacts { source })?,
-            captured_at: row
-                .get(4)
-                .map_err(|source| StorageError::ListArtifacts { source })?,
-            enrichment_status: EnrichmentStatus::from_str(&enrichment_status).ok_or_else(|| {
+            title: row.get(1).map_err(|source| StorageError::ListArtifacts {
+                source: Box::new(source),
+            })?,
+            source_type: row.get(2).map_err(|source| StorageError::ListArtifacts {
+                source: Box::new(source),
+            })?,
+            created_at_source: row.get(3).map_err(|source| StorageError::ListArtifacts {
+                source: Box::new(source),
+            })?,
+            captured_at: row.get(4).map_err(|source| StorageError::ListArtifacts {
+                source: Box::new(source),
+            })?,
+            enrichment_status: EnrichmentStatus::parse(&enrichment_status).ok_or_else(|| {
                 StorageError::InvalidEnrichmentStatus {
                     artifact_id: artifact_id_clone,
                     value: enrichment_status.clone(),
@@ -175,7 +180,9 @@ pub fn load_artifact_for_enrichment(
         .map(Some)
         .or_else(|source| match source.kind() {
             oracle::ErrorKind::NoDataFound => Ok(None),
-            _ => Err(StorageError::ListArtifacts { source }),
+            _ => Err(StorageError::ListArtifacts {
+                source: Box::new(source),
+            }),
         })?;
 
     let Some((artifact_id_value, import_id, artifact_class_str, source_type_str, title)) =
@@ -183,14 +190,14 @@ pub fn load_artifact_for_enrichment(
     else {
         return Ok(None);
     };
-    let artifact_class = ArtifactClass::from_str(&artifact_class_str).ok_or_else(|| {
+    let artifact_class = ArtifactClass::parse(&artifact_class_str).ok_or_else(|| {
         StorageError::InvalidArtifactClass {
             artifact_id: artifact_id_value.clone(),
             value: artifact_class_str,
         }
     })?;
     let source_type =
-        SourceType::from_str(&source_type_str).ok_or_else(|| StorageError::InvalidSourceType {
+        SourceType::parse(&source_type_str).ok_or_else(|| StorageError::InvalidSourceType {
             artifact_id: artifact_id_value.clone(),
             value: source_type_str,
         })?;
@@ -210,30 +217,34 @@ pub fn load_artifact_for_enrichment(
              ORDER BY sequence_no ASC, participant_id ASC",
             &[&artifact_id],
         )
-        .map_err(|source| StorageError::ListArtifacts { source })?;
+        .map_err(|source| StorageError::ListArtifacts {
+            source: Box::new(source),
+        })?;
     let mut participants = Vec::new();
     for row_result in participant_rows {
-        let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
-        let participant_id: String = row
-            .get(0)
-            .map_err(|source| StorageError::ListArtifacts { source })?;
-        let role: String = row
-            .get(1)
-            .map_err(|source| StorageError::ListArtifacts { source })?;
+        let row = row_result.map_err(|source| StorageError::ListArtifacts {
+            source: Box::new(source),
+        })?;
+        let participant_id: String = row.get(0).map_err(|source| StorageError::ListArtifacts {
+            source: Box::new(source),
+        })?;
+        let role: String = row.get(1).map_err(|source| StorageError::ListArtifacts {
+            source: Box::new(source),
+        })?;
         participants.push(LoadedParticipant {
             participant_id: participant_id.clone(),
-            participant_role: ParticipantRole::from_str(&role).ok_or_else(|| {
+            participant_role: ParticipantRole::parse(&role).ok_or_else(|| {
                 StorageError::InvalidParticipantRole {
                     participant_id,
                     value: role,
                 }
             })?,
-            display_name: row
-                .get(2)
-                .map_err(|source| StorageError::ListArtifacts { source })?,
-            external_id: row
-                .get(3)
-                .map_err(|source| StorageError::ListArtifacts { source })?,
+            display_name: row.get(2).map_err(|source| StorageError::ListArtifacts {
+                source: Box::new(source),
+            })?,
+            external_id: row.get(3).map_err(|source| StorageError::ListArtifacts {
+                source: Box::new(source),
+            })?,
         });
     }
 
@@ -247,50 +258,55 @@ pub fn load_artifact_for_enrichment(
              ORDER BY s.sequence_no ASC, s.segment_id ASC",
             &[&artifact_id],
         )
-        .map_err(|source| StorageError::ListArtifacts { source })?;
+        .map_err(|source| StorageError::ListArtifacts { source: Box::new(source) })?;
     let mut segments = Vec::new();
     for row_result in segment_rows {
-        let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
-        let segment_id: String = row
-            .get(0)
-            .map_err(|source| StorageError::ListArtifacts { source })?;
-        let participant_id: Option<String> = row
-            .get(1)
-            .map_err(|source| StorageError::ListArtifacts { source })?;
-        let participant_role_raw: Option<String> = row
-            .get(2)
-            .map_err(|source| StorageError::ListArtifacts { source })?;
+        let row = row_result.map_err(|source| StorageError::ListArtifacts {
+            source: Box::new(source),
+        })?;
+        let segment_id: String = row.get(0).map_err(|source| StorageError::ListArtifacts {
+            source: Box::new(source),
+        })?;
+        let participant_id: Option<String> =
+            row.get(1).map_err(|source| StorageError::ListArtifacts {
+                source: Box::new(source),
+            })?;
+        let participant_role_raw: Option<String> =
+            row.get(2).map_err(|source| StorageError::ListArtifacts {
+                source: Box::new(source),
+            })?;
         let participant_role = participant_role_raw
             .map(|value| {
-                ParticipantRole::from_str(&value).ok_or_else(|| {
-                    StorageError::InvalidParticipantRole {
-                        participant_id: participant_id
-                            .clone()
-                            .unwrap_or_else(|| "unknown".to_string()),
-                        value,
-                    }
+                ParticipantRole::parse(&value).ok_or_else(|| StorageError::InvalidParticipantRole {
+                    participant_id: participant_id
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    value,
                 })
             })
             .transpose()?;
-        let visibility_status_raw: String = row
-            .get(6)
-            .map_err(|source| StorageError::ListArtifacts { source })?;
+        let visibility_status_raw: String =
+            row.get(6).map_err(|source| StorageError::ListArtifacts {
+                source: Box::new(source),
+            })?;
 
         segments.push(LoadedSegment {
             segment_id: segment_id.clone(),
             participant_id,
             participant_role,
-            sequence_no: row
-                .get(3)
-                .map_err(|source| StorageError::ListArtifacts { source })?,
-            text_content: row
-                .get(4)
-                .map_err(|source| StorageError::ListArtifacts { source })?,
+            sequence_no: row.get(3).map_err(|source| StorageError::ListArtifacts {
+                source: Box::new(source),
+            })?,
+            text_content: row.get(4).map_err(|source| StorageError::ListArtifacts {
+                source: Box::new(source),
+            })?,
             created_at_source: row
                 .get::<_, Option<chrono::DateTime<chrono::Utc>>>(5)
-                .map_err(|source| StorageError::ListArtifacts { source })?
+                .map_err(|source| StorageError::ListArtifacts {
+                    source: Box::new(source),
+                })?
                 .map(SourceTimestamp::from),
-            visibility_status: VisibilityStatus::from_str(&visibility_status_raw).ok_or_else(
+            visibility_status: VisibilityStatus::parse(&visibility_status_raw).ok_or_else(
                 || StorageError::InvalidVisibilityStatus {
                     segment_id,
                     value: visibility_status_raw,

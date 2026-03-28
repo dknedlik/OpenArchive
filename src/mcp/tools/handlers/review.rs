@@ -20,7 +20,7 @@ pub(in crate::mcp::tools) fn handle_list_review_items(
             )
         }
     };
-    let kinds = match parse_enum_array(arguments, "kinds", ReviewItemKind::from_str) {
+    let kinds = match parse_enum_array(arguments, "kinds", ReviewItemKind::parse) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -54,7 +54,7 @@ pub(in crate::mcp::tools) fn handle_record_review_decision(
             )
         }
     };
-    let kind = match parse_required_enum(arguments, "kind", ReviewItemKind::from_str) {
+    let kind = match parse_required_enum(arguments, "kind", ReviewItemKind::parse) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -72,7 +72,7 @@ pub(in crate::mcp::tools) fn handle_record_review_decision(
         .and_then(Value::as_str)
         .map(|s| s.to_string());
     let decision_status =
-        match parse_required_enum(arguments, "decision_status", ReviewDecisionStatus::from_str) {
+        match parse_required_enum(arguments, "decision_status", ReviewDecisionStatus::parse) {
             Ok(v) => v,
             Err(e) => return e,
         };

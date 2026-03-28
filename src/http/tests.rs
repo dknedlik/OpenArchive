@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tiny_http::{Method, Response, StatusCode, TestRequest};
 
-use crate::app::ArchiveApplication;
+use crate::app::{ArchiveApplication, ArchiveApplicationDeps};
 use crate::http::build_response;
 use crate::object_store::{NewObject, ObjectStore, PutObjectResult, StoredObject};
 use crate::storage::{
@@ -444,20 +444,20 @@ fn test_app(store: MockStore) -> Arc<ArchiveApplication> {
         store.clone();
     let review_store: Arc<dyn crate::storage::ReviewStore + Send + Sync> = store.clone();
     let object_store: Arc<dyn ObjectStore + Send + Sync> = store;
-    Arc::new(ArchiveApplication::new(
+    Arc::new(ArchiveApplication::new(ArchiveApplicationDeps {
         import_store,
         read_store,
         retrieval_store,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(review_store),
-        None,
+        search_read_store: None,
+        artifact_detail_store: None,
+        context_pack_store: None,
+        cross_artifact_store: None,
+        object_search_store: None,
+        review_store: Some(review_store),
+        object_search_embedding_provider: None,
         object_store,
-        None,
-    ))
+        writeback_store: None,
+    }))
 }
 
 fn response_body_string(response: Response<Cursor<Vec<u8>>>) -> String {

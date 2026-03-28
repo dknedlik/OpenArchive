@@ -242,21 +242,6 @@ impl GeminiBatchJob {
             })
             .collect()
     }
-
-    #[allow(dead_code)]
-    pub(crate) fn request_count(&self) -> usize {
-        self.dest
-            .as_ref()
-            .and_then(|dest| dest.inlined_responses.as_ref())
-            .map(|responses| {
-                if !responses.responses.is_empty() {
-                    responses.responses.len()
-                } else {
-                    responses.inline_entries.len()
-                }
-            })
-            .unwrap_or(0)
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

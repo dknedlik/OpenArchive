@@ -65,3 +65,68 @@ pub trait DerivedMetadataHarness {
         status: &str,
     ) -> i64;
 }
+
+fn _touch_provider_harness_api(
+    harness: &dyn ProviderHarness,
+    import_set: &WriteImportSet,
+    import_id: &str,
+    job_id: &str,
+    payload_sha256: &str,
+    artifact_id: &str,
+) {
+    if false {
+        harness.reset_schema();
+        let _ = harness.import_store();
+        let _ = harness.job_store();
+        harness.seed_existing_artifact(import_set);
+        let import_record = harness.fetch_import_record(import_id);
+        let _ = (
+            &import_record.status,
+            import_record.count_imported,
+            import_record.count_failed,
+            &import_record.payload_object_id,
+        );
+        let job_record = harness.fetch_job_record(job_id);
+        let _ = (
+            &job_record.status,
+            job_record.attempt_count,
+            &job_record.claimed_by,
+            &job_record.error_message,
+        );
+        let _ = harness.count_payload_objects_by_sha256(payload_sha256);
+        let _ = harness.count_artifacts_by_import_id(import_id);
+        let _ = harness.count_artifacts_by_source_hash("source-hash");
+        let _ = harness.count_segments_by_artifact_id(artifact_id);
+        let _ = harness.count_participants_by_artifact_id(artifact_id);
+        let _ = harness.count_jobs_by_artifact_id(artifact_id);
+    }
+}
+
+fn _touch_derived_harness_api(
+    harness: &dyn DerivedMetadataHarness,
+    fixture: &TestImportFixture,
+    derivation_run_id: &str,
+    derived_object_id: &str,
+) {
+    if false {
+        harness.reset_schema();
+        let _ = harness.derivation_store();
+        harness.seed_artifact(fixture);
+        let run = harness.fetch_derivation_run_record(derivation_run_id);
+        let _ = (&run.artifact_id, &run.run_type, &run.run_status);
+        let _ = harness.count_derived_objects_for_run(derivation_run_id);
+        let _ = harness.count_derived_objects_for_run_with_status(derivation_run_id, "active");
+        let _ = harness.count_evidence_links_for_objects(&[derived_object_id.to_string()]);
+        let _ = harness.fetch_object_json(derived_object_id);
+        let _ = harness.count_derivation_run_by_id(derivation_run_id);
+        let _ = harness.count_derived_object_by_id(derived_object_id);
+        let _ = harness.count_evidence_links_for_object(derived_object_id);
+        let _ =
+            harness.count_derived_objects_for_artifact_with_status(&fixture.artifact_id, "active");
+    }
+}
+
+const _: fn(&dyn ProviderHarness, &WriteImportSet, &str, &str, &str, &str) =
+    _touch_provider_harness_api;
+const _: fn(&dyn DerivedMetadataHarness, &TestImportFixture, &str, &str) =
+    _touch_derived_harness_api;

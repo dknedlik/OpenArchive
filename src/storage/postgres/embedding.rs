@@ -6,7 +6,7 @@ use crate::storage::types::NewDerivedObjectEmbedding;
 fn map_pg_err(connection_string: &str, source: postgres::Error) -> StorageError {
     StorageError::Db(DbError::ConnectPostgres {
         connection_string: connection_string.to_string(),
-        source,
+        source: Box::new(source),
     })
 }
 

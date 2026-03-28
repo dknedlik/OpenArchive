@@ -1,3 +1,5 @@
+#![deny(warnings)]
+
 /// Minimal Oracle probe - no open_archive lib dependency.
 /// Tests whether the segfault is caused by something in the lib crate.
 fn main() {

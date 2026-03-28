@@ -30,7 +30,7 @@ pub fn insert_segment(client: &mut postgres::Client, s: &NewSegment) -> StorageR
         .map_err(|source| {
             crate::error::StorageError::Db(crate::error::DbError::ConnectPostgres {
                 connection_string: "postgres".to_string(),
-                source,
+                source: Box::new(source),
             })
         })?;
     Ok(())

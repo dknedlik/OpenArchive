@@ -33,7 +33,7 @@ pub fn parse_conversations(input: &[u8]) -> ParserResult<Vec<ParsedConversation>
     let conversations = raw
         .conversations
         .iter()
-        .filter_map(|conversation| normalize_conversation(conversation))
+        .filter_map(normalize_conversation)
         .collect::<Vec<_>>();
 
     if conversations.is_empty() {

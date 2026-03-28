@@ -1,3 +1,5 @@
+#![deny(warnings)]
+
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
 use postgres::NoTls;

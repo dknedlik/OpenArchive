@@ -34,7 +34,7 @@ pub fn insert_segment(conn: &Connection, s: &NewSegment) -> StorageResult<()> {
     .map_err(|source| StorageError::InsertSegment {
         segment_id: s.segment_id.clone(),
         artifact_id: s.artifact_id.clone(),
-        source,
+        source: Box::new(source),
     })?;
     Ok(())
 }

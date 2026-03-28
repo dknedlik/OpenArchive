@@ -1,3 +1,5 @@
+#![deny(warnings)]
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{anyhow, Context, Result};
@@ -634,7 +636,7 @@ fn score_compression(
     }
 
     let ratio = summary_chars / source_chars;
-    let score = if (0.03..=0.35).contains(&ratio) {
+    if (0.03..=0.35).contains(&ratio) {
         10.0
     } else if ratio < 0.03 {
         notes.push("summary_overcompressed".to_string());
@@ -645,9 +647,7 @@ fn score_compression(
     } else {
         notes.push("summary_too_verbose".to_string());
         3.0
-    };
-
-    score
+    }
 }
 
 fn score_importance(run: &AuditRun, artifact: &AuditArtifact, notes: &mut Vec<String>) -> f32 {
@@ -656,16 +656,16 @@ fn score_importance(run: &AuditRun, artifact: &AuditArtifact, notes: &mut Vec<St
         return 3.0;
     };
 
-    let mut result: f32 = 10.0;
+    let mut score_out: f32 = 10.0;
     if artifact.source_char_count < 400 && score > 6 {
         notes.push("importance_too_high_for_small_artifact".to_string());
-        result -= 3.0;
+        score_out -= 3.0;
     }
     if artifact.source_char_count > 2000 && score < 3 {
         notes.push("importance_too_low_for_large_artifact".to_string());
-        result -= 2.0;
+        score_out -= 2.0;
     }
-    result.clamp(0.0, 10.0)
+    score_out.clamp(0.0, 10.0)
 }
 
 fn score_duplicate_penalty(

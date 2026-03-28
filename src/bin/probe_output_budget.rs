@@ -1,3 +1,5 @@
+#![deny(warnings)]
+
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};

@@ -27,7 +27,7 @@ pub fn find_artifact_by_source_hash(
             let artifact_id: String = row.get(0);
             let enrichment_status: String = row.get(1);
             let artifact_id_clone = artifact_id.clone();
-            let status = EnrichmentStatus::from_str(&enrichment_status).ok_or_else(|| {
+            let status = EnrichmentStatus::parse(&enrichment_status).ok_or_else(|| {
                 crate::error::StorageError::InvalidEnrichmentStatus {
                     artifact_id: artifact_id_clone,
                     value: enrichment_status,
@@ -124,7 +124,7 @@ pub fn list_artifacts(client: &mut postgres::Client) -> StorageResult<Vec<Artifa
             source_type: row.get(2),
             created_at_source: row.get(3),
             captured_at: row.get(4),
-            enrichment_status: EnrichmentStatus::from_str(&enrichment_status).ok_or_else(|| {
+            enrichment_status: EnrichmentStatus::parse(&enrichment_status).ok_or_else(|| {
                 crate::error::StorageError::InvalidEnrichmentStatus {
                     artifact_id: artifact_id_clone,
                     value: enrichment_status.clone(),
@@ -184,7 +184,7 @@ pub fn list_artifacts_filtered(
             source_type: row.get(2),
             created_at_source: row.get(3),
             captured_at: row.get(4),
-            enrichment_status: EnrichmentStatus::from_str(&enrichment_status_str).ok_or_else(
+            enrichment_status: EnrichmentStatus::parse(&enrichment_status_str).ok_or_else(
                 || crate::error::StorageError::InvalidEnrichmentStatus {
                     artifact_id: artifact_id_clone,
                     value: enrichment_status_str.clone(),
@@ -263,14 +263,14 @@ pub fn load_artifact_for_enrichment(
     let artifact_id_value: String = artifact_row.get(0);
     let import_id: String = artifact_row.get(1);
     let artifact_class_str: String = artifact_row.get(2);
-    let artifact_class = ArtifactClass::from_str(&artifact_class_str).ok_or_else(|| {
+    let artifact_class = ArtifactClass::parse(&artifact_class_str).ok_or_else(|| {
         crate::error::StorageError::InvalidArtifactClass {
             artifact_id: artifact_id_value.clone(),
             value: artifact_class_str,
         }
     })?;
     let source_type_str: String = artifact_row.get(3);
-    let source_type = SourceType::from_str(&source_type_str).ok_or_else(|| {
+    let source_type = SourceType::parse(&source_type_str).ok_or_else(|| {
         crate::error::StorageError::InvalidSourceType {
             artifact_id: artifact_id_value.clone(),
             value: source_type_str,
@@ -299,7 +299,7 @@ pub fn load_artifact_for_enrichment(
         let role: String = row.get(1);
         participants.push(LoadedParticipant {
             participant_id: participant_id.clone(),
-            participant_role: ParticipantRole::from_str(&role).ok_or_else(|| {
+            participant_role: ParticipantRole::parse(&role).ok_or_else(|| {
                 crate::error::StorageError::InvalidParticipantRole {
                     participant_id,
                     value: role,
@@ -327,7 +327,7 @@ pub fn load_artifact_for_enrichment(
         let participant_role = row
             .get::<_, Option<String>>(2)
             .map(|value| {
-                ParticipantRole::from_str(&value).ok_or_else(|| {
+                ParticipantRole::parse(&value).ok_or_else(|| {
                     crate::error::StorageError::InvalidParticipantRole {
                         participant_id: row
                             .get::<_, Option<String>>(1)
@@ -347,7 +347,7 @@ pub fn load_artifact_for_enrichment(
             created_at_source: row
                 .get::<_, Option<chrono::DateTime<chrono::Utc>>>(5)
                 .map(SourceTimestamp::from),
-            visibility_status: VisibilityStatus::from_str(&visibility_status).ok_or_else(|| {
+            visibility_status: VisibilityStatus::parse(&visibility_status).ok_or_else(|| {
                 crate::error::StorageError::InvalidVisibilityStatus {
                     segment_id,
                     value: visibility_status,
@@ -370,6 +370,6 @@ fn map_pg_storage_err(source: postgres::Error) -> crate::error::StorageError {
 fn map_postgres_error(source: postgres::Error) -> crate::error::DbError {
     crate::error::DbError::ConnectPostgres {
         connection_string: "postgres".to_string(),
-        source,
+        source: Box::new(source),
     }
 }

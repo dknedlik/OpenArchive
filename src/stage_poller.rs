@@ -37,6 +37,21 @@ use crate::storage::{
     ReconciliationDecision, ReconciliationDecisionKind, RetrievalResultSet, SourceType,
 };
 
+/// Sentinel error returned when a stage cannot submit any jobs.
+///
+/// Returned from `StageBehavior::submit` and `process_completed` when no
+/// jobs could be submitted (all failed individually during preparation).
+#[derive(Debug)]
+pub struct StageError;
+
+impl std::fmt::Display for StageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stage error: no jobs could be submitted")
+    }
+}
+
+impl std::error::Error for StageError {}
+
 const RETRYABLE_INFERENCE_BACKOFF_SECONDS: i64 = 60;
 const EXTRACT_CHUNK_WAVE_LIMIT: usize = 8;
 
@@ -119,7 +134,7 @@ pub trait StageBehavior {
     /// Prepare inputs from claimed jobs and submit a batch to the provider.
     ///
     /// Jobs that fail preparation (bad payload, missing artifact, etc.) are
-    /// individually failed and excluded from the batch. Returns `Err(())`
+    /// individually failed and excluded from the batch. Returns `Err(StageError)`
     /// only if no jobs could be submitted (all failed individually).
     fn submit(
         &self,
@@ -129,7 +144,7 @@ pub trait StageBehavior {
         derived_store: &dyn DerivedMetadataWriteStore,
         job_store: &dyn EnrichmentJobLifecycleStore,
         worker_id: &str,
-    ) -> Result<InFlightBatch, ()>;
+    ) -> Result<InFlightBatch, StageError>;
 
     /// Poll the provider for batch completion.
     fn poll(&self, batch: &InFlightBatch) -> Result<BatchPollResult, ProcessorError>;
@@ -146,7 +161,7 @@ pub trait StageBehavior {
         state_store: &dyn EnrichmentStateStore,
         derived_store: &dyn DerivedMetadataWriteStore,
         worker_id: &str,
-    ) -> Result<Option<InFlightBatch>, ()>;
+    ) -> Result<Option<InFlightBatch>, StageError>;
 
     /// Durable phase name used for persisted batch recovery.
     fn phase_name(&self, batch: &InFlightBatch) -> &'static str;
@@ -162,7 +177,7 @@ pub trait StageBehavior {
         state_store: &dyn EnrichmentStateStore,
         job_store: &dyn EnrichmentJobLifecycleStore,
         worker_id: &str,
-    ) -> Result<InFlightBatch, ()>;
+    ) -> Result<InFlightBatch, StageError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,16 +191,26 @@ pub trait StageBehavior {
 /// 2. Processes completed/failed batches.
 /// 3. Claims new jobs if capacity is available and submits a new batch.
 /// 4. Sleeps for `poll_interval` before the next iteration.
+pub struct StagePollerContext<'a> {
+    pub job_store: &'a dyn EnrichmentJobLifecycleStore,
+    pub read_store: &'a dyn ArtifactReadStore,
+    pub state_store: &'a dyn EnrichmentStateStore,
+    pub derived_store: &'a dyn DerivedMetadataWriteStore,
+}
+
 pub fn stage_poller_loop(
     stage: &dyn StageBehavior,
     worker_id: String,
-    job_store: &dyn EnrichmentJobLifecycleStore,
-    read_store: &dyn ArtifactReadStore,
-    state_store: &dyn EnrichmentStateStore,
-    derived_store: &dyn DerivedMetadataWriteStore,
+    ctx: StagePollerContext<'_>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
 ) {
+    let StagePollerContext {
+        job_store,
+        read_store,
+        state_store,
+        derived_store,
+    } = ctx;
     info!(
         "[{}] stage poller {} starting (batch_size={}, max_concurrent={}, poll_interval_ms={})",
         stage.stage_name(),
@@ -224,7 +249,7 @@ pub fn stage_poller_loop(
                         );
                         in_flight.insert(batch_id, batch);
                     }
-                    Err(()) => {
+                    Err(_) => {
                         warn!(
                             "[{}] failed to recover persisted batch {}",
                             stage.stage_name(),
@@ -405,7 +430,7 @@ pub fn stage_poller_loop(
                         batch_id
                     );
                 }
-                Err(()) => {
+                Err(_) => {
                     if let Err(err) = job_store.complete_batch(&batch_id) {
                         error!(
                             "[{}] failed to close completed batch record {} after per-job errors: {}",
@@ -515,7 +540,7 @@ pub fn stage_poller_loop(
                             );
                             in_flight.insert(id, batch);
                         }
-                        Err(()) => {
+                        Err(_) => {
                             // All individual jobs were failed in submit().
                             warn!(
                                 "[{}] all claimed jobs failed during submit preparation",
@@ -579,7 +604,7 @@ impl ExtractStage {
     ) -> Result<(ArtifactProcessorInput, ArtifactExtractPayload), String> {
         let payload = ArtifactExtractPayload::from_json(&job.payload_json)
             .map_err(|err| format!("Failed to parse extract payload JSON: {err}"))?;
-        let source_type = SourceType::from_str(&payload.source_type).ok_or_else(|| {
+        let source_type = SourceType::parse(&payload.source_type).ok_or_else(|| {
             format!(
                 "Invalid source_type in extract payload: {}",
                 payload.source_type
@@ -633,7 +658,7 @@ impl StageBehavior for ExtractStage {
         _derived_store: &dyn DerivedMetadataWriteStore,
         job_store: &dyn EnrichmentJobLifecycleStore,
         worker_id: &str,
-    ) -> Result<InFlightBatch, ()> {
+    ) -> Result<InFlightBatch, StageError> {
         let mut valid_jobs = Vec::new();
         let mut groups = Vec::new();
         let mut submitted_chunk_count = 0usize;
@@ -699,7 +724,7 @@ impl StageBehavior for ExtractStage {
         }
 
         if valid_jobs.is_empty() {
-            return Err(());
+            return Err(StageError);
         }
 
         let flat_inputs: Vec<_> = groups
@@ -730,7 +755,7 @@ impl StageBehavior for ExtractStage {
                         poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
                     }
                 }
-                Err(())
+                Err(StageError)
             }
         }
     }
@@ -747,12 +772,12 @@ impl StageBehavior for ExtractStage {
         state_store: &dyn EnrichmentStateStore,
         _derived_store: &dyn DerivedMetadataWriteStore,
         worker_id: &str,
-    ) -> Result<Option<InFlightBatch>, ()> {
+    ) -> Result<Option<InFlightBatch>, StageError> {
         let groups = match batch.context {
             InFlightContext::Extract { groups } => groups,
             _ => {
                 error!("[extract] process_completed called with wrong context variant");
-                return Err(());
+                return Err(StageError);
             }
         };
 
@@ -931,7 +956,7 @@ impl StageBehavior for ExtractStage {
                             poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
                         }
                     }
-                    Err(())
+                    Err(StageError)
                 }
             }
         }
@@ -957,7 +982,7 @@ impl StageBehavior for ExtractStage {
         _state_store: &dyn EnrichmentStateStore,
         job_store: &dyn EnrichmentJobLifecycleStore,
         worker_id: &str,
-    ) -> Result<InFlightBatch, ()> {
+    ) -> Result<InFlightBatch, StageError> {
         let groups = if let Some(serialized) = persisted.context_json.as_deref() {
             match serde_json::from_str::<Vec<ExtractPreparedJob>>(serialized) {
                 Ok(groups) => groups,
@@ -966,7 +991,7 @@ impl StageBehavior for ExtractStage {
                         "[extract] failed to deserialize extract recovery context for {}: {}",
                         persisted.provider_batch_id, err
                     );
-                    return Err(());
+                    return Err(StageError);
                 }
             }
         } else {
@@ -976,7 +1001,7 @@ impl StageBehavior for ExtractStage {
                     Ok(prepared) => prepared,
                     Err(message) => {
                         poller_fail_job_message(job_store, worker_id, &job.job_id, message);
-                        return Err(());
+                        return Err(StageError);
                     }
                 };
                 let chunk_inputs =
@@ -991,7 +1016,7 @@ impl StageBehavior for ExtractStage {
                             job.artifact_id
                         ),
                     );
-                    return Err(());
+                    return Err(StageError);
                 }
                 groups.push(ExtractPreparedJob {
                     parent_input,
@@ -1078,7 +1103,7 @@ impl StageBehavior for ReconcileStage {
         derived_store: &dyn DerivedMetadataWriteStore,
         job_store: &dyn EnrichmentJobLifecycleStore,
         worker_id: &str,
-    ) -> Result<InFlightBatch, ()> {
+    ) -> Result<InFlightBatch, StageError> {
         let mut valid_jobs = Vec::new();
         let mut inputs = Vec::new();
         let mut payloads = Vec::new();
@@ -1175,17 +1200,21 @@ impl StageBehavior for ReconcileStage {
                     }
                 };
             if extraction_result.memories.is_empty() && extraction_result.relationships.is_empty() {
-                if let Err(()) = complete_reconcile_without_candidates(
+                if complete_reconcile_without_candidates(
                     &job,
                     &loaded,
                     &extraction_result,
                     &retrieval_result_set,
-                    job_store,
-                    state_store,
-                    derived_store,
-                    self.enqueue_embedding_jobs,
-                    worker_id,
-                ) {
+                    ReconcileCompletionContext {
+                        job_store,
+                        state_store,
+                        derived_store,
+                        enqueue_embedding_jobs: self.enqueue_embedding_jobs,
+                        worker_id,
+                    },
+                )
+                .is_err()
+                {
                     continue;
                 }
                 continue;
@@ -1217,7 +1246,7 @@ impl StageBehavior for ReconcileStage {
         }
 
         if valid_jobs.is_empty() {
-            return Err(());
+            return Err(StageError);
         }
 
         match self.submitter.prepare_and_submit(&inputs) {
@@ -1237,7 +1266,7 @@ impl StageBehavior for ReconcileStage {
                 for job in &valid_jobs {
                     poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
                 }
-                Err(())
+                Err(StageError)
             }
         }
     }
@@ -1254,7 +1283,7 @@ impl StageBehavior for ReconcileStage {
         state_store: &dyn EnrichmentStateStore,
         derived_store: &dyn DerivedMetadataWriteStore,
         worker_id: &str,
-    ) -> Result<Option<InFlightBatch>, ()> {
+    ) -> Result<Option<InFlightBatch>, StageError> {
         let (inputs, _payloads, extraction_results, retrieval_result_sets, loaded_artifacts) =
             match batch.context {
                 InFlightContext::Reconcile {
@@ -1272,7 +1301,7 @@ impl StageBehavior for ReconcileStage {
                 ),
                 _ => {
                     error!("[reconcile] process_completed called with wrong context variant");
-                    return Err(());
+                    return Err(StageError);
                 }
             };
 
@@ -1282,10 +1311,10 @@ impl StageBehavior for ReconcileStage {
         let iter = batch
             .jobs
             .into_iter()
-            .zip(extraction_results.into_iter())
-            .zip(retrieval_result_sets.into_iter())
-            .zip(loaded_artifacts.into_iter())
-            .zip(results.into_iter());
+            .zip(extraction_results)
+            .zip(retrieval_result_sets)
+            .zip(loaded_artifacts)
+            .zip(results);
 
         for ((((job, extraction_result), retrieval_result_set), loaded), result) in iter {
             match result {
@@ -1402,7 +1431,7 @@ impl StageBehavior for ReconcileStage {
         state_store: &dyn EnrichmentStateStore,
         job_store: &dyn EnrichmentJobLifecycleStore,
         worker_id: &str,
-    ) -> Result<InFlightBatch, ()> {
+    ) -> Result<InFlightBatch, StageError> {
         let mut inputs = Vec::new();
         let mut payloads = Vec::new();
         let mut extraction_results = Vec::new();
@@ -1420,7 +1449,7 @@ impl StageBehavior for ReconcileStage {
                         "Failed to parse reconcile payload JSON during recovery",
                         err,
                     );
-                    return Err(());
+                    return Err(StageError);
                 }
             };
             let loaded = match read_store.load_artifact_for_enrichment(&job.artifact_id) {
@@ -1435,7 +1464,7 @@ impl StageBehavior for ReconcileStage {
                             job.artifact_id
                         ),
                     );
-                    return Err(());
+                    return Err(StageError);
                 }
                 Err(err) => {
                     poller_fail_job(
@@ -1445,7 +1474,7 @@ impl StageBehavior for ReconcileStage {
                         "Failed to load artifact for reconciliation recovery",
                         err,
                     );
-                    return Err(());
+                    return Err(StageError);
                 }
             };
             let extraction_result =
@@ -1461,7 +1490,7 @@ impl StageBehavior for ReconcileStage {
                                 payload.extraction_result_id
                             ),
                         );
-                        return Err(());
+                        return Err(StageError);
                     }
                     Err(err) => {
                         poller_fail_job(
@@ -1471,7 +1500,7 @@ impl StageBehavior for ReconcileStage {
                             "Failed to load extraction result for reconciliation recovery",
                             err,
                         );
-                        return Err(());
+                        return Err(StageError);
                     }
                 };
             let retrieval_result_set =
@@ -1487,7 +1516,7 @@ impl StageBehavior for ReconcileStage {
                                 payload.retrieval_result_set_id
                             ),
                         );
-                        return Err(());
+                        return Err(StageError);
                     }
                     Err(err) => {
                         poller_fail_job(
@@ -1497,7 +1526,7 @@ impl StageBehavior for ReconcileStage {
                             "Failed to load retrieval result set for reconciliation recovery",
                             err,
                         );
-                        return Err(());
+                        return Err(StageError);
                     }
                 };
             let input = match worker_build_reconciliation_input(
@@ -1515,7 +1544,7 @@ impl StageBehavior for ReconcileStage {
                         "Failed to build reconciliation input during recovery",
                         err,
                     );
-                    return Err(());
+                    return Err(StageError);
                 }
             };
             inputs.push(input);
@@ -1644,17 +1673,28 @@ fn poller_mark_retryable(
     }
 }
 
+struct ReconcileCompletionContext<'a> {
+    job_store: &'a dyn EnrichmentJobLifecycleStore,
+    state_store: &'a dyn EnrichmentStateStore,
+    derived_store: &'a dyn DerivedMetadataWriteStore,
+    enqueue_embedding_jobs: bool,
+    worker_id: &'a str,
+}
+
 fn complete_reconcile_without_candidates(
     job: &ClaimedJob,
     loaded: &LoadedArtifactForEnrichment,
     extraction_result: &ArtifactExtractionResult,
     retrieval_result_set: &RetrievalResultSet,
-    job_store: &dyn EnrichmentJobLifecycleStore,
-    state_store: &dyn EnrichmentStateStore,
-    derived_store: &dyn DerivedMetadataWriteStore,
-    enqueue_embedding_jobs: bool,
-    worker_id: &str,
+    ctx: ReconcileCompletionContext<'_>,
 ) -> Result<(), ()> {
+    let ReconcileCompletionContext {
+        job_store,
+        state_store,
+        derived_store,
+        enqueue_embedding_jobs,
+        worker_id,
+    } = ctx;
     let decisions = vec![ReconciliationDecision {
         reconciliation_decision_id: worker_new_id("reconcile"),
         artifact_id: extraction_result.artifact_id.clone(),

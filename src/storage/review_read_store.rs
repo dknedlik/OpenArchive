@@ -22,7 +22,7 @@ impl ReviewItemKind {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "artifact_needs_attention" => Some(Self::ArtifactNeedsAttention),
             "artifact_missing_summary" => Some(Self::ArtifactMissingSummary),
@@ -80,7 +80,7 @@ impl ReviewDecisionStatus {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "noted" => Some(Self::Noted),
             "dismissed" => Some(Self::Dismissed),

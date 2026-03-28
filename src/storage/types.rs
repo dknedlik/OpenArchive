@@ -39,7 +39,7 @@ impl SourceType {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "chatgpt_export" => Some(Self::ChatGptExport),
             "claude_export" => Some(Self::ClaudeExport),
@@ -115,7 +115,7 @@ impl ArtifactClass {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "conversation" => Some(Self::Conversation),
             "document" => Some(Self::Document),
@@ -172,7 +172,7 @@ impl serde::Serialize for EnrichmentStatus {
 }
 
 impl EnrichmentStatus {
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "pending" => Some(Self::Pending),
             "running" => Some(Self::Running),
@@ -236,7 +236,7 @@ impl JobType {
 }
 
 impl JobType {
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "artifact_extract" => Some(Self::ArtifactExtract),
             "artifact_retrieve_context" => Some(Self::ArtifactRetrieveContext),
@@ -284,7 +284,7 @@ impl EnrichmentTier {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "standard" => Some(Self::Standard),
             "quality" => Some(Self::Quality),
@@ -294,7 +294,7 @@ impl EnrichmentTier {
 }
 
 impl JobStatus {
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "pending" => Some(Self::Pending),
             "running" => Some(Self::Running),
@@ -395,7 +395,7 @@ impl DerivedObjectType {
         )
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "summary" => Some(Self::Summary),
             "classification" => Some(Self::Classification),
@@ -446,7 +446,7 @@ impl ObjectStatus {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "active" => Some(Self::Active),
             "superseded" => Some(Self::Superseded),
@@ -472,7 +472,7 @@ impl ScopeType {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "artifact" => Some(Self::Artifact),
             "segment" => Some(Self::Segment),
@@ -498,7 +498,7 @@ impl EvidenceRole {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "primary_support" => Some(Self::PrimarySupport),
             "secondary_support" => Some(Self::SecondarySupport),
@@ -525,7 +525,7 @@ impl SupportStrength {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "strong" => Some(Self::Strong),
             "medium" => Some(Self::Medium),

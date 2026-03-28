@@ -143,20 +143,26 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
             dimensions: Some(self.dimensions),
             encoding_format: "float".to_string(),
         };
-        let request_body = serde_json::to_vec(&body)
-            .map_err(|source| EmbeddingError::SerializeRequest { source })?;
+        let request_body =
+            serde_json::to_vec(&body).map_err(|source| EmbeddingError::SerializeRequest {
+                source: Box::new(source),
+            })?;
 
         let response = self
             .client
             .post(format!("{}/embeddings", self.base_url))
             .body(request_body)
             .send()
-            .map_err(|source| EmbeddingError::SendRequest { source })?;
+            .map_err(|source| EmbeddingError::SendRequest {
+                source: Box::new(source),
+            })?;
 
         let status = response.status();
         let response_text = response
             .text()
-            .map_err(|source| EmbeddingError::ReadResponse { source })?;
+            .map_err(|source| EmbeddingError::ReadResponse {
+                source: Box::new(source),
+            })?;
         if !status.is_success() {
             return Err(EmbeddingError::HttpStatus {
                 status: status.as_u16(),
@@ -167,7 +173,7 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
         let parsed: OpenAiEmbeddingsResponse =
             serde_json::from_str(&response_text).map_err(|source| {
                 EmbeddingError::ParseResponse {
-                    source,
+                    source: Box::new(source),
                     body_preview: preview(&response_text),
                 }
             })?;

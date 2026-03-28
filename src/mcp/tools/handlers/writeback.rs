@@ -141,7 +141,7 @@ pub(in crate::mcp::tools) fn handle_update_object(
         None => return tool_error("invalid_params", "update_object requires derived_object_id"),
     };
     let new_status = match arguments.get("new_status").and_then(Value::as_str) {
-        Some(v) => match ObjectStatus::from_str(v) {
+        Some(v) => match ObjectStatus::parse(v) {
             Some(s) => s,
             None => return tool_error("invalid_params", &format!("invalid new_status: {v}")),
         },

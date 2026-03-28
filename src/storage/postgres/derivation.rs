@@ -9,7 +9,7 @@ use crate::storage::types::{NewDerivedObject, NewEvidenceLink, ObjectStatus, Sco
 fn pg_error(connection_string: &str, source: postgres::Error) -> StorageError {
     StorageError::Db(DbError::ConnectPostgres {
         connection_string: connection_string.to_string(),
-        source,
+        source: Box::new(source),
     })
 }
 

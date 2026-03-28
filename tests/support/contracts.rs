@@ -8,10 +8,11 @@ use open_archive::storage::{
 use super::fixtures::{
     fixture_derivation_attempt, lock_live_test, make_test_import_fixture,
     make_test_import_fixture_with_max_attempts, sha256_hex, unique_suffix,
+    FixtureDerivationAttemptSpec,
 };
 use super::harness::{DerivedMetadataHarness, ProviderHarness};
 
-pub fn contract_write_single_import_happy_path<H: ProviderHarness>(harness: &H) {
+pub fn contract_write_single_import_happy_path<H: ProviderHarness + ?Sized>(harness: &H) {
     let _guard = lock_live_test();
     harness.reset_schema();
 
@@ -45,7 +46,9 @@ pub fn contract_write_single_import_happy_path<H: ProviderHarness>(harness: &H) 
     assert_eq!(harness.count_jobs_by_artifact_id(&artifact_id), 1);
 }
 
-pub fn contract_write_import_duplicate_payload_is_idempotent<H: ProviderHarness>(harness: &H) {
+pub fn contract_write_import_duplicate_payload_is_idempotent<H: ProviderHarness + ?Sized>(
+    harness: &H,
+) {
     let _guard = lock_live_test();
     harness.reset_schema();
 
@@ -101,7 +104,7 @@ pub fn contract_write_import_duplicate_payload_is_idempotent<H: ProviderHarness>
     assert_eq!(harness.count_jobs_by_artifact_id(&original_artifact_id), 1);
 }
 
-pub fn contract_write_import_duplicate_artifact_hash_is_idempotent<H: ProviderHarness>(
+pub fn contract_write_import_duplicate_artifact_hash_is_idempotent<H: ProviderHarness + ?Sized>(
     harness: &H,
 ) {
     let _guard = lock_live_test();
@@ -153,7 +156,9 @@ pub fn contract_write_import_duplicate_artifact_hash_is_idempotent<H: ProviderHa
     assert_eq!(harness.count_jobs_by_artifact_id(&seeded.artifact_id), 0);
 }
 
-pub fn contract_write_import_partial_success_finalizes_completed_with_errors<H: ProviderHarness>(
+pub fn contract_write_import_partial_success_finalizes_completed_with_errors<
+    H: ProviderHarness + ?Sized,
+>(
     harness: &H,
 ) {
     let _guard = lock_live_test();
@@ -220,7 +225,7 @@ pub fn contract_write_import_partial_success_finalizes_completed_with_errors<H: 
     );
 }
 
-pub fn contract_claim_complete_happy_path<H: ProviderHarness>(harness: &H) {
+pub fn contract_claim_complete_happy_path<H: ProviderHarness + ?Sized>(harness: &H) {
     let _guard = lock_live_test();
     harness.reset_schema();
 
@@ -258,7 +263,7 @@ pub fn contract_claim_complete_happy_path<H: ProviderHarness>(harness: &H) {
     assert!(job.error_message.is_none());
 }
 
-pub fn contract_claim_fail_terminal<H: ProviderHarness>(harness: &H) {
+pub fn contract_claim_fail_terminal<H: ProviderHarness + ?Sized>(harness: &H) {
     let _guard = lock_live_test();
     harness.reset_schema();
 
@@ -290,7 +295,7 @@ pub fn contract_claim_fail_terminal<H: ProviderHarness>(harness: &H) {
     assert_eq!(job.error_message.as_deref(), Some("something went wrong"));
 }
 
-pub fn contract_claim_retryable_reclaim_complete<H: ProviderHarness>(harness: &H) {
+pub fn contract_claim_retryable_reclaim_complete<H: ProviderHarness + ?Sized>(harness: &H) {
     let _guard = lock_live_test();
     harness.reset_schema();
 
@@ -332,7 +337,7 @@ pub fn contract_claim_retryable_reclaim_complete<H: ProviderHarness>(harness: &H
     assert_eq!(job.attempt_count, 2);
 }
 
-pub fn contract_retryable_exhausted_becomes_terminal<H: ProviderHarness>(harness: &H) {
+pub fn contract_retryable_exhausted_becomes_terminal<H: ProviderHarness + ?Sized>(harness: &H) {
     let _guard = lock_live_test();
     harness.reset_schema();
 
@@ -385,7 +390,7 @@ pub fn contract_retryable_exhausted_becomes_terminal<H: ProviderHarness>(harness
     assert_eq!(job.error_message.as_deref(), Some("transient error 2"));
 }
 
-pub fn contract_claim_returns_none_when_empty<H: ProviderHarness>(harness: &H) {
+pub fn contract_claim_returns_none_when_empty<H: ProviderHarness + ?Sized>(harness: &H) {
     let _guard = lock_live_test();
     harness.reset_schema();
 
@@ -397,7 +402,7 @@ pub fn contract_claim_returns_none_when_empty<H: ProviderHarness>(harness: &H) {
     assert!(result.is_none());
 }
 
-pub fn contract_concurrent_claim_protection<H: ProviderHarness>(harness: &H) {
+pub fn contract_concurrent_claim_protection<H: ProviderHarness + ?Sized>(harness: &H) {
     let _guard = lock_live_test();
     harness.reset_schema();
 
@@ -444,7 +449,7 @@ pub fn contract_concurrent_claim_protection<H: ProviderHarness>(harness: &H) {
     assert!(claimed_3.is_none());
 }
 
-pub fn contract_payload_matches_documented_schema<H: ProviderHarness>(harness: &H) {
+pub fn contract_payload_matches_documented_schema<H: ProviderHarness + ?Sized>(harness: &H) {
     let _guard = lock_live_test();
     harness.reset_schema();
 
@@ -481,7 +486,7 @@ pub fn contract_payload_matches_documented_schema<H: ProviderHarness>(harness: &
     assert_eq!(payload.source_type, "chatgpt_export");
 }
 
-pub fn contract_claim_skips_future_available_at<H: ProviderHarness>(harness: &H) {
+pub fn contract_claim_skips_future_available_at<H: ProviderHarness + ?Sized>(harness: &H) {
     let _guard = lock_live_test();
     harness.reset_schema();
 
@@ -515,7 +520,7 @@ pub fn contract_claim_skips_future_available_at<H: ProviderHarness>(harness: &H)
     assert_eq!(job.status, "retryable");
 }
 
-pub fn contract_non_claiming_worker_cannot_complete_job<H: ProviderHarness>(harness: &H) {
+pub fn contract_non_claiming_worker_cannot_complete_job<H: ProviderHarness + ?Sized>(harness: &H) {
     let _guard = lock_live_test();
     harness.reset_schema();
 
@@ -545,7 +550,7 @@ pub fn contract_non_claiming_worker_cannot_complete_job<H: ProviderHarness>(harn
 }
 
 pub fn contract_writes_summary_classification_and_memory_with_evidence<
-    H: DerivedMetadataHarness,
+    H: DerivedMetadataHarness + ?Sized,
 >(
     harness: &H,
 ) {
@@ -564,14 +569,16 @@ pub fn contract_writes_summary_classification_and_memory_with_evidence<
         .derivation_store()
         .write_derivation_attempt(fixture_derivation_attempt(
             &fixture,
-            &run_id,
-            &summary_id,
-            &classification_id,
-            &memory_id,
-            "1.0.0",
-            "fixture",
-            "stub-v1",
-            "p1",
+            FixtureDerivationAttemptSpec {
+                run_id: &run_id,
+                summary_id: &summary_id,
+                classification_id: &classification_id,
+                memory_id: &memory_id,
+                pipeline_version: "1.0.0",
+                provider_name: "fixture",
+                model_name: "stub-v1",
+                prompt_version: "p1",
+            },
         ))
         .expect("derivation write should succeed");
 
@@ -601,7 +608,9 @@ pub fn contract_writes_summary_classification_and_memory_with_evidence<
     assert_eq!(classification_payload["classification_value"], "greeting");
 }
 
-pub fn contract_rerun_supersedes_previous_active_objects<H: DerivedMetadataHarness>(harness: &H) {
+pub fn contract_rerun_supersedes_previous_active_objects<H: DerivedMetadataHarness + ?Sized>(
+    harness: &H,
+) {
     let _guard = lock_live_test();
     harness.reset_schema();
 
@@ -615,14 +624,16 @@ pub fn contract_rerun_supersedes_previous_active_objects<H: DerivedMetadataHarne
         .derivation_store()
         .write_derivation_attempt(fixture_derivation_attempt(
             &fixture,
-            &run_a,
-            &format!("summary-a-{}", fixture.artifact_id),
-            &format!("class-a-{}", fixture.artifact_id),
-            &format!("memory-a-{}", fixture.artifact_id),
-            "1.0.0",
-            "fixture",
-            "stub-v1",
-            "p1",
+            FixtureDerivationAttemptSpec {
+                run_id: &run_a,
+                summary_id: &format!("summary-a-{}", fixture.artifact_id),
+                classification_id: &format!("class-a-{}", fixture.artifact_id),
+                memory_id: &format!("memory-a-{}", fixture.artifact_id),
+                pipeline_version: "1.0.0",
+                provider_name: "fixture",
+                model_name: "stub-v1",
+                prompt_version: "p1",
+            },
         ))
         .expect("first derivation write should succeed");
 
@@ -630,14 +641,16 @@ pub fn contract_rerun_supersedes_previous_active_objects<H: DerivedMetadataHarne
         .derivation_store()
         .write_derivation_attempt(fixture_derivation_attempt(
             &fixture,
-            &run_b,
-            &format!("summary-b-{}", fixture.artifact_id),
-            &format!("class-b-{}", fixture.artifact_id),
-            &format!("memory-b-{}", fixture.artifact_id),
-            "1.0.1",
-            "fixture",
-            "stub-v2",
-            "p2",
+            FixtureDerivationAttemptSpec {
+                run_id: &run_b,
+                summary_id: &format!("summary-b-{}", fixture.artifact_id),
+                classification_id: &format!("class-b-{}", fixture.artifact_id),
+                memory_id: &format!("memory-b-{}", fixture.artifact_id),
+                pipeline_version: "1.0.1",
+                provider_name: "fixture",
+                model_name: "stub-v2",
+                prompt_version: "p2",
+            },
         ))
         .expect("second derivation write should succeed");
 
@@ -666,7 +679,7 @@ pub fn contract_rerun_supersedes_previous_active_objects<H: DerivedMetadataHarne
 }
 
 pub fn contract_rejects_cross_artifact_evidence_links_without_writing_rows<
-    H: DerivedMetadataHarness,
+    H: DerivedMetadataHarness + ?Sized,
 >(
     harness: &H,
 ) {
@@ -736,7 +749,9 @@ pub fn contract_rejects_cross_artifact_evidence_links_without_writing_rows<
     assert_eq!(harness.count_derived_object_by_id(&summary_id), 0);
 }
 
-pub fn contract_rolls_back_partial_writes_when_evidence_insert_fails<H: DerivedMetadataHarness>(
+pub fn contract_rolls_back_partial_writes_when_evidence_insert_fails<
+    H: DerivedMetadataHarness + ?Sized,
+>(
     harness: &H,
 ) {
     let _guard = lock_live_test();
@@ -813,3 +828,33 @@ pub fn contract_rolls_back_partial_writes_when_evidence_insert_fails<H: DerivedM
     assert_eq!(harness.count_derived_object_by_id(&summary_id), 0);
     assert_eq!(harness.count_evidence_links_for_object(&summary_id), 0);
 }
+
+fn _touch_provider_contracts(harness: &dyn ProviderHarness) {
+    if false {
+        contract_write_single_import_happy_path(harness);
+        contract_write_import_duplicate_payload_is_idempotent(harness);
+        contract_write_import_duplicate_artifact_hash_is_idempotent(harness);
+        contract_write_import_partial_success_finalizes_completed_with_errors(harness);
+        contract_claim_complete_happy_path(harness);
+        contract_claim_fail_terminal(harness);
+        contract_claim_retryable_reclaim_complete(harness);
+        contract_retryable_exhausted_becomes_terminal(harness);
+        contract_claim_returns_none_when_empty(harness);
+        contract_concurrent_claim_protection(harness);
+        contract_payload_matches_documented_schema(harness);
+        contract_claim_skips_future_available_at(harness);
+        contract_non_claiming_worker_cannot_complete_job(harness);
+    }
+}
+
+fn _touch_derived_contracts(harness: &dyn DerivedMetadataHarness) {
+    if false {
+        contract_writes_summary_classification_and_memory_with_evidence(harness);
+        contract_rerun_supersedes_previous_active_objects(harness);
+        contract_rejects_cross_artifact_evidence_links_without_writing_rows(harness);
+        contract_rolls_back_partial_writes_when_evidence_insert_fails(harness);
+    }
+}
+
+const _: fn(&dyn ProviderHarness) = _touch_provider_contracts;
+const _: fn(&dyn DerivedMetadataHarness) = _touch_derived_contracts;

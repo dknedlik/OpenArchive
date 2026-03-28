@@ -60,9 +60,13 @@ impl ArchiveRetrievalStore for OracleArchiveRetrievalStore {
                     &sql,
                     &[&artifact_id, &like_pattern, &(limit_per_intent as i64)],
                 )
-                .map_err(|source| StorageError::ListArtifacts { source })?;
+                .map_err(|source| StorageError::ListArtifacts {
+                    source: Box::new(source),
+                })?;
             for row_result in rows {
-                let row = row_result.map_err(|source| StorageError::ListArtifacts { source })?;
+                let row = row_result.map_err(|source| StorageError::ListArtifacts {
+                    source: Box::new(source),
+                })?;
                 items.push(RetrievedContextItem {
                     item_type: row.get::<_, String>(0).unwrap_or_default(),
                     object_id: row.get::<_, String>(1).unwrap_or_default(),

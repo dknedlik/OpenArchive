@@ -46,7 +46,7 @@ impl SearchQueryMode {
 fn map_pg_err(connection_string: &str, source: postgres::Error) -> StorageError {
     StorageError::Db(crate::error::DbError::ConnectPostgres {
         connection_string: connection_string.to_string(),
-        source,
+        source: Box::new(source),
     })
 }
 
@@ -217,7 +217,7 @@ pub fn search_candidates(
             "derived_object" => {
                 let derived_object_type: String = row.get(3);
                 SearchCandidateKind::DerivedObject {
-                    derived_type: DerivedObjectType::from_str(&derived_object_type).ok_or_else(
+                    derived_type: DerivedObjectType::parse(&derived_object_type).ok_or_else(
                         || StorageError::InvalidDerivedObjectType {
                             artifact_id: artifact_id.clone(),
                             value: derived_object_type,
@@ -397,13 +397,13 @@ fn load_artifact_record(
     Ok(Some(ArtifactDetailRecord {
         artifact_id: row.get(0),
         title: row.get(1),
-        source_type: SourceType::from_str(&source_type).ok_or_else(|| {
+        source_type: SourceType::parse(&source_type).ok_or_else(|| {
             StorageError::InvalidSourceType {
                 artifact_id: artifact_id.to_string(),
                 value: source_type,
             }
         })?,
-        enrichment_status: EnrichmentStatus::from_str(&enrichment_status).ok_or_else(|| {
+        enrichment_status: EnrichmentStatus::parse(&enrichment_status).ok_or_else(|| {
             StorageError::InvalidEnrichmentStatus {
                 artifact_id: artifact_id.to_string(),
                 value: enrichment_status,
@@ -438,13 +438,11 @@ fn load_artifact_segments(
         let participant_role = row
             .get::<_, Option<String>>(2)
             .map(|value| {
-                ParticipantRole::from_str(&value).ok_or_else(|| {
-                    StorageError::InvalidParticipantRole {
-                        participant_id: participant_id
-                            .clone()
-                            .unwrap_or_else(|| "unknown".to_string()),
-                        value,
-                    }
+                ParticipantRole::parse(&value).ok_or_else(|| StorageError::InvalidParticipantRole {
+                    participant_id: participant_id
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    value,
                 })
             })
             .transpose()?;
@@ -483,7 +481,7 @@ fn load_artifact_detail_derived_objects(
         let derived_object_type: String = row.get(1);
         objects.push(ArtifactDetailDerivedObject {
             derived_object_id: derived_object_id.clone(),
-            derived_object_type: DerivedObjectType::from_str(&derived_object_type).ok_or_else(
+            derived_object_type: DerivedObjectType::parse(&derived_object_type).ok_or_else(
                 || StorageError::InvalidDerivedObjectType {
                     artifact_id: artifact_id.to_string(),
                     value: derived_object_type,
@@ -495,7 +493,7 @@ fn load_artifact_detail_derived_objects(
                 StorageError::ReadDerivedObjectConfidenceScore {
                     artifact_id: artifact_id.to_string(),
                     derived_object_id: derived_object_id.clone(),
-                    source,
+                    source: Box::new(source),
                 }
             })?,
         });
@@ -524,7 +522,7 @@ fn load_artifact_context_derived_objects(
         let derived_object_type: String = row.get(1);
         objects.push(ArtifactContextDerivedObject {
             derived_object_id: row.get(0),
-            derived_object_type: DerivedObjectType::from_str(&derived_object_type).ok_or_else(
+            derived_object_type: DerivedObjectType::parse(&derived_object_type).ok_or_else(
                 || StorageError::InvalidDerivedObjectType {
                     artifact_id: artifact_id.to_string(),
                     value: derived_object_type,
@@ -533,7 +531,7 @@ fn load_artifact_context_derived_objects(
             title: row.get(2),
             body_text: row.get(3),
             scope_id: row.get(4),
-            scope_type: ScopeType::from_str(&row.get::<_, String>(5)).ok_or_else(|| {
+            scope_type: ScopeType::parse(&row.get::<_, String>(5)).ok_or_else(|| {
                 StorageError::InvalidScopeType {
                     artifact_id: artifact_id.to_string(),
                     value: row.get(5),
@@ -573,13 +571,13 @@ fn load_artifact_context_evidence_links(
             evidence_link_id: row.get(0),
             derived_object_id: row.get(1),
             segment_id: row.get(2),
-            evidence_role: EvidenceRole::from_str(&row.get::<_, String>(3)).ok_or_else(|| {
+            evidence_role: EvidenceRole::parse(&row.get::<_, String>(3)).ok_or_else(|| {
                 StorageError::InvalidEvidenceRole {
                     artifact_id: artifact_id.to_string(),
                     value: row.get(3),
                 }
             })?,
-            support_strength: SupportStrength::from_str(&row.get::<_, String>(4)).ok_or_else(
+            support_strength: SupportStrength::parse(&row.get::<_, String>(4)).ok_or_else(
                 || StorageError::InvalidSupportStrength {
                     artifact_id: artifact_id.to_string(),
                     value: row.get(4),
@@ -701,7 +699,7 @@ pub fn search_objects(
         results.push(DerivedObjectSearchResult {
             derived_object_id: derived_object_id.clone(),
             artifact_id: artifact_id.clone(),
-            derived_object_type: DerivedObjectType::from_str(&derived_object_type_str).ok_or_else(
+            derived_object_type: DerivedObjectType::parse(&derived_object_type_str).ok_or_else(
                 || StorageError::InvalidDerivedObjectType {
                     artifact_id: artifact_id.clone(),
                     value: derived_object_type_str,
@@ -714,7 +712,7 @@ pub fn search_objects(
                 StorageError::ReadDerivedObjectConfidenceScore {
                     artifact_id: artifact_id.clone(),
                     derived_object_id: derived_object_id.clone(),
-                    source,
+                    source: Box::new(source),
                 }
             })?,
             score: row.get(7),
@@ -801,7 +799,7 @@ pub fn search_objects_by_embedding(
         results.push(DerivedObjectSearchResult {
             derived_object_id: derived_object_id.clone(),
             artifact_id: artifact_id.clone(),
-            derived_object_type: DerivedObjectType::from_str(&derived_object_type_str).ok_or_else(
+            derived_object_type: DerivedObjectType::parse(&derived_object_type_str).ok_or_else(
                 || StorageError::InvalidDerivedObjectType {
                     artifact_id: artifact_id.clone(),
                     value: derived_object_type_str,
@@ -814,7 +812,7 @@ pub fn search_objects_by_embedding(
                 StorageError::ReadDerivedObjectConfidenceScore {
                     artifact_id: artifact_id.clone(),
                     derived_object_id: derived_object_id.clone(),
-                    source,
+                    source: Box::new(source),
                 }
             })?,
             score: row.get(7),
@@ -861,7 +859,7 @@ pub fn find_related_by_candidate_keys(
         results.push(RelatedDerivedObject {
             derived_object_id: derived_object_id.clone(),
             artifact_id: row_artifact_id.clone(),
-            derived_object_type: DerivedObjectType::from_str(&derived_object_type_str).ok_or_else(
+            derived_object_type: DerivedObjectType::parse(&derived_object_type_str).ok_or_else(
                 || StorageError::InvalidDerivedObjectType {
                     artifact_id: row_artifact_id.clone(),
                     value: derived_object_type_str,
@@ -874,7 +872,7 @@ pub fn find_related_by_candidate_keys(
                 StorageError::ReadDerivedObjectConfidenceScore {
                     artifact_id: row_artifact_id,
                     derived_object_id,
-                    source,
+                    source: Box::new(source),
                 }
             })?,
         });
@@ -937,7 +935,7 @@ pub fn get_related_objects(
         results.push(GraphRelatedEntry {
             derived_object_id: obj_id,
             artifact_id: artifact_id.clone(),
-            derived_object_type: DerivedObjectType::from_str(&derived_object_type_str).ok_or_else(
+            derived_object_type: DerivedObjectType::parse(&derived_object_type_str).ok_or_else(
                 || StorageError::InvalidDerivedObjectType {
                     artifact_id: artifact_id.clone(),
                     value: derived_object_type_str,

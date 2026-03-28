@@ -1,3 +1,5 @@
+#![deny(warnings)]
+
 use anyhow::Context;
 use clap::{command, Parser, Subcommand};
 use open_archive::app::ArchiveApplication;
@@ -51,7 +53,7 @@ fn oracle_check() -> Result<(), anyhow::Error> {
     let config = AppConfig::from_env().context("failed to load application configuration")?;
     let config = require_oracle_db_config(&config)
         .context("failed to resolve Oracle database configuration")?;
-    let conn = db::connect(&config).context("failed to connect to Oracle")?;
+    let conn = db::connect(config).context("failed to connect to Oracle")?;
     let row = conn
         .query_row_as::<(i32, String)>(
             "select 1 as connected, sys_context('USERENV', 'SERVICE_NAME') as service_name from dual",
@@ -115,14 +117,16 @@ fn serve() -> Result<(), anyhow::Error> {
                 start_enrichment_pipeline(
                     &pipeline_config,
                     inference_mode,
-                    Arc::clone(&services.enrichment_store),
-                    Arc::clone(&services.read_store),
-                    Arc::clone(&services.app.retrieval),
-                    Arc::clone(&services.state_store),
-                    Arc::clone(&services.derived_store),
-                    services.embedding_store.clone(),
+                    open_archive::enrichment_worker::EnrichmentPipelineResources {
+                        job_store: Arc::clone(&services.enrichment_store),
+                        read_store: Arc::clone(&services.read_store),
+                        retrieval_service: Arc::clone(&services.app.retrieval),
+                        state_store: Arc::clone(&services.state_store),
+                        derived_store: Arc::clone(&services.derived_store),
+                        embedding_store: services.embedding_store.clone(),
+                        embedding_provider: services.embedding_provider.clone(),
+                    },
                     shutdown.clone(),
-                    services.embedding_provider.clone(),
                     Arc::clone(&services.processor_factory),
                 )?
             }
@@ -133,14 +137,16 @@ fn serve() -> Result<(), anyhow::Error> {
                 start_enrichment_pipeline(
                     &pipeline_config,
                     inference_mode,
-                    Arc::clone(&services.enrichment_store),
-                    Arc::clone(&services.read_store),
-                    Arc::clone(&services.app.retrieval),
-                    Arc::clone(&services.state_store),
-                    Arc::clone(&services.derived_store),
-                    services.embedding_store.clone(),
+                    open_archive::enrichment_worker::EnrichmentPipelineResources {
+                        job_store: Arc::clone(&services.enrichment_store),
+                        read_store: Arc::clone(&services.read_store),
+                        retrieval_service: Arc::clone(&services.app.retrieval),
+                        state_store: Arc::clone(&services.state_store),
+                        derived_store: Arc::clone(&services.derived_store),
+                        embedding_store: services.embedding_store.clone(),
+                        embedding_provider: services.embedding_provider.clone(),
+                    },
                     shutdown.clone(),
-                    services.embedding_provider.clone(),
                     Arc::clone(&services.processor_factory),
                 )?
             }
@@ -224,7 +230,7 @@ fn run_http_worker_loop(
 mod tests {
     use super::*;
 
-    use open_archive::app::ArchiveApplication;
+    use open_archive::app::{ArchiveApplication, ArchiveApplicationDeps};
     use open_archive::object_store::{NewObject, ObjectStore, PutObjectResult, StoredObject};
     use open_archive::storage::{
         ArchiveRetrievalStore, ArtifactListItem, ArtifactReadStore, ImportStatus,
@@ -367,13 +373,7 @@ mod tests {
     fn test_worker_exits_on_error() {
         let shutdown = ShutdownToken::new();
         let receiver = MockReceiver {
-            items: Mutex::new(
-                vec![Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "test error",
-                ))]
-                .into(),
-            ),
+            items: Mutex::new(vec![Err(std::io::Error::other("test error"))].into()),
         };
         let app = mock_app(MockStore::new());
         run_http_worker_loop(&receiver, app.as_ref(), shutdown.clone());
@@ -445,19 +445,19 @@ mod tests {
         let read_store: Arc<dyn ArtifactReadStore + Send + Sync> = store.clone();
         let retrieval_store: Arc<dyn ArchiveRetrievalStore + Send + Sync> = store.clone();
         let object_store: Arc<dyn ObjectStore + Send + Sync> = store;
-        Arc::new(ArchiveApplication::new(
+        Arc::new(ArchiveApplication::new(ArchiveApplicationDeps {
             import_store,
             read_store,
             retrieval_store,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            search_read_store: None,
+            artifact_detail_store: None,
+            context_pack_store: None,
+            cross_artifact_store: None,
+            object_search_store: None,
+            review_store: None,
+            object_search_embedding_provider: None,
             object_store,
-            None,
-        ))
+            writeback_store: None,
+        }))
     }
 }

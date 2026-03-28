@@ -1,12 +1,20 @@
-mod support;
+#![deny(warnings)]
 
+#[path = "support/contracts.rs"]
+mod contracts;
+#[path = "support/fixtures.rs"]
+mod fixtures;
+#[path = "support/harness.rs"]
+mod harness;
+
+use fixtures::TestImportFixture;
+use harness::{DerivationRunRecord, DerivedMetadataHarness};
 use open_archive::config::PostgresConfig;
 use open_archive::migrations;
 use open_archive::storage::{DerivedMetadataWriteStore, PostgresDerivedMetadataStore};
 use postgres::NoTls;
 use serde_json::Value;
 use std::sync::OnceLock;
-use support::{DerivationRunRecord, DerivedMetadataHarness, TestImportFixture};
 
 fn postgres_config() -> Option<PostgresConfig> {
     if std::env::var("OA_POSTGRES_INTEGRATION_TESTS").is_err() {
@@ -320,26 +328,26 @@ impl DerivedMetadataHarness for PostgresHarness {
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn writes_summary_classification_and_memory_with_evidence() {
     let Some(harness) = harness() else { return };
-    support::contract_writes_summary_classification_and_memory_with_evidence(&harness);
+    contracts::contract_writes_summary_classification_and_memory_with_evidence(&harness);
 }
 
 #[test]
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn rejects_cross_artifact_evidence_links_without_writing_rows() {
     let Some(harness) = harness() else { return };
-    support::contract_rejects_cross_artifact_evidence_links_without_writing_rows(&harness);
+    contracts::contract_rejects_cross_artifact_evidence_links_without_writing_rows(&harness);
 }
 
 #[test]
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn rolls_back_partial_writes_when_evidence_insert_fails() {
     let Some(harness) = harness() else { return };
-    support::contract_rolls_back_partial_writes_when_evidence_insert_fails(&harness);
+    contracts::contract_rolls_back_partial_writes_when_evidence_insert_fails(&harness);
 }
 
 #[test]
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
 fn rerun_supersedes_previous_active_objects() {
     let Some(harness) = harness() else { return };
-    support::contract_rerun_supersedes_previous_active_objects(&harness);
+    contracts::contract_rerun_supersedes_previous_active_objects(&harness);
 }

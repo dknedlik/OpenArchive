@@ -103,13 +103,13 @@ pub mod oracle {
         )
         .map_err(|source| MigrationsError::RecordMigration {
             filename: migration.filename.clone(),
-            source,
+            source: Box::new(source),
         })?;
 
         conn.commit()
             .map_err(|source| MigrationsError::CommitMigration {
                 filename: migration.filename.clone(),
-                source,
+                source: Box::new(source),
             })?;
 
         println!("applied {} {}", migration.version, migration.name);
@@ -139,9 +139,13 @@ end;
 "#;
 
         conn.execute(plsql, &[])
-            .map_err(|source| MigrationsError::EnsureSchemaMigrationTable { source })?;
+            .map_err(|source| MigrationsError::EnsureSchemaMigrationTable {
+                source: Box::new(source),
+            })?;
         conn.commit()
-            .map_err(|source| MigrationsError::CommitSchemaMigrationBootstrap { source })?;
+            .map_err(|source| MigrationsError::CommitSchemaMigrationBootstrap {
+                source: Box::new(source),
+            })?;
         Ok(())
     }
 
@@ -161,7 +165,9 @@ end;
 "#;
 
         conn.execute(plsql, &[])
-            .map_err(|source| MigrationsError::ResetSchemaObjects { source })?;
+            .map_err(|source| MigrationsError::ResetSchemaObjects {
+                source: Box::new(source),
+            })?;
         Ok(())
     }
 
@@ -174,17 +180,24 @@ end;
                 "select version, checksum from oa_schema_migration order by version",
                 &[],
             )
-            .map_err(|source| MigrationsError::LoadAppliedMigrations { source })?;
+            .map_err(|source| MigrationsError::LoadAppliedMigrations {
+                source: Box::new(source),
+            })?;
 
         for row_result in rows {
-            let row =
-                row_result.map_err(|source| MigrationsError::ReadMigrationHistoryRow { source })?;
-            let version: String = row
-                .get(0)
-                .map_err(|source| MigrationsError::ReadMigrationVersion { source })?;
-            let checksum: String = row
-                .get(1)
-                .map_err(|source| MigrationsError::ReadMigrationChecksum { source })?;
+            let row = row_result.map_err(|source| MigrationsError::ReadMigrationHistoryRow {
+                source: Box::new(source),
+            })?;
+            let version: String =
+                row.get(0)
+                    .map_err(|source| MigrationsError::ReadMigrationVersion {
+                        source: Box::new(source),
+                    })?;
+            let checksum: String =
+                row.get(1)
+                    .map_err(|source| MigrationsError::ReadMigrationChecksum {
+                        source: Box::new(source),
+                    })?;
             map.insert(version, checksum);
         }
 
@@ -205,7 +218,7 @@ end;
                 MigrationsError::ExecuteMigrationStatement {
                     filename: migration.filename.clone(),
                     statement_preview: preview_sql_statement(&statement),
-                    source,
+                    source: Box::new(source),
                 }
             })?;
         }
@@ -274,7 +287,7 @@ pub mod postgres {
             .map_err(|source| {
                 MigrationsError::Db(crate::error::DbError::ConnectPostgres {
                     connection_string: "postgres".to_string(),
-                    source,
+                    source: Box::new(source),
                 })
             })?;
         Ok(())
@@ -288,7 +301,7 @@ pub mod postgres {
             )
             .map_err(|source| MigrationsError::Db(crate::error::DbError::ConnectPostgres {
                 connection_string: "postgres".to_string(),
-                source,
+                source: Box::new(source),
             }))?;
 
         for row in rows {
@@ -298,7 +311,7 @@ pub mod postgres {
                 .map_err(|source| {
                     MigrationsError::Db(crate::error::DbError::ConnectPostgres {
                         connection_string: "postgres".to_string(),
-                        source,
+                        source: Box::new(source),
                     })
                 })?;
         }
@@ -338,7 +351,7 @@ pub mod postgres {
             .map_err(|source| {
                 MigrationsError::Db(crate::error::DbError::ConnectPostgres {
                     connection_string: "postgres".to_string(),
-                    source,
+                    source: Box::new(source),
                 })
             })?;
 
@@ -356,7 +369,7 @@ pub mod postgres {
         client.batch_execute(&migration.sql).map_err(|source| {
             MigrationsError::Db(crate::error::DbError::ConnectPostgres {
                 connection_string: "postgres".to_string(),
-                source,
+                source: Box::new(source),
             })
         })?;
         client
@@ -366,7 +379,7 @@ pub mod postgres {
             )
             .map_err(|source| MigrationsError::Db(crate::error::DbError::ConnectPostgres {
                 connection_string: "postgres".to_string(),
-                source,
+                source: Box::new(source),
             }))?;
         println!("applied {} {}", migration.version, migration.name);
         Ok(())
@@ -387,9 +400,11 @@ fn load_migrations_from_dir(dir: &Path) -> MigrationsResult<Vec<Migration>> {
 
     for entry in fs::read_dir(dir).map_err(|source| MigrationsError::ReadMigrationsDir {
         path: dir.to_path_buf(),
-        source,
+        source: Box::new(source),
     })? {
-        let entry = entry.map_err(|source| MigrationsError::ReadMigrationEntry { source })?;
+        let entry = entry.map_err(|source| MigrationsError::ReadMigrationEntry {
+            source: Box::new(source),
+        })?;
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("sql") {
             continue;
@@ -413,7 +428,7 @@ fn load_migration(path: &Path) -> MigrationsResult<Migration> {
     let (version, name) = parse_filename(&filename)?;
     let sql = fs::read_to_string(path).map_err(|source| MigrationsError::ReadMigrationFile {
         path: path.to_path_buf(),
-        source,
+        source: Box::new(source),
     })?;
     let checksum = format!("{:x}", Sha256::digest(sql.as_bytes()));
 

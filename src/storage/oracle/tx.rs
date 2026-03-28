@@ -24,8 +24,10 @@ pub(in crate::storage::oracle) fn commit_connection(
     conn: &oracle::Connection,
     operation: &'static str,
 ) -> StorageResult<()> {
-    conn.commit()
-        .map_err(|source| StorageError::Commit { operation, source })
+    conn.commit().map_err(|source| StorageError::Commit {
+        operation,
+        source: Box::new(source),
+    })
 }
 
 pub(in crate::storage::oracle) fn rollback_connection(
@@ -34,6 +36,6 @@ pub(in crate::storage::oracle) fn rollback_connection(
 ) -> StorageResult<()> {
     conn.rollback().map_err(|source| StorageError::Rollback {
         operation: operation.into(),
-        source,
+        source: Box::new(source),
     })
 }

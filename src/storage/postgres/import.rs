@@ -97,6 +97,6 @@ fn map_pg_err(source: postgres::Error) -> StorageError {
 fn map_postgres_error(source: postgres::Error) -> crate::error::DbError {
     crate::error::DbError::ConnectPostgres {
         connection_string: "postgres".to_string(),
-        source,
+        source: Box::new(source),
     }
 }

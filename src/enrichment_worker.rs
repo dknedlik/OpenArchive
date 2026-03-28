@@ -13,7 +13,7 @@ use crate::processor::{
     ReconciliationProcessorInput, RelationshipOutput, StubProcessorFactory, SummaryOutput,
 };
 use crate::shutdown::ShutdownToken;
-use crate::stage_poller::{stage_poller_loop, ExtractStage, ReconcileStage};
+use crate::stage_poller::{stage_poller_loop, ExtractStage, ReconcileStage, StagePollerContext};
 use crate::storage::JobType;
 use crate::storage::{
     ArtifactExtractPayload, ArtifactExtractionResult, ArtifactReadStore, ArtifactReconcilePayload,
@@ -44,13 +44,27 @@ struct ExtractCoveragePolicy {
     min_coverage_percent: u8,
     max_gap_fill_passes: usize,
 }
-/// Worker ID format: enrichment:<pid>:<worker_index>
-pub fn format_worker_id(pid: u32, worker_index: usize) -> String {
-    format!("enrichment:{}:{}", pid, worker_index)
+
+/// Borrowed view of all store/service/factory dependencies used by worker functions.
+struct WorkerContext<'a> {
+    job_store: &'a dyn EnrichmentJobLifecycleStore,
+    read_store: &'a dyn ArtifactReadStore,
+    retrieval_service: &'a dyn ArchiveRetrievalServiceApi,
+    state_store: &'a dyn EnrichmentStateStore,
+    derived_store: &'a dyn DerivedMetadataWriteStore,
+    embedding_store: Option<&'a dyn DerivedObjectEmbeddingStore>,
+    embedding_provider: Option<&'a dyn EmbeddingProvider>,
+    processor_factory: &'a dyn ArtifactProcessorFactory,
 }
 
-fn enrichment_worker(
-    worker_id: String,
+/// Extraction chunking and coverage parameters.
+struct ExtractionPolicy<'a> {
+    chunking: &'a ExtractionChunkingConfig,
+    coverage: &'a ExtractCoveragePolicy,
+}
+
+/// Owned Arc resources for long-running worker threads.
+struct WorkerResources {
     job_store: Arc<dyn EnrichmentJobLifecycleStore>,
     read_store: Arc<dyn ArtifactReadStore>,
     retrieval_service: Arc<dyn ArchiveRetrievalServiceApi>,
@@ -59,6 +73,47 @@ fn enrichment_worker(
     embedding_store: Option<Arc<dyn DerivedObjectEmbeddingStore>>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
+}
+
+impl WorkerResources {
+    fn as_context(&self) -> WorkerContext<'_> {
+        WorkerContext {
+            job_store: self.job_store.as_ref(),
+            read_store: self.read_store.as_ref(),
+            retrieval_service: self.retrieval_service.as_ref(),
+            state_store: self.state_store.as_ref(),
+            derived_store: self.derived_store.as_ref(),
+            embedding_store: self.embedding_store.as_deref(),
+            embedding_provider: self.embedding_provider.as_deref(),
+            processor_factory: self.processor_factory.as_ref(),
+        }
+    }
+}
+
+pub struct WorkerStartConfig<'a> {
+    pub http: &'a crate::config::HttpConfig,
+    pub shutdown: ShutdownToken,
+    pub processor_factory: Arc<dyn ArtifactProcessorFactory>,
+}
+
+pub struct EnrichmentPipelineResources {
+    pub job_store: Arc<dyn EnrichmentJobLifecycleStore>,
+    pub read_store: Arc<dyn ArtifactReadStore>,
+    pub retrieval_service: Arc<dyn ArchiveRetrievalServiceApi>,
+    pub state_store: Arc<dyn EnrichmentStateStore>,
+    pub derived_store: Arc<dyn DerivedMetadataWriteStore>,
+    pub embedding_store: Option<Arc<dyn DerivedObjectEmbeddingStore>>,
+    pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+}
+
+/// Worker ID format: enrichment:<pid>:<worker_index>
+pub fn format_worker_id(pid: u32, worker_index: usize) -> String {
+    format!("enrichment:{}:{}", pid, worker_index)
+}
+
+fn enrichment_worker(
+    worker_id: String,
+    res: WorkerResources,
     chunking: Arc<ExtractionChunkingConfig>,
     coverage_policy: Arc<ExtractCoveragePolicy>,
     poll_interval: Duration,
@@ -72,23 +127,20 @@ fn enrichment_worker(
             break;
         }
 
-        match job_store.claim_next_job(&worker_id) {
+        match res.job_store.claim_next_job(&worker_id) {
             Ok(Some(claimed_job)) => {
                 debug!("Worker {} claimed job {}", worker_id, claimed_job.job_id);
+                let ctx = res.as_context();
+                let policy = ExtractionPolicy {
+                    chunking: chunking.as_ref(),
+                    coverage: coverage_policy.as_ref(),
+                };
                 if let Err(err) = process_claimed_jobs(
                     &worker_id,
                     claimed_job,
-                    job_store.as_ref(),
-                    read_store.as_ref(),
-                    retrieval_service.as_ref(),
-                    state_store.as_ref(),
-                    derived_store.as_ref(),
-                    embedding_store.as_deref(),
-                    embedding_provider.as_deref(),
-                    processor_factory.as_ref(),
+                    &ctx,
                     InferenceExecutionMode::Direct,
-                    chunking.as_ref(),
-                    coverage_policy.as_ref(),
+                    &policy,
                 ) {
                     error!(
                         "Worker {} failed to process claimed work: {}",
@@ -108,26 +160,19 @@ fn enrichment_worker(
 fn process_claimed_jobs(
     worker_id: &str,
     first_job: ClaimedJob,
-    job_store: &dyn EnrichmentJobLifecycleStore,
-    read_store: &dyn ArtifactReadStore,
-    retrieval_service: &dyn ArchiveRetrievalServiceApi,
-    state_store: &dyn EnrichmentStateStore,
-    derived_store: &dyn DerivedMetadataWriteStore,
-    embedding_store: Option<&dyn DerivedObjectEmbeddingStore>,
-    embedding_provider: Option<&dyn EmbeddingProvider>,
-    processor_factory: &dyn ArtifactProcessorFactory,
+    ctx: &WorkerContext<'_>,
     execution_mode: InferenceExecutionMode,
-    chunking: &ExtractionChunkingConfig,
-    coverage_policy: &ExtractCoveragePolicy,
+    policy: &ExtractionPolicy<'_>,
 ) -> std::result::Result<(), String> {
     if execution_mode == InferenceExecutionMode::Batch {
         match first_job.job_type {
             crate::storage::JobType::ArtifactExtract => {
-                if let Some(batch_processor) = processor_factory
+                if let Some(batch_processor) = ctx
+                    .processor_factory
                     .build_batch_processor(first_job.enrichment_tier)
                     .map_err(|err| {
                         fail_job(
-                            job_store,
+                            ctx.job_store,
                             worker_id,
                             &first_job.job_id,
                             "Failed to build extraction batch processor",
@@ -136,7 +181,8 @@ fn process_claimed_jobs(
                     })?
                 {
                     let mut jobs = vec![first_job];
-                    let additional = job_store
+                    let additional = ctx
+                        .job_store
                         .claim_matching_jobs(
                             worker_id,
                             &jobs[0],
@@ -149,22 +195,19 @@ fn process_claimed_jobs(
                     return process_extract_job_batch(
                         worker_id,
                         jobs,
-                        job_store,
-                        read_store,
-                        state_store,
-                        processor_factory,
+                        ctx,
                         batch_processor.as_ref(),
-                        chunking,
-                        coverage_policy,
+                        policy,
                     );
                 }
             }
             crate::storage::JobType::ArtifactReconcile => {
-                if let Some(batch_processor) = processor_factory
+                if let Some(batch_processor) = ctx
+                    .processor_factory
                     .build_reconciliation_batch_processor(first_job.enrichment_tier)
                     .map_err(|err| {
                         fail_job(
-                            job_store,
+                            ctx.job_store,
                             worker_id,
                             &first_job.job_id,
                             "Failed to build reconciliation batch processor",
@@ -173,7 +216,8 @@ fn process_claimed_jobs(
                     })?
                 {
                     let mut jobs = vec![first_job];
-                    let additional = job_store
+                    let additional = ctx
+                        .job_store
                         .claim_matching_jobs(
                             worker_id,
                             &jobs[0],
@@ -186,11 +230,7 @@ fn process_claimed_jobs(
                     return process_reconcile_job_batch(
                         worker_id,
                         jobs,
-                        job_store,
-                        read_store,
-                        state_store,
-                        derived_store,
-                        processor_factory,
+                        ctx,
                         batch_processor.as_ref(),
                     );
                 }
@@ -199,70 +239,38 @@ fn process_claimed_jobs(
         }
     }
 
-    process_claimed_job(
-        worker_id,
-        first_job,
-        job_store,
-        read_store,
-        retrieval_service,
-        state_store,
-        derived_store,
-        embedding_store,
-        embedding_provider,
-        processor_factory,
-        chunking,
-        coverage_policy,
-    )
+    process_claimed_job(worker_id, first_job, ctx, policy)
 }
 
 fn process_claimed_job(
     worker_id: &str,
     claimed_job: ClaimedJob,
-    job_store: &dyn EnrichmentJobLifecycleStore,
-    read_store: &dyn ArtifactReadStore,
-    retrieval_service: &dyn ArchiveRetrievalServiceApi,
-    state_store: &dyn EnrichmentStateStore,
-    derived_store: &dyn DerivedMetadataWriteStore,
-    embedding_store: Option<&dyn DerivedObjectEmbeddingStore>,
-    embedding_provider: Option<&dyn EmbeddingProvider>,
-    processor_factory: &dyn ArtifactProcessorFactory,
-    chunking: &ExtractionChunkingConfig,
-    coverage_policy: &ExtractCoveragePolicy,
+    ctx: &WorkerContext<'_>,
+    policy: &ExtractionPolicy<'_>,
 ) -> std::result::Result<(), String> {
     match claimed_job.job_type {
-        crate::storage::JobType::ArtifactExtract => process_extract_job(
-            worker_id,
-            &claimed_job,
-            job_store,
-            read_store,
-            state_store,
-            processor_factory,
-            chunking,
-            coverage_policy,
-        ),
+        crate::storage::JobType::ArtifactExtract => {
+            process_extract_job(worker_id, &claimed_job, ctx, policy)
+        }
         crate::storage::JobType::ArtifactRetrieveContext => process_retrieve_context_job(
             worker_id,
             &claimed_job,
-            job_store,
-            retrieval_service,
-            state_store,
+            ctx.job_store,
+            ctx.retrieval_service,
+            ctx.state_store,
         ),
         crate::storage::JobType::ArtifactReconcile => process_reconcile_job(
             worker_id,
             &claimed_job,
-            job_store,
-            read_store,
-            state_store,
-            derived_store,
-            embedding_store.is_some() && embedding_provider.is_some(),
-            processor_factory,
+            ctx,
+            ctx.embedding_store.is_some() && ctx.embedding_provider.is_some(),
         ),
         crate::storage::JobType::DerivedObjectEmbed => process_embedding_job(
             worker_id,
             &claimed_job,
-            job_store,
-            embedding_store,
-            embedding_provider,
+            ctx.job_store,
+            ctx.embedding_store,
+            ctx.embedding_provider,
         ),
     }
 }
@@ -270,14 +278,13 @@ fn process_claimed_job(
 fn process_extract_job_batch(
     worker_id: &str,
     claimed_jobs: Vec<ClaimedJob>,
-    job_store: &dyn EnrichmentJobLifecycleStore,
-    read_store: &dyn ArtifactReadStore,
-    state_store: &dyn EnrichmentStateStore,
-    processor_factory: &dyn ArtifactProcessorFactory,
+    ctx: &WorkerContext<'_>,
     batch_processor: &dyn crate::processor::ArtifactBatchProcessor,
-    chunking: &ExtractionChunkingConfig,
-    coverage_policy: &ExtractCoveragePolicy,
+    policy: &ExtractionPolicy<'_>,
 ) -> std::result::Result<(), String> {
+    let job_store = ctx.job_store;
+    let read_store = ctx.read_store;
+    let state_store = ctx.state_store;
     let mut batchable = Vec::new();
     let mut fallbacks = Vec::new();
 
@@ -295,7 +302,7 @@ fn process_extract_job_batch(
                 continue;
             }
         };
-        let Some(source_type) = crate::storage::SourceType::from_str(&payload.source_type) else {
+        let Some(source_type) = crate::storage::SourceType::parse(&payload.source_type) else {
             fail_job_message(
                 job_store,
                 worker_id,
@@ -416,16 +423,7 @@ fn process_extract_job_batch(
     }
 
     for claimed_job in fallbacks {
-        process_extract_job(
-            worker_id,
-            &claimed_job,
-            job_store,
-            read_store,
-            state_store,
-            processor_factory,
-            chunking,
-            coverage_policy,
-        )?;
+        process_extract_job(worker_id, &claimed_job, ctx, policy)?;
     }
 
     Ok(())
@@ -434,13 +432,13 @@ fn process_extract_job_batch(
 fn process_reconcile_job_batch(
     worker_id: &str,
     claimed_jobs: Vec<ClaimedJob>,
-    job_store: &dyn EnrichmentJobLifecycleStore,
-    read_store: &dyn ArtifactReadStore,
-    state_store: &dyn EnrichmentStateStore,
-    derived_store: &dyn DerivedMetadataWriteStore,
-    processor_factory: &dyn ArtifactProcessorFactory,
+    ctx: &WorkerContext<'_>,
     batch_processor: &dyn crate::processor::ReconciliationBatchProcessor,
 ) -> std::result::Result<(), String> {
+    let job_store = ctx.job_store;
+    let read_store = ctx.read_store;
+    let state_store = ctx.state_store;
+    let derived_store = ctx.derived_store;
     let mut batchable = Vec::new();
     let mut fallbacks = Vec::new();
 
@@ -645,16 +643,7 @@ fn process_reconcile_job_batch(
     }
 
     for claimed_job in fallbacks {
-        process_reconcile_job(
-            worker_id,
-            &claimed_job,
-            job_store,
-            read_store,
-            state_store,
-            derived_store,
-            false,
-            processor_factory,
-        )?;
+        process_reconcile_job(worker_id, &claimed_job, ctx, false)?;
     }
 
     Ok(())
@@ -663,13 +652,14 @@ fn process_reconcile_job_batch(
 fn process_extract_job(
     worker_id: &str,
     claimed_job: &ClaimedJob,
-    job_store: &dyn EnrichmentJobLifecycleStore,
-    read_store: &dyn ArtifactReadStore,
-    state_store: &dyn EnrichmentStateStore,
-    processor_factory: &dyn ArtifactProcessorFactory,
-    chunking: &ExtractionChunkingConfig,
-    coverage_policy: &ExtractCoveragePolicy,
+    ctx: &WorkerContext<'_>,
+    policy: &ExtractionPolicy<'_>,
 ) -> std::result::Result<(), String> {
+    let job_store = ctx.job_store;
+    let read_store = ctx.read_store;
+    let state_store = ctx.state_store;
+    let processor_factory = ctx.processor_factory;
+    let chunking = policy.chunking;
     let payload = ArtifactExtractPayload::from_json(&claimed_job.payload_json).map_err(|err| {
         fail_job(
             job_store,
@@ -703,18 +693,17 @@ fn process_extract_job(
             )
         })?;
 
-    let source_type =
-        crate::storage::SourceType::from_str(&payload.source_type).ok_or_else(|| {
-            fail_job_message(
-                job_store,
-                worker_id,
-                &claimed_job.job_id,
-                format!(
-                    "Invalid artifact source_type in extract payload: {}",
-                    payload.source_type
-                ),
-            )
-        })?;
+    let source_type = crate::storage::SourceType::parse(&payload.source_type).ok_or_else(|| {
+        fail_job_message(
+            job_store,
+            worker_id,
+            &claimed_job.job_id,
+            format!(
+                "Invalid artifact source_type in extract payload: {}",
+                payload.source_type
+            ),
+        )
+    })?;
 
     let processor_input = ArtifactProcessorInput {
         artifact_id: loaded.artifact.artifact_id.clone(),
@@ -764,8 +753,7 @@ fn process_extract_job(
         processor.as_ref(),
         &processor_input,
         output,
-        chunking,
-        coverage_policy,
+        policy,
     )?;
 
     let extraction_result = build_extraction_result(
@@ -900,18 +888,17 @@ fn process_retrieve_context_job(
             )
         })?;
 
-    let source_type =
-        crate::storage::SourceType::from_str(&payload.source_type).ok_or_else(|| {
-            fail_job_message(
-                job_store,
-                worker_id,
-                &claimed_job.job_id,
-                format!(
-                    "Invalid artifact source_type in retrieve-context payload: {}",
-                    payload.source_type
-                ),
-            )
-        })?;
+    let source_type = crate::storage::SourceType::parse(&payload.source_type).ok_or_else(|| {
+        fail_job_message(
+            job_store,
+            worker_id,
+            &claimed_job.job_id,
+            format!(
+                "Invalid artifact source_type in retrieve-context payload: {}",
+                payload.source_type
+            ),
+        )
+    })?;
 
     let reconcile_job = NewEnrichmentJob {
         job_id: new_id("job"),
@@ -949,13 +936,14 @@ fn process_retrieve_context_job(
 fn process_reconcile_job(
     worker_id: &str,
     claimed_job: &ClaimedJob,
-    job_store: &dyn EnrichmentJobLifecycleStore,
-    read_store: &dyn ArtifactReadStore,
-    state_store: &dyn EnrichmentStateStore,
-    derived_store: &dyn DerivedMetadataWriteStore,
+    ctx: &WorkerContext<'_>,
     enqueue_embedding_jobs: bool,
-    processor_factory: &dyn ArtifactProcessorFactory,
 ) -> std::result::Result<(), String> {
+    let job_store = ctx.job_store;
+    let read_store = ctx.read_store;
+    let state_store = ctx.state_store;
+    let derived_store = ctx.derived_store;
+    let processor_factory = ctx.processor_factory;
     let payload =
         ArtifactReconcilePayload::from_json(&claimed_job.payload_json).map_err(|err| {
             fail_job(
@@ -1205,19 +1193,20 @@ fn process_embedding_job(
         .iter()
         .zip(vectors.into_iter())
         .map(|(object, embedding)| {
-            let derived_object_type =
-                crate::storage::DerivedObjectType::from_str(&object.derived_object_type)
-                    .ok_or_else(|| {
-                        fail_job_message(
-                            job_store,
-                            worker_id,
-                            &claimed_job.job_id,
-                            format!(
-                                "Invalid derived_object_type in embedding payload: {}",
-                                object.derived_object_type
-                            ),
-                        )
-                    })?;
+            let derived_object_type = crate::storage::DerivedObjectType::parse(
+                &object.derived_object_type,
+            )
+            .ok_or_else(|| {
+                fail_job_message(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    format!(
+                        "Invalid derived_object_type in embedding payload: {}",
+                        object.derived_object_type
+                    ),
+                )
+            })?;
             Ok(NewDerivedObjectEmbedding {
                 derived_object_id: object.derived_object_id.clone(),
                 artifact_id: payload.artifact_id.clone(),
@@ -1541,8 +1530,8 @@ fn compute_output_coverage_percent(
     ((covered * 100) / total) as u8
 }
 
-fn uncovered_segments_for_output<'a>(
-    input: &'a ArtifactProcessorInput,
+fn uncovered_segments_for_output(
+    input: &ArtifactProcessorInput,
     output: &ArtifactProcessorOutput,
 ) -> Vec<crate::storage::LoadedSegment> {
     let cited = collected_output_evidence_segment_ids(output);
@@ -1561,9 +1550,10 @@ fn maybe_gap_fill_extraction_output(
     processor: &dyn crate::processor::ArtifactProcessor,
     input: &ArtifactProcessorInput,
     output: ArtifactProcessorOutput,
-    chunking: &ExtractionChunkingConfig,
-    coverage_policy: &ExtractCoveragePolicy,
+    policy: &ExtractionPolicy<'_>,
 ) -> std::result::Result<ArtifactProcessorOutput, String> {
+    let chunking = policy.chunking;
+    let coverage_policy = policy.coverage;
     if coverage_policy.max_gap_fill_passes == 0 || !should_shape_artifact_input(input) {
         return Ok(output);
     }
@@ -1641,7 +1631,7 @@ pub(crate) fn build_reconciliation_input(
 ) -> std::result::Result<ReconciliationProcessorInput, serde_json::Error> {
     Ok(ReconciliationProcessorInput {
         artifact_id: artifact_id.to_string(),
-        source_type: crate::storage::SourceType::from_str(source_type)
+        source_type: crate::storage::SourceType::parse(source_type)
             .expect("validated source_type during payload parsing"),
         summary: SummaryOutput {
             title: extraction_result.summary_title.clone(),
@@ -2185,32 +2175,46 @@ pub fn start_enrichment_workers(
     shutdown: ShutdownToken,
 ) -> WorkerResult<Vec<thread::JoinHandle<()>>> {
     start_enrichment_workers_with_factory(
-        config,
-        job_store,
-        read_store,
-        retrieval_service,
-        state_store,
-        derived_store,
-        shutdown,
-        Arc::new(StubProcessorFactory),
+        WorkerStartConfig {
+            http: config,
+            shutdown,
+            processor_factory: Arc::new(StubProcessorFactory),
+        },
+        EnrichmentPipelineResources {
+            job_store,
+            read_store,
+            retrieval_service,
+            state_store,
+            derived_store,
+            embedding_store: None,
+            embedding_provider: None,
+        },
     )
 }
 
 #[doc(hidden)]
 pub fn start_enrichment_workers_with_factory(
-    config: &crate::config::HttpConfig,
-    job_store: Arc<dyn EnrichmentJobLifecycleStore>,
-    read_store: Arc<dyn ArtifactReadStore>,
-    retrieval_service: Arc<dyn ArchiveRetrievalServiceApi>,
-    state_store: Arc<dyn EnrichmentStateStore>,
-    derived_store: Arc<dyn DerivedMetadataWriteStore>,
-    shutdown: ShutdownToken,
-    processor_factory: Arc<dyn ArtifactProcessorFactory>,
+    config: WorkerStartConfig<'_>,
+    resources: EnrichmentPipelineResources,
 ) -> WorkerResult<Vec<thread::JoinHandle<()>>> {
+    let WorkerStartConfig {
+        http,
+        shutdown,
+        processor_factory,
+    } = config;
+    let EnrichmentPipelineResources {
+        job_store,
+        read_store,
+        retrieval_service,
+        state_store,
+        derived_store,
+        embedding_store: _,
+        embedding_provider: _,
+    } = resources;
     let pid = std::process::id();
-    let poll_interval = Duration::from_millis(config.enrichment_poll_interval_ms);
+    let poll_interval = Duration::from_millis(http.enrichment_poll_interval_ms);
 
-    let workers: Vec<_> = (0..config.enrichment_worker_count)
+    let workers: Vec<_> = (0..http.enrichment_worker_count)
         .map(|worker_index| {
             let worker_id = format_worker_id(pid, worker_index);
             let job_store = Arc::clone(&job_store);
@@ -2235,14 +2239,16 @@ pub fn start_enrichment_workers_with_factory(
                 .spawn(move || {
                     enrichment_worker(
                         worker_id,
-                        job_store,
-                        read_store,
-                        retrieval_service,
-                        state_store,
-                        derived_store,
-                        None,
-                        None,
-                        processor_factory,
+                        WorkerResources {
+                            job_store,
+                            read_store,
+                            retrieval_service,
+                            state_store,
+                            derived_store,
+                            embedding_store: None,
+                            embedding_provider: None,
+                            processor_factory,
+                        },
                         chunking,
                         coverage_policy,
                         poll_interval,
@@ -2251,7 +2257,7 @@ pub fn start_enrichment_workers_with_factory(
                 })
                 .map_err(|source| WorkerError::SpawnThread {
                     worker_kind: format!("enrichment worker {}", worker_index),
-                    source,
+                    source: Box::new(source),
                 })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
@@ -2277,16 +2283,19 @@ pub fn start_enrichment_workers_with_factory(
 pub fn start_enrichment_pipeline(
     config: &EnrichmentPipelineConfig,
     execution_mode: InferenceExecutionMode,
-    job_store: Arc<dyn EnrichmentJobLifecycleStore>,
-    read_store: Arc<dyn ArtifactReadStore>,
-    retrieval_service: Arc<dyn ArchiveRetrievalServiceApi>,
-    state_store: Arc<dyn EnrichmentStateStore>,
-    derived_store: Arc<dyn DerivedMetadataWriteStore>,
-    embedding_store: Option<Arc<dyn DerivedObjectEmbeddingStore>>,
+    resources: EnrichmentPipelineResources,
     shutdown: ShutdownToken,
-    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
 ) -> WorkerResult<Vec<thread::JoinHandle<()>>> {
+    let EnrichmentPipelineResources {
+        job_store,
+        read_store,
+        retrieval_service,
+        state_store,
+        derived_store,
+        embedding_store,
+        embedding_provider,
+    } = resources;
     if execution_mode == InferenceExecutionMode::Batch {
         validate_batch_execution_support(processor_factory.as_ref())?;
     }
@@ -2297,76 +2306,74 @@ pub fn start_enrichment_pipeline(
         max_gap_fill_passes: config.extract_max_gap_fill_passes,
     });
     let poll_interval = config.poll_interval;
+    let direct_resources = Arc::new(WorkerResources {
+        job_store: Arc::clone(&job_store),
+        read_store: Arc::clone(&read_store),
+        retrieval_service: Arc::clone(&retrieval_service),
+        state_store: Arc::clone(&state_store),
+        derived_store: Arc::clone(&derived_store),
+        embedding_store: embedding_store.clone(),
+        embedding_provider: embedding_provider.clone(),
+        processor_factory: Arc::clone(&processor_factory),
+    });
     let mut handles = Vec::new();
 
     match execution_mode {
         InferenceExecutionMode::Batch => {
-            handles.extend(spawn_extract_batch_workers(
+            handles.extend(spawn_extract_batch_workers(BatchWorkerConfig {
                 pid,
-                config.extract_workers,
-                config.extract.batch_size,
-                config.extract.max_concurrent_batches,
-                Arc::clone(&job_store),
-                Arc::clone(&read_store),
-                Arc::clone(&state_store),
-                Arc::clone(&derived_store),
-                Arc::clone(&processor_factory),
-                Arc::clone(&chunking),
+                worker_count: config.extract_workers,
+                batch_size: config.extract.batch_size,
+                max_concurrent: config.extract.max_concurrent_batches,
+                job_store: Arc::clone(&job_store),
+                read_store: Arc::clone(&read_store),
+                state_store: Arc::clone(&state_store),
+                derived_store: Arc::clone(&derived_store),
+                enqueue_embedding_jobs: false,
+                processor_factory: Arc::clone(&processor_factory),
+                chunking: Some(Arc::clone(&chunking)),
                 poll_interval,
-                shutdown.clone(),
-            )?);
-            handles.extend(spawn_reconcile_batch_workers(
+                shutdown: shutdown.clone(),
+            })?);
+            handles.extend(spawn_reconcile_batch_workers(BatchWorkerConfig {
                 pid,
-                config.reconcile_workers,
-                config.reconcile.batch_size,
-                config.reconcile.max_concurrent_batches,
-                Arc::clone(&job_store),
-                Arc::clone(&read_store),
-                Arc::clone(&state_store),
-                Arc::clone(&derived_store),
-                embedding_store.is_some() && embedding_provider.is_some(),
-                Arc::clone(&processor_factory),
+                worker_count: config.reconcile_workers,
+                batch_size: config.reconcile.batch_size,
+                max_concurrent: config.reconcile.max_concurrent_batches,
+                job_store: Arc::clone(&job_store),
+                read_store: Arc::clone(&read_store),
+                state_store: Arc::clone(&state_store),
+                derived_store: Arc::clone(&derived_store),
+                enqueue_embedding_jobs: embedding_store.is_some() && embedding_provider.is_some(),
+                processor_factory: Arc::clone(&processor_factory),
+                chunking: None,
                 poll_interval,
-                shutdown.clone(),
-            )?);
+                shutdown: shutdown.clone(),
+            })?);
         }
         InferenceExecutionMode::Direct => {
-            handles.extend(spawn_direct_stage_workers(
+            handles.extend(spawn_direct_stage_workers(DirectStageWorkerConfig {
                 pid,
-                "extract",
-                JobType::ArtifactExtract,
-                config.extract_workers,
-                Arc::clone(&job_store),
-                Arc::clone(&read_store),
-                Arc::clone(&retrieval_service),
-                Arc::clone(&state_store),
-                Arc::clone(&derived_store),
-                embedding_store.clone(),
-                embedding_provider.clone(),
-                Arc::clone(&processor_factory),
-                Arc::clone(&chunking),
-                Arc::clone(&coverage_policy),
+                stage_name: "extract",
+                job_type: JobType::ArtifactExtract,
+                worker_count: config.extract_workers,
+                resources: Arc::clone(&direct_resources),
+                chunking: Arc::clone(&chunking),
+                coverage_policy: Arc::clone(&coverage_policy),
                 poll_interval,
-                shutdown.clone(),
-            )?);
-            handles.extend(spawn_direct_stage_workers(
+                shutdown: shutdown.clone(),
+            })?);
+            handles.extend(spawn_direct_stage_workers(DirectStageWorkerConfig {
                 pid,
-                "reconcile",
-                JobType::ArtifactReconcile,
-                config.reconcile_workers,
-                Arc::clone(&job_store),
-                Arc::clone(&read_store),
-                Arc::clone(&retrieval_service),
-                Arc::clone(&state_store),
-                Arc::clone(&derived_store),
-                embedding_store.clone(),
-                embedding_provider.clone(),
-                Arc::clone(&processor_factory),
-                Arc::clone(&chunking),
-                Arc::clone(&coverage_policy),
+                stage_name: "reconcile",
+                job_type: JobType::ArtifactReconcile,
+                worker_count: config.reconcile_workers,
+                resources: Arc::clone(&direct_resources),
+                chunking: Arc::clone(&chunking),
+                coverage_policy: Arc::clone(&coverage_policy),
                 poll_interval,
-                shutdown.clone(),
-            )?);
+                shutdown: shutdown.clone(),
+            })?);
         }
     }
 
@@ -2392,7 +2399,7 @@ pub fn start_enrichment_pipeline(
             })
             .map_err(|source| WorkerError::SpawnThread {
                 worker_kind: format!("retrieve-context worker {}", i),
-                source,
+                source: Box::new(source),
             })?;
         handles.push(h);
     }
@@ -2453,7 +2460,7 @@ fn validate_batch_execution_support(
     Ok(())
 }
 
-fn spawn_reconcile_batch_workers(
+struct BatchWorkerConfig {
     pid: u32,
     worker_count: usize,
     batch_size: usize,
@@ -2464,9 +2471,29 @@ fn spawn_reconcile_batch_workers(
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     enqueue_embedding_jobs: bool,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
+    chunking: Option<Arc<ExtractionChunkingConfig>>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
+}
+
+fn spawn_reconcile_batch_workers(
+    config: BatchWorkerConfig,
 ) -> WorkerResult<Vec<thread::JoinHandle<()>>> {
+    let BatchWorkerConfig {
+        pid,
+        worker_count,
+        batch_size,
+        max_concurrent,
+        job_store,
+        read_store,
+        state_store,
+        derived_store,
+        enqueue_embedding_jobs,
+        processor_factory,
+        chunking: _,
+        poll_interval,
+        shutdown,
+    } = config;
     (0..worker_count)
         .map(|i| {
             let worker_id = format!("enrichment:{}:reconcile:{}", pid, i);
@@ -2499,36 +2526,43 @@ fn spawn_reconcile_batch_workers(
                     stage_poller_loop(
                         &stage,
                         worker_id,
-                        job_store.as_ref(),
-                        read_store.as_ref(),
-                        state_store.as_ref(),
-                        derived_store.as_ref(),
+                        StagePollerContext {
+                            job_store: job_store.as_ref(),
+                            read_store: read_store.as_ref(),
+                            state_store: state_store.as_ref(),
+                            derived_store: derived_store.as_ref(),
+                        },
                         poll_interval,
                         shutdown,
                     );
                 })
                 .map_err(|source| WorkerError::SpawnThread {
                     worker_kind: format!("reconcile poller {}", i),
-                    source,
+                    source: Box::new(source),
                 })
         })
         .collect()
 }
 
 fn spawn_extract_batch_workers(
-    pid: u32,
-    worker_count: usize,
-    batch_size: usize,
-    max_concurrent: usize,
-    job_store: Arc<dyn EnrichmentJobLifecycleStore>,
-    read_store: Arc<dyn ArtifactReadStore>,
-    state_store: Arc<dyn EnrichmentStateStore>,
-    derived_store: Arc<dyn DerivedMetadataWriteStore>,
-    processor_factory: Arc<dyn ArtifactProcessorFactory>,
-    chunking: Arc<ExtractionChunkingConfig>,
-    poll_interval: Duration,
-    shutdown: ShutdownToken,
+    config: BatchWorkerConfig,
 ) -> WorkerResult<Vec<thread::JoinHandle<()>>> {
+    let BatchWorkerConfig {
+        pid,
+        worker_count,
+        batch_size,
+        max_concurrent,
+        job_store,
+        read_store,
+        state_store,
+        derived_store,
+        enqueue_embedding_jobs: _,
+        processor_factory,
+        chunking,
+        poll_interval,
+        shutdown,
+    } = config;
+    let chunking = chunking.expect("extract batch workers require chunking");
     (0..worker_count)
         .map(|i| {
             let worker_id = format!("enrichment:{}:extract:{}", pid, i);
@@ -2560,77 +2594,66 @@ fn spawn_extract_batch_workers(
                     stage_poller_loop(
                         &stage,
                         worker_id,
-                        job_store.as_ref(),
-                        read_store.as_ref(),
-                        state_store.as_ref(),
-                        derived_store.as_ref(),
+                        StagePollerContext {
+                            job_store: job_store.as_ref(),
+                            read_store: read_store.as_ref(),
+                            state_store: state_store.as_ref(),
+                            derived_store: derived_store.as_ref(),
+                        },
                         poll_interval,
                         shutdown,
                     );
                 })
                 .map_err(|source| WorkerError::SpawnThread {
                     worker_kind: format!("extract poller {}", i),
-                    source,
+                    source: Box::new(source),
                 })
         })
         .collect()
 }
 
-fn spawn_direct_stage_workers(
+struct DirectStageWorkerConfig {
     pid: u32,
     stage_name: &'static str,
     job_type: JobType,
     worker_count: usize,
-    job_store: Arc<dyn EnrichmentJobLifecycleStore>,
-    read_store: Arc<dyn ArtifactReadStore>,
-    retrieval_service: Arc<dyn ArchiveRetrievalServiceApi>,
-    state_store: Arc<dyn EnrichmentStateStore>,
-    derived_store: Arc<dyn DerivedMetadataWriteStore>,
-    embedding_store: Option<Arc<dyn DerivedObjectEmbeddingStore>>,
-    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
-    processor_factory: Arc<dyn ArtifactProcessorFactory>,
+    resources: Arc<WorkerResources>,
     chunking: Arc<ExtractionChunkingConfig>,
     coverage_policy: Arc<ExtractCoveragePolicy>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
+}
+
+fn spawn_direct_stage_workers(
+    cfg: DirectStageWorkerConfig,
 ) -> WorkerResult<Vec<thread::JoinHandle<()>>> {
-    (0..worker_count)
+    (0..cfg.worker_count)
         .map(|i| {
-            let worker_id = format!("enrichment:{}:{}:{}", pid, stage_name, i);
-            let job_store = Arc::clone(&job_store);
-            let read_store = Arc::clone(&read_store);
-            let retrieval_service = Arc::clone(&retrieval_service);
-            let state_store = Arc::clone(&state_store);
-            let derived_store = Arc::clone(&derived_store);
-            let embedding_store = embedding_store.clone();
-            let embedding_provider = embedding_provider.clone();
-            let processor_factory = Arc::clone(&processor_factory);
-            let chunking = Arc::clone(&chunking);
-            let coverage_policy = Arc::clone(&coverage_policy);
-            let shutdown = shutdown.clone();
+            let worker_id = format!("enrichment:{}:{}:{}", cfg.pid, cfg.stage_name, i);
+            let resources = Arc::clone(&cfg.resources);
+            let chunking = Arc::clone(&cfg.chunking);
+            let coverage_policy = Arc::clone(&cfg.coverage_policy);
+            let shutdown = cfg.shutdown.clone();
             thread::Builder::new()
-                .name(format!("direct-{}-{}", stage_name, i))
+                .name(format!("direct-{}-{}", cfg.stage_name, i))
                 .spawn(move || {
+                    let ctx = resources.as_context();
+                    let policy = ExtractionPolicy {
+                        chunking: chunking.as_ref(),
+                        coverage: coverage_policy.as_ref(),
+                    };
                     direct_stage_worker_loop(
                         worker_id,
-                        job_type,
-                        job_store.as_ref(),
-                        read_store.as_ref(),
-                        retrieval_service.as_ref(),
-                        state_store.as_ref(),
-                        derived_store.as_ref(),
-                        embedding_store.as_deref(),
-                        embedding_provider.as_deref(),
-                        processor_factory.as_ref(),
-                        chunking.as_ref(),
-                        coverage_policy.as_ref(),
-                        poll_interval,
+                        cfg.job_type,
+                        &ctx,
+                        &policy,
+                        cfg.poll_interval,
                         shutdown,
                     );
                 })
                 .map_err(|source| WorkerError::SpawnThread {
-                    worker_kind: format!("direct {stage_name} worker {i}"),
-                    source,
+                    worker_kind: format!("direct {} worker {}", cfg.stage_name, i),
+                    source: Box::new(source),
                 })
         })
         .collect()
@@ -2644,16 +2667,8 @@ fn spawn_direct_stage_workers(
 fn direct_stage_worker_loop(
     worker_id: String,
     job_type: JobType,
-    job_store: &dyn EnrichmentJobLifecycleStore,
-    read_store: &dyn ArtifactReadStore,
-    retrieval_service: &dyn ArchiveRetrievalServiceApi,
-    state_store: &dyn EnrichmentStateStore,
-    derived_store: &dyn DerivedMetadataWriteStore,
-    embedding_store: Option<&dyn DerivedObjectEmbeddingStore>,
-    embedding_provider: Option<&dyn EmbeddingProvider>,
-    processor_factory: &dyn ArtifactProcessorFactory,
-    chunking: &ExtractionChunkingConfig,
-    coverage_policy: &ExtractCoveragePolicy,
+    ctx: &WorkerContext<'_>,
+    policy: &ExtractionPolicy<'_>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
 ) {
@@ -2668,8 +2683,12 @@ fn direct_stage_worker_loop(
             break;
         }
 
-        match job_store.claim_jobs_by_type(&worker_id, job_type, Some(EnrichmentTier::Standard), 1)
-        {
+        match ctx.job_store.claim_jobs_by_type(
+            &worker_id,
+            job_type,
+            Some(EnrichmentTier::Standard),
+            1,
+        ) {
             Ok(jobs) if !jobs.is_empty() => {
                 let job = jobs.into_iter().next().expect("one claimed job");
                 debug!(
@@ -2678,20 +2697,7 @@ fn direct_stage_worker_loop(
                     job.job_type.as_str(),
                     job.job_id
                 );
-                if let Err(err) = process_claimed_job(
-                    &worker_id,
-                    job,
-                    job_store,
-                    read_store,
-                    retrieval_service,
-                    state_store,
-                    derived_store,
-                    embedding_store,
-                    embedding_provider,
-                    processor_factory,
-                    chunking,
-                    coverage_policy,
-                ) {
+                if let Err(err) = process_claimed_job(&worker_id, job, ctx, policy) {
                     error!(
                         "Direct stage worker {} failed to process stage job: {}",
                         worker_id, err
@@ -2741,7 +2747,7 @@ fn spawn_embedding_workers(
                 })
                 .map_err(|source| WorkerError::SpawnThread {
                     worker_kind: format!("embedding worker {}", i),
-                    source,
+                    source: Box::new(source),
                 })
         })
         .collect()

@@ -77,6 +77,6 @@ pub(in crate::http) fn parse_review_query_request(
 }
 
 fn parse_review_kind(value: &str) -> Result<crate::storage::ReviewItemKind, HttpError> {
-    crate::storage::ReviewItemKind::from_str(value)
+    crate::storage::ReviewItemKind::parse(value)
         .ok_or_else(|| HttpError::BadRequest(format!("invalid review kind: {value}")))
 }
