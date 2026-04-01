@@ -42,6 +42,7 @@ pub(crate) fn build_chunk_inputs(
                 artifact_class: input.artifact_class,
                 source_type: input.source_type,
                 title: input.title.clone(),
+                imported_note_metadata: input.imported_note_metadata.clone(),
                 participants: input.participants.clone(),
                 segments: input
                     .segments
@@ -94,6 +95,7 @@ pub(crate) fn build_topic_thread_inputs(
                 Some(title) => format!("{title} [{}]", thread.label),
                 None => thread.label.clone(),
             }),
+            imported_note_metadata: input.imported_note_metadata.clone(),
             participants: input.participants.clone(),
             segments,
         };
@@ -120,6 +122,7 @@ pub(crate) fn build_topic_thread_inputs(
             artifact_class: input.artifact_class,
             source_type: input.source_type,
             title: input.title.clone(),
+            imported_note_metadata: input.imported_note_metadata.clone(),
             participants: input.participants.clone(),
             segments,
         };
@@ -229,6 +232,7 @@ fn split_chunk_input(
                 }
                 None => format!("{split_label} {first_sequence_no}-{last_sequence_no}"),
             }),
+            imported_note_metadata: input.imported_note_metadata.clone(),
             participants: input.participants.clone(),
             segments: input.segments[start..end].to_vec(),
         });
@@ -275,6 +279,7 @@ mod tests {
             artifact_class: ArtifactClass::Conversation,
             source_type: SourceType::ClaudeExport,
             title: Some("Title".to_string()),
+            imported_note_metadata: None,
             participants: vec![LoadedParticipant {
                 participant_id: "p1".to_string(),
                 display_name: Some("User".to_string()),

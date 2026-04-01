@@ -82,6 +82,7 @@ pub fn make_test_import_fixture_with_max_attempts(
         &artifact_id,
         &import_id,
         SourceType::ChatGptExport,
+        None,
         Vec::new(),
         Vec::new(),
     );
@@ -130,6 +131,7 @@ pub fn make_test_import_fixture_with_max_attempts(
                 content_facets_json: r#"["messages","text"]"#.to_string(),
                 normalization_version: "1.0.0".to_string(),
             },
+            imported_note_metadata: Default::default(),
             participants: vec![
                 NewParticipant {
                     participant_id: participant_id_user.clone(),

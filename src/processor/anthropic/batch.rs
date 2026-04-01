@@ -27,7 +27,10 @@ impl ExtractionBatchSubmitter for AnthropicExtractionSubmitter {
             Ok((
                 candidate_system_prompt(input),
                 build_two_phase_candidate_user_prompt(input)?,
-                candidate_output_schema_with_allowed_refs(&allowed_artifact_evidence_refs(input)),
+                candidate_output_schema_with_allowed_refs(
+                    input,
+                    &allowed_artifact_evidence_refs(input),
+                ),
             ))
         })?;
         let batch = self.client.create_message_batch(&requests)?;

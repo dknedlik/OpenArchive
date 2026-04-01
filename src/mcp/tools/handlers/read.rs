@@ -42,12 +42,27 @@ pub(in crate::mcp::tools) fn handle_search_archive(
         Ok(v) => v,
         Err(e) => return e,
     };
+    let tag = arguments
+        .get("tag")
+        .and_then(Value::as_str)
+        .map(|value| value.to_lowercase());
+    let alias = arguments
+        .get("alias")
+        .and_then(Value::as_str)
+        .map(|value| value.to_lowercase());
+    let path_prefix = arguments
+        .get("path_prefix")
+        .and_then(Value::as_str)
+        .map(|value| value.to_lowercase());
     match service.search(search::ArchiveSearchRequest {
         query_text: query.to_string(),
         limit,
         filters: SearchFilters {
             object_type,
             source_type,
+            tag,
+            alias,
+            path_prefix,
         },
     }) {
         Ok(response) => {
@@ -226,6 +241,18 @@ pub(in crate::mcp::tools) fn handle_list_artifacts(
     let filters = ArtifactListFilters {
         source_type,
         enrichment_status,
+        tag: arguments
+            .get("tag")
+            .and_then(Value::as_str)
+            .map(|value| value.to_lowercase()),
+        alias: arguments
+            .get("alias")
+            .and_then(Value::as_str)
+            .map(|value| value.to_lowercase()),
+        path_prefix: arguments
+            .get("path_prefix")
+            .and_then(Value::as_str)
+            .map(|value| value.to_lowercase()),
         captured_after,
         captured_before,
     };
@@ -299,6 +326,14 @@ pub(in crate::mcp::tools) fn handle_get_timeline(
     let filters = TimelineFilters {
         keyword,
         source_type,
+        tag: arguments
+            .get("tag")
+            .and_then(Value::as_str)
+            .map(|value| value.to_lowercase()),
+        path_prefix: arguments
+            .get("path_prefix")
+            .and_then(Value::as_str)
+            .map(|value| value.to_lowercase()),
     };
     match app.artifacts.get_timeline(&filters, limit, offset) {
         Ok(entries) => {

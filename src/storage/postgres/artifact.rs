@@ -6,6 +6,8 @@ use crate::storage::types::{
 };
 use crate::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 
+use super::imported_note;
+
 pub fn find_artifact_by_source_hash(
     client: &mut postgres::Client,
     source_type: SourceType,
@@ -103,7 +105,7 @@ pub fn insert_participant(client: &mut postgres::Client, p: &NewParticipant) -> 
 pub fn list_artifacts(client: &mut postgres::Client) -> StorageResult<Vec<ArtifactListItem>> {
     let rows = client
         .query(
-            "SELECT artifact_id, title, source_type, \
+            "SELECT artifact_id, title, source_conversation_key, source_type, \
                     to_char(created_at_source, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), \
                     to_char(captured_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), \
                     enrichment_status \
@@ -116,14 +118,15 @@ pub fn list_artifacts(client: &mut postgres::Client) -> StorageResult<Vec<Artifa
     let mut artifacts = Vec::new();
     for row in rows {
         let artifact_id: String = row.get(0);
-        let enrichment_status: String = row.get(5);
+        let enrichment_status: String = row.get(6);
         let artifact_id_clone = artifact_id.clone();
         artifacts.push(ArtifactListItem {
             artifact_id,
             title: row.get(1),
-            source_type: row.get(2),
-            created_at_source: row.get(3),
-            captured_at: row.get(4),
+            note_path: row.get(2),
+            source_type: row.get(3),
+            created_at_source: row.get(4),
+            captured_at: row.get(5),
             enrichment_status: EnrichmentStatus::parse(&enrichment_status).ok_or_else(|| {
                 crate::error::StorageError::InvalidEnrichmentStatus {
                     artifact_id: artifact_id_clone,
@@ -144,6 +147,12 @@ pub fn list_artifacts_filtered(
 ) -> StorageResult<Vec<ArtifactListItem>> {
     let source_type: Option<&str> = filters.source_type.as_ref().map(|v| v.as_str());
     let enrichment_status: Option<&str> = filters.enrichment_status.as_ref().map(|v| v.as_str());
+    let tag = filters.tag.as_ref().map(|value| value.to_lowercase());
+    let alias = filters.alias.as_ref().map(|value| value.to_lowercase());
+    let path_prefix = filters
+        .path_prefix
+        .as_ref()
+        .map(|value| value.to_lowercase());
     let captured_after: Option<&str> = filters.captured_after.as_deref();
     let captured_before: Option<&str> = filters.captured_before.as_deref();
     let limit_i64 = limit as i64;
@@ -151,20 +160,32 @@ pub fn list_artifacts_filtered(
 
     let rows = client
         .query(
-            "SELECT artifact_id, title, source_type, \
+            "SELECT artifact_id, title, source_conversation_key, source_type, \
                     to_char(created_at_source, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), \
                     to_char(captured_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), \
                     enrichment_status \
              FROM oa_artifact \
              WHERE ($1::text IS NULL OR source_type = $1) \
                AND ($2::text IS NULL OR enrichment_status = $2) \
-               AND ($3::text IS NULL OR captured_at >= $3::timestamptz) \
-               AND ($4::text IS NULL OR captured_at < $4::timestamptz) \
+               AND ($3::text IS NULL OR EXISTS (
+                    SELECT 1 FROM oa_artifact_note_tag t
+                    WHERE t.artifact_id = oa_artifact.artifact_id AND t.normalized_tag = $3
+               )) \
+               AND ($4::text IS NULL OR EXISTS (
+                    SELECT 1 FROM oa_artifact_note_alias a2
+                    WHERE a2.artifact_id = oa_artifact.artifact_id AND a2.normalized_alias = $4
+               )) \
+               AND ($5::text IS NULL OR lower(coalesce(source_conversation_key, '')) LIKE ($5 || '%')) \
+               AND ($6::text IS NULL OR captured_at >= $6::timestamptz) \
+               AND ($7::text IS NULL OR captured_at < $7::timestamptz) \
              ORDER BY captured_at DESC, artifact_id ASC \
-             LIMIT $5 OFFSET $6",
+             LIMIT $8 OFFSET $9",
             &[
                 &source_type,
                 &enrichment_status,
+                &tag,
+                &alias,
+                &path_prefix,
                 &captured_after,
                 &captured_before,
                 &limit_i64,
@@ -176,14 +197,15 @@ pub fn list_artifacts_filtered(
     let mut artifacts = Vec::new();
     for row in rows {
         let artifact_id: String = row.get(0);
-        let enrichment_status_str: String = row.get(5);
+        let enrichment_status_str: String = row.get(6);
         let artifact_id_clone = artifact_id.clone();
         artifacts.push(ArtifactListItem {
             artifact_id,
             title: row.get(1),
-            source_type: row.get(2),
-            created_at_source: row.get(3),
-            captured_at: row.get(4),
+            note_path: row.get(2),
+            source_type: row.get(3),
+            created_at_source: row.get(4),
+            captured_at: row.get(5),
             enrichment_status: EnrichmentStatus::parse(&enrichment_status_str).ok_or_else(
                 || crate::error::StorageError::InvalidEnrichmentStatus {
                     artifact_id: artifact_id_clone,
@@ -204,12 +226,17 @@ pub fn get_timeline(
 ) -> StorageResult<Vec<crate::storage::types::TimelineEntry>> {
     let keyword: Option<&str> = filters.keyword.as_deref();
     let source_type: Option<&str> = filters.source_type.as_ref().map(|v| v.as_str());
+    let tag = filters.tag.as_ref().map(|value| value.to_lowercase());
+    let path_prefix = filters
+        .path_prefix
+        .as_ref()
+        .map(|value| value.to_lowercase());
     let limit_i64 = limit as i64;
     let offset_i64 = offset as i64;
 
     let rows = client
         .query(
-            "SELECT a.artifact_id, a.title, a.source_type, \
+            "SELECT a.artifact_id, a.title, a.source_conversation_key, a.source_type, \
                     to_char(a.created_at_source, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), \
                     to_char(a.captured_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), \
                     a.enrichment_status, \
@@ -222,9 +249,14 @@ pub fn get_timeline(
              FROM oa_artifact a \
              WHERE ($1::text IS NULL OR a.title_tsv @@ plainto_tsquery('english', $1)) \
                AND ($2::text IS NULL OR a.source_type = $2) \
+               AND ($3::text IS NULL OR EXISTS (
+                    SELECT 1 FROM oa_artifact_note_tag t
+                    WHERE t.artifact_id = a.artifact_id AND t.normalized_tag = $3
+               )) \
+               AND ($4::text IS NULL OR lower(coalesce(a.source_conversation_key, '')) LIKE ($4 || '%')) \
              ORDER BY COALESCE(a.created_at_source, a.captured_at) ASC \
-             LIMIT $3 OFFSET $4",
-            &[&keyword, &source_type, &limit_i64, &offset_i64],
+             LIMIT $5 OFFSET $6",
+            &[&keyword, &source_type, &tag, &path_prefix, &limit_i64, &offset_i64],
         )
         .map_err(map_pg_storage_err)?;
 
@@ -233,11 +265,12 @@ pub fn get_timeline(
         entries.push(crate::storage::types::TimelineEntry {
             artifact_id: row.get(0),
             title: row.get(1),
-            source_type: row.get(2),
-            created_at_source: row.get(3),
-            captured_at: row.get(4),
-            enrichment_status: row.get(5),
-            summary_snippet: row.get(6),
+            note_path: row.get(2),
+            source_type: row.get(3),
+            created_at_source: row.get(4),
+            captured_at: row.get(5),
+            enrichment_status: row.get(6),
+            summary_snippet: row.get(7),
         });
     }
 
@@ -250,7 +283,7 @@ pub fn load_artifact_for_enrichment(
 ) -> StorageResult<Option<LoadedArtifactForEnrichment>> {
     let artifact_row = client
         .query_opt(
-            "SELECT artifact_id, import_id, artifact_class, source_type, title \
+            "SELECT artifact_id, import_id, artifact_class, source_type, title, source_conversation_key \
              FROM oa_artifact WHERE artifact_id = $1",
             &[&artifact_id],
         )
@@ -283,6 +316,7 @@ pub fn load_artifact_for_enrichment(
         source_type,
         title: artifact_row.get(4),
     };
+    let note_path: Option<String> = artifact_row.get(5);
 
     let participant_rows = client
         .query(
@@ -360,6 +394,12 @@ pub fn load_artifact_for_enrichment(
         artifact,
         participants,
         segments,
+        imported_note_metadata: imported_note::load_imported_note_metadata(
+            client,
+            "postgres",
+            artifact_id,
+            note_path,
+        )?,
     }))
 }
 

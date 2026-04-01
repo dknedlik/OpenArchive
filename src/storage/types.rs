@@ -25,6 +25,7 @@ pub enum SourceType {
     GeminiTakeout,
     TextFile,
     MarkdownFile,
+    ObsidianVault,
 }
 
 impl SourceType {
@@ -36,6 +37,7 @@ impl SourceType {
             SourceType::GeminiTakeout => "gemini_takeout",
             SourceType::TextFile => "text_file",
             SourceType::MarkdownFile => "markdown_file",
+            SourceType::ObsidianVault => "obsidian_vault",
         }
     }
 
@@ -47,6 +49,7 @@ impl SourceType {
             "gemini_takeout" => Some(Self::GeminiTakeout),
             "text_file" => Some(Self::TextFile),
             "markdown_file" => Some(Self::MarkdownFile),
+            "obsidian_vault" => Some(Self::ObsidianVault),
             _ => None,
         }
     }
@@ -62,6 +65,7 @@ pub enum PayloadFormat {
     GeminiTakeoutJson,
     TextPlain,
     MarkdownText,
+    ObsidianVaultZip,
 }
 
 impl PayloadFormat {
@@ -75,6 +79,157 @@ impl PayloadFormat {
             PayloadFormat::GeminiTakeoutJson => "gemini_takeout_json",
             PayloadFormat::TextPlain => "text_plain",
             PayloadFormat::MarkdownText => "markdown_text",
+            PayloadFormat::ObsidianVaultZip => "obsidian_vault_zip",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportedNotePropertyValueKind {
+    String,
+    Number,
+    Boolean,
+    Date,
+    DateTime,
+    List,
+    Null,
+    Json,
+}
+
+impl ImportedNotePropertyValueKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+            Self::Date => "date",
+            Self::DateTime => "datetime",
+            Self::List => "list",
+            Self::Null => "null",
+            Self::Json => "json",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "string" => Some(Self::String),
+            "number" => Some(Self::Number),
+            "boolean" => Some(Self::Boolean),
+            "date" => Some(Self::Date),
+            "datetime" => Some(Self::DateTime),
+            "list" => Some(Self::List),
+            "null" => Some(Self::Null),
+            "json" => Some(Self::Json),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportedNoteTagSourceKind {
+    Frontmatter,
+    Inline,
+}
+
+impl ImportedNoteTagSourceKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Frontmatter => "frontmatter",
+            Self::Inline => "inline",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "frontmatter" => Some(Self::Frontmatter),
+            "inline" => Some(Self::Inline),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportedNoteLinkKind {
+    Link,
+    Embed,
+}
+
+impl ImportedNoteLinkKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Link => "link",
+            Self::Embed => "embed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "link" => Some(Self::Link),
+            "embed" => Some(Self::Embed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportedNoteLinkTargetKind {
+    Note,
+    Heading,
+    Block,
+    External,
+    Attachment,
+}
+
+impl ImportedNoteLinkTargetKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Note => "note",
+            Self::Heading => "heading",
+            Self::Block => "block",
+            Self::External => "external",
+            Self::Attachment => "attachment",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "note" => Some(Self::Note),
+            "heading" => Some(Self::Heading),
+            "block" => Some(Self::Block),
+            "external" => Some(Self::External),
+            "attachment" => Some(Self::Attachment),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportedNoteLinkResolutionStatus {
+    Resolved,
+    Unresolved,
+    External,
+}
+
+impl ImportedNoteLinkResolutionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Resolved => "resolved",
+            Self::Unresolved => "unresolved",
+            Self::External => "external",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "resolved" => Some(Self::Resolved),
+            "unresolved" => Some(Self::Unresolved),
+            "external" => Some(Self::External),
+            _ => None,
         }
     }
 }
@@ -643,6 +798,69 @@ pub struct NewSegment {
     pub unsupported_content_json: Option<String>,
 }
 
+/// Data required to create one imported-note property row.
+#[derive(Debug, Clone)]
+pub struct NewImportedNoteProperty {
+    pub imported_note_property_id: String,
+    pub artifact_id: String,
+    pub property_key: String,
+    pub value_kind: ImportedNotePropertyValueKind,
+    pub value_text: Option<String>,
+    pub value_json: String,
+    pub sequence_no: i32,
+}
+
+/// Data required to create one imported-note tag row.
+#[derive(Debug, Clone)]
+pub struct NewImportedNoteTag {
+    pub imported_note_tag_id: String,
+    pub artifact_id: String,
+    pub raw_tag: String,
+    pub normalized_tag: String,
+    pub tag_path: String,
+    pub source_kind: ImportedNoteTagSourceKind,
+    pub sequence_no: i32,
+}
+
+/// Data required to create one imported-note alias row.
+#[derive(Debug, Clone)]
+pub struct NewImportedNoteAlias {
+    pub imported_note_alias_id: String,
+    pub artifact_id: String,
+    pub alias_text: String,
+    pub normalized_alias: String,
+    pub sequence_no: i32,
+}
+
+/// Data required to create one imported-note link row.
+#[derive(Debug, Clone)]
+pub struct NewImportedNoteLink {
+    pub imported_note_link_id: String,
+    pub artifact_id: String,
+    pub source_segment_id: Option<String>,
+    pub link_kind: ImportedNoteLinkKind,
+    pub target_kind: ImportedNoteLinkTargetKind,
+    pub raw_target: String,
+    pub normalized_target: Option<String>,
+    pub display_text: Option<String>,
+    pub target_path: Option<String>,
+    pub target_heading: Option<String>,
+    pub target_block: Option<String>,
+    pub external_url: Option<String>,
+    pub resolved_artifact_id: Option<String>,
+    pub resolution_status: ImportedNoteLinkResolutionStatus,
+    pub locator_json: Option<String>,
+    pub sequence_no: i32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ImportedNoteMetadataWriteSet {
+    pub properties: Vec<NewImportedNoteProperty>,
+    pub tags: Vec<NewImportedNoteTag>,
+    pub aliases: Vec<NewImportedNoteAlias>,
+    pub links: Vec<NewImportedNoteLink>,
+}
+
 /// Data required to create one oa_enrichment_job row.
 #[derive(Debug)]
 pub struct NewEnrichmentJob {
@@ -913,12 +1131,14 @@ pub struct TopicThreadRef {
     pub spans: Vec<SegmentSpanRef>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct ArtifactExtractPayload {
     pub schema_version: String,
     pub artifact_id: String,
     pub import_id: String,
     pub source_type: String,
+    #[serde(default)]
+    pub imported_note_metadata: Option<ImportedNoteMetadata>,
     #[serde(default)]
     pub conversation_windows: Vec<ConversationWindowRef>,
     #[serde(default)]
@@ -930,6 +1150,7 @@ impl ArtifactExtractPayload {
         artifact_id: &str,
         import_id: &str,
         source_type: SourceType,
+        imported_note_metadata: Option<ImportedNoteMetadata>,
         conversation_windows: Vec<ConversationWindowRef>,
         topic_threads: Vec<TopicThreadRef>,
     ) -> Self {
@@ -938,6 +1159,7 @@ impl ArtifactExtractPayload {
             artifact_id: artifact_id.to_string(),
             import_id: import_id.to_string(),
             source_type: source_type.as_str().to_string(),
+            imported_note_metadata,
             conversation_windows,
             topic_threads,
         }
@@ -1105,6 +1327,7 @@ pub enum RetryOutcome {
 pub struct ArtifactListItem {
     pub artifact_id: String,
     pub title: Option<String>,
+    pub note_path: Option<String>,
     pub source_type: String,
     pub created_at_source: Option<String>,
     pub captured_at: String,
@@ -1115,6 +1338,9 @@ pub struct ArtifactListItem {
 pub struct ArtifactListFilters {
     pub source_type: Option<SourceType>,
     pub enrichment_status: Option<EnrichmentStatus>,
+    pub tag: Option<String>,
+    pub alias: Option<String>,
+    pub path_prefix: Option<String>,
     pub captured_after: Option<String>,
     pub captured_before: Option<String>,
 }
@@ -1123,6 +1349,7 @@ pub struct ArtifactListFilters {
 pub struct TimelineEntry {
     pub artifact_id: String,
     pub title: Option<String>,
+    pub note_path: Option<String>,
     pub source_type: String,
     pub created_at_source: Option<String>,
     pub captured_at: String,
@@ -1134,6 +1361,8 @@ pub struct TimelineEntry {
 pub struct TimelineFilters {
     pub keyword: Option<String>,
     pub source_type: Option<SourceType>,
+    pub tag: Option<String>,
+    pub path_prefix: Option<String>,
 }
 
 /// Worker-facing artifact metadata assembled from canonical relational rows.
@@ -1165,11 +1394,61 @@ pub struct LoadedSegment {
     pub visibility_status: VisibilityStatus,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ImportedNotePropertyRecord {
+    pub property_key: String,
+    pub value_kind: ImportedNotePropertyValueKind,
+    pub value_text: Option<String>,
+    pub value_json: serde_json::Value,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ImportedNoteTagRecord {
+    pub raw_tag: String,
+    pub normalized_tag: String,
+    pub tag_path: String,
+    pub source_kind: ImportedNoteTagSourceKind,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ImportedNoteAliasRecord {
+    pub alias_text: String,
+    pub normalized_alias: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ImportedNoteLinkRecord {
+    pub imported_note_link_id: String,
+    pub source_segment_id: Option<String>,
+    pub link_kind: ImportedNoteLinkKind,
+    pub target_kind: ImportedNoteLinkTargetKind,
+    pub raw_target: String,
+    pub normalized_target: Option<String>,
+    pub display_text: Option<String>,
+    pub target_path: Option<String>,
+    pub target_heading: Option<String>,
+    pub target_block: Option<String>,
+    pub external_url: Option<String>,
+    pub resolved_artifact_id: Option<String>,
+    pub resolution_status: ImportedNoteLinkResolutionStatus,
+    pub locator_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ImportedNoteMetadata {
+    pub note_path: Option<String>,
+    pub properties: Vec<ImportedNotePropertyRecord>,
+    pub tags: Vec<ImportedNoteTagRecord>,
+    pub aliases: Vec<ImportedNoteAliasRecord>,
+    pub outbound_links: Vec<ImportedNoteLinkRecord>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct LoadedArtifactForEnrichment {
     pub artifact: LoadedArtifactRecord,
     pub participants: Vec<LoadedParticipant>,
     pub segments: Vec<LoadedSegment>,
+    pub imported_note_metadata: ImportedNoteMetadata,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]

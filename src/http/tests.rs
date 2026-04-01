@@ -264,6 +264,23 @@ fn post_imports_markdown_returns_json_payload() {
 }
 
 #[test]
+fn post_imports_obsidian_rejects_invalid_zip() {
+    let store = MockStore {
+        artifacts: Vec::new(),
+        review_candidates: Vec::new(),
+    };
+    let mut request = TestRequest::new()
+        .with_method(Method::Post)
+        .with_path("/imports/obsidian")
+        .with_body("not a zip archive")
+        .into();
+
+    let app = test_app(store);
+    let response = build_response(&mut request, app.as_ref());
+    assert_eq!(response.status_code(), StatusCode(400));
+}
+
+#[test]
 fn unknown_route_returns_404() {
     let store = MockStore {
         artifacts: Vec::new(),
@@ -299,6 +316,7 @@ fn get_artifacts_returns_machine_first_fields_in_order() {
             ArtifactListItem {
                 artifact_id: "artifact-b".to_string(),
                 title: Some("Newest".to_string()),
+                note_path: None,
                 source_type: "chatgpt_export".to_string(),
                 created_at_source: None,
                 captured_at: "2026-03-10T14:00:00.000000000+00:00".to_string(),
@@ -307,6 +325,7 @@ fn get_artifacts_returns_machine_first_fields_in_order() {
             ArtifactListItem {
                 artifact_id: "artifact-a".to_string(),
                 title: Some("Older".to_string()),
+                note_path: None,
                 source_type: "chatgpt_export".to_string(),
                 created_at_source: Some("2026-03-09T12:30:00.000000000+00:00".to_string()),
                 captured_at: "2026-03-09T13:00:00.000000000+00:00".to_string(),
@@ -327,10 +346,10 @@ fn get_artifacts_returns_machine_first_fields_in_order() {
         response_body_string(response),
         concat!(
             "{\"artifacts\":[",
-            "{\"artifact_id\":\"artifact-b\",\"title\":\"Newest\",\"source_type\":\"chatgpt_export\",",
+            "{\"artifact_id\":\"artifact-b\",\"title\":\"Newest\",\"note_path\":null,\"source_type\":\"chatgpt_export\",",
             "\"created_at_source\":null,\"captured_at\":\"2026-03-10T14:00:00.000000000+00:00\",",
             "\"enrichment_status\":\"running\"},",
-            "{\"artifact_id\":\"artifact-a\",\"title\":\"Older\",\"source_type\":\"chatgpt_export\",",
+            "{\"artifact_id\":\"artifact-a\",\"title\":\"Older\",\"note_path\":null,\"source_type\":\"chatgpt_export\",",
             "\"created_at_source\":\"2026-03-09T12:30:00.000000000+00:00\",",
             "\"captured_at\":\"2026-03-09T13:00:00.000000000+00:00\",",
             "\"enrichment_status\":\"pending\"}",

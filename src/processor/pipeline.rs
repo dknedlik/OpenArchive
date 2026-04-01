@@ -19,9 +19,12 @@ pub use schema::structured_output_schema;
 
 pub(crate) use candidate::ModelCandidateArtifactOutput;
 pub(crate) use cleanup::{
-    canonicalize_entity_type, canonicalize_memory_type, cleanup_artifact_processor_output,
+    canonicalize_entity_type, canonicalize_memory_type_for_input, cleanup_artifact_processor_output,
     normalize_candidate_key_text, normalize_optional_text,
 };
+#[cfg(test)]
+pub(crate) use cleanup::canonicalize_memory_type;
+pub(crate) use super::artifact_policy::extraction_policy_for;
 pub(crate) use prompts::{
     allowed_artifact_evidence_refs, attach_output_preview, build_reconciliation_prompt,
     build_repair_prompt, build_segment_alias_map, build_two_phase_candidate_user_prompt,

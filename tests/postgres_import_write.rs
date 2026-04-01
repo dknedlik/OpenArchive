@@ -10,7 +10,14 @@ mod harness;
 use harness::{ImportRecord, ProviderHarness};
 use open_archive::config::PostgresConfig;
 use open_archive::migrations;
-use open_archive::storage::{ImportWriteStore, PostgresImportWriteStore};
+use open_archive::object_store::StoredObject;
+use open_archive::storage::{
+    ArtifactClass, ArtifactExtractPayload, ArtifactStatus, EnrichmentStatus, ImportStatus,
+    ImportWriteStore, ImportedNoteLinkKind, ImportedNoteLinkResolutionStatus,
+    ImportedNoteLinkTargetKind, JobStatus, JobType, NewArtifact, NewEnrichmentJob, NewImport,
+    NewImportObjectRef, NewImportedNoteLink, NewSegment, PayloadFormat, PostgresImportWriteStore,
+    SegmentType, SourceType, VisibilityStatus, WriteArtifactSet, WriteImportSet,
+};
 use postgres::NoTls;
 use std::sync::OnceLock;
 
@@ -263,4 +270,221 @@ fn test_write_import_duplicate_artifact_hash_is_idempotent() {
 fn test_write_import_partial_success_finalizes_completed_with_errors() {
     let Some(harness) = harness() else { return };
     contracts::contract_write_import_partial_success_finalizes_completed_with_errors(&harness);
+}
+
+#[test]
+#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+fn test_write_import_persists_forward_resolved_obsidian_links() {
+    let Some(harness) = harness() else { return };
+    let _guard = fixtures::lock_live_test();
+    harness.reset_schema();
+
+    let suffix = fixtures::unique_suffix("obsfwd");
+    let payload_bytes = format!("obsidian payload {suffix}").into_bytes();
+    let payload_sha = fixtures::payload_sha256(&payload_bytes);
+    let payload_object_id = format!("payload-{suffix}");
+    let import_id = format!("import-{suffix}");
+
+    let target_artifact_id = format!("artifact-{suffix}-target");
+    let source_artifact_id = format!("artifact-{suffix}-source");
+    let source_segment_id = format!("segment-{suffix}-source");
+    let target_segment_id = format!("segment-{suffix}-target");
+
+    let source_note_path = "Inbox.md";
+    let target_note_path = "Projects/Acme.md";
+    let source_hash = fixtures::sha256_hex(&format!("{source_note_path}:{suffix}"));
+    let target_hash = fixtures::sha256_hex(&format!("{target_note_path}:{suffix}"));
+    let source_job_id = format!("job-{suffix}-source");
+    let target_job_id = format!("job-{suffix}-target");
+
+    let write_set = WriteImportSet {
+        payload_object: NewImportObjectRef {
+            object_id: payload_object_id.clone(),
+            payload_format: PayloadFormat::ObsidianVaultZip,
+            mime_type: "application/zip".to_string(),
+            size_bytes: payload_bytes.len() as i64,
+            sha256: payload_sha.clone(),
+            stored_object: StoredObject {
+                object_id: payload_object_id.clone(),
+                provider: "test".to_string(),
+                storage_key: format!("test/{payload_object_id}"),
+                mime_type: "application/zip".to_string(),
+                size_bytes: payload_bytes.len() as i64,
+                sha256: payload_sha,
+            },
+        },
+        import: NewImport {
+            import_id: import_id.clone(),
+            source_type: SourceType::ObsidianVault,
+            import_status: ImportStatus::Pending,
+            payload_object_id: payload_object_id.clone(),
+            source_filename: Some("vault.zip".to_string()),
+            source_content_hash: fixtures::sha256_hex(&format!("vault:{suffix}")),
+            conversation_count_detected: 2,
+        },
+        artifact_sets: vec![
+            WriteArtifactSet {
+                artifact: NewArtifact {
+                    artifact_id: source_artifact_id.clone(),
+                    import_id: import_id.clone(),
+                    artifact_class: ArtifactClass::Document,
+                    source_type: SourceType::ObsidianVault,
+                    artifact_status: ArtifactStatus::Captured,
+                    enrichment_status: EnrichmentStatus::Pending,
+                    source_conversation_key: Some(source_note_path.to_string()),
+                    source_conversation_hash: source_hash,
+                    title: Some("Inbox".to_string()),
+                    created_at_source: None,
+                    started_at: None,
+                    ended_at: None,
+                    primary_language: Some("en".to_string()),
+                    content_hash_version: "sha256-v1".to_string(),
+                    content_facets_json: r#"["text","links"]"#.to_string(),
+                    normalization_version: "obsidian-v1".to_string(),
+                },
+                participants: Vec::new(),
+                segments: vec![NewSegment {
+                    segment_id: source_segment_id,
+                    artifact_id: source_artifact_id.clone(),
+                    participant_id: None,
+                    segment_type: SegmentType::ContentBlock,
+                    source_segment_key: Some("block-0".to_string()),
+                    parent_segment_id: None,
+                    sequence_no: 0,
+                    created_at_source: None,
+                    text_content: "See [[Projects/Acme]].".to_string(),
+                    text_content_hash: fixtures::sha256_hex("See [[Projects/Acme]]."),
+                    locator_json: None,
+                    visibility_status: VisibilityStatus::Visible,
+                    unsupported_content_json: None,
+                }],
+                imported_note_metadata: open_archive::storage::ImportedNoteMetadataWriteSet {
+                    properties: Vec::new(),
+                    tags: Vec::new(),
+                    aliases: Vec::new(),
+                    links: vec![NewImportedNoteLink {
+                        imported_note_link_id: format!("notelink-{suffix}-1"),
+                        artifact_id: source_artifact_id.clone(),
+                        source_segment_id: None,
+                        link_kind: ImportedNoteLinkKind::Link,
+                        target_kind: ImportedNoteLinkTargetKind::Note,
+                        raw_target: "Projects/Acme".to_string(),
+                        normalized_target: Some("projects/acme".to_string()),
+                        display_text: None,
+                        target_path: Some(target_note_path.to_string()),
+                        target_heading: None,
+                        target_block: None,
+                        external_url: None,
+                        resolved_artifact_id: Some(target_artifact_id.clone()),
+                        resolution_status: ImportedNoteLinkResolutionStatus::Resolved,
+                        locator_json: None,
+                        sequence_no: 0,
+                    }],
+                },
+                job: NewEnrichmentJob {
+                    job_id: source_job_id,
+                    artifact_id: source_artifact_id.clone(),
+                    job_type: JobType::ArtifactExtract,
+                    enrichment_tier: open_archive::storage::EnrichmentTier::Standard,
+                    spawned_by_job_id: None,
+                    job_status: JobStatus::Pending,
+                    max_attempts: 3,
+                    priority_no: 100,
+                    required_capabilities: vec!["text".to_string()],
+                    payload_json: ArtifactExtractPayload::new_v1(
+                        &source_artifact_id,
+                        &import_id,
+                        SourceType::ObsidianVault,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                    .to_json(),
+                },
+            },
+            WriteArtifactSet {
+                artifact: NewArtifact {
+                    artifact_id: target_artifact_id.clone(),
+                    import_id: import_id.clone(),
+                    artifact_class: ArtifactClass::Document,
+                    source_type: SourceType::ObsidianVault,
+                    artifact_status: ArtifactStatus::Captured,
+                    enrichment_status: EnrichmentStatus::Pending,
+                    source_conversation_key: Some(target_note_path.to_string()),
+                    source_conversation_hash: target_hash,
+                    title: Some("Acme".to_string()),
+                    created_at_source: None,
+                    started_at: None,
+                    ended_at: None,
+                    primary_language: Some("en".to_string()),
+                    content_hash_version: "sha256-v1".to_string(),
+                    content_facets_json: r#"["text"]"#.to_string(),
+                    normalization_version: "obsidian-v1".to_string(),
+                },
+                participants: Vec::new(),
+                segments: vec![NewSegment {
+                    segment_id: target_segment_id,
+                    artifact_id: target_artifact_id.clone(),
+                    participant_id: None,
+                    segment_type: SegmentType::ContentBlock,
+                    source_segment_key: Some("block-0".to_string()),
+                    parent_segment_id: None,
+                    sequence_no: 0,
+                    created_at_source: None,
+                    text_content: "Target note.".to_string(),
+                    text_content_hash: fixtures::sha256_hex("Target note."),
+                    locator_json: None,
+                    visibility_status: VisibilityStatus::Visible,
+                    unsupported_content_json: None,
+                }],
+                imported_note_metadata: Default::default(),
+                job: NewEnrichmentJob {
+                    job_id: target_job_id,
+                    artifact_id: target_artifact_id.clone(),
+                    job_type: JobType::ArtifactExtract,
+                    enrichment_tier: open_archive::storage::EnrichmentTier::Standard,
+                    spawned_by_job_id: None,
+                    job_status: JobStatus::Pending,
+                    max_attempts: 3,
+                    priority_no: 100,
+                    required_capabilities: vec!["text".to_string()],
+                    payload_json: ArtifactExtractPayload::new_v1(
+                        &target_artifact_id,
+                        &import_id,
+                        SourceType::ObsidianVault,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                    .to_json(),
+                },
+            },
+        ],
+    };
+
+    let result = PostgresImportWriteStore::new(harness.0.clone())
+        .write_import(write_set)
+        .expect("obsidian import should succeed");
+
+    assert_eq!(result.import_status, ImportStatus::Completed);
+    assert_eq!(result.artifacts.len(), 2);
+
+    let record = harness.fetch_import_record(&import_id);
+    assert_eq!(record.status, ImportStatus::Completed.as_str());
+    assert_eq!(record.count_imported, 2);
+    assert_eq!(record.count_failed, 0);
+
+    let mut client = open_archive::postgres_db::connect(&harness.0).expect("connect");
+    let row = client
+        .query_one(
+            "SELECT resolved_artifact_id \
+             FROM oa_artifact_note_link \
+             WHERE artifact_id = $1 AND target_path = $2",
+            &[&source_artifact_id, &target_note_path],
+        )
+        .expect("forward link should exist");
+    assert_eq!(
+        row.get::<_, Option<String>>(0).as_deref(),
+        Some(target_artifact_id.as_str())
+    );
 }

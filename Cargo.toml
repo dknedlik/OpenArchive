@@ -9,6 +9,7 @@ chrono = { version = "0.4", default-features = false, features = ["alloc", "serd
 clap = { version = "4.5", features = ["derive"] }
 dotenvy = "0.15"
 env_logger = "0.11"
+httpdate = "1.0"
 log = "0.4"
 oracle = { version = "0.6", features = ["chrono"] }
 postgres = { version = "0.19", features = ["with-chrono-0_4"] }
@@ -17,10 +18,12 @@ rand = "0.8"
 rusty-s3 = { version = "0.8", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml = "0.9"
 sha2 = "0.10"
 thiserror = "2.0"
 tiny_http = "0.12"
 ctrlc = "3.4"
 url = "2.5"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 [dev-dependencies]
 mockall = "0.12"

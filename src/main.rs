@@ -1,7 +1,7 @@
 #![deny(warnings)]
 
 use anyhow::Context;
-use clap::{command, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use open_archive::app::ArchiveApplication;
 use open_archive::bootstrap::{build_service_bundle, require_oracle_db_config};
 use open_archive::config::EnrichmentPipelineConfig;

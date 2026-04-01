@@ -475,6 +475,7 @@ pub fn contract_payload_matches_documented_schema<H: ProviderHarness + ?Sized>(h
         &artifact_id,
         &import_id,
         SourceType::ChatGptExport,
+        None,
         Vec::new(),
         Vec::new(),
     );

@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod derivation;
 pub mod import;
+pub mod imported_note;
 pub mod job;
 pub mod segment;
 

@@ -58,6 +58,7 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
                     system_prompt: candidate_system_prompt(input).to_string(),
                     user_prompt,
                     response_json_schema: candidate_output_schema_with_allowed_refs(
+                        input,
                         &allowed_artifact_evidence_refs(input),
                     ),
                     max_output_tokens: Some(TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS),
@@ -281,6 +282,7 @@ impl ExtractionBatchSubmitter for GeminiExtractionSubmitter {
                 system_prompt: candidate_system_prompt(input).to_string(),
                 user_prompt,
                 response_json_schema: candidate_output_schema_with_allowed_refs(
+                    input,
                     &allowed_artifact_evidence_refs(input),
                 ),
                 max_output_tokens: Some(TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS),

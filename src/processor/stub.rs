@@ -152,6 +152,19 @@ impl ReconciliationProcessor for StubReconciliationProcessor {
             })
             .chain(
                 input
+                    .entities
+                    .iter()
+                    .map(|entity| ReconciliationDecisionOutput {
+                        decision_kind: ReconciliationDecisionKind::CreateNew,
+                        target_kind: "entity".to_string(),
+                        target_key: entity.entity_key.clone(),
+                        matched_object_id: None,
+                        rationale: "Stub reconciliation defaults to create_new.".to_string(),
+                        evidence_segment_ids: entity.evidence_segment_ids.clone(),
+                    }),
+            )
+            .chain(
+                input
                     .relationships
                     .iter()
                     .map(|relationship| ReconciliationDecisionOutput {

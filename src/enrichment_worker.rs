@@ -21,12 +21,12 @@ use crate::storage::{
     ClassificationObjectJson, ConversationWindowRef, DerivationRunStatus, DerivationRunType,
     DerivedMetadataWriteStore, DerivedObjectEmbeddingItem, DerivedObjectEmbeddingPayload,
     DerivedObjectEmbeddingStore, DerivedObjectPayload, EnrichmentJobLifecycleStore,
-    EnrichmentStateStore, EnrichmentTier, EvidenceRole, ExtractedClassification, ExtractedMemory,
-    InputScopeType, JobStatus, MemoryObjectJson, NewDerivationRun, NewDerivedObject,
-    NewDerivedObjectEmbedding, NewEnrichmentJob, NewEvidenceLink, ObjectStatus, OriginKind,
-    ReconciliationDecision, ReconciliationDecisionKind, RelationshipObjectJson, RetrievalIntent,
-    RetrievalResultSet, ScopeType, SummaryObjectJson, SupportStrength, WriteDerivationAttempt,
-    WriteDerivedObject,
+    EnrichmentStateStore, EnrichmentTier, EntityObjectJson, EvidenceRole,
+    ExtractedClassification, ExtractedMemory, InputScopeType, JobStatus, MemoryObjectJson,
+    NewDerivationRun, NewDerivedObject, NewDerivedObjectEmbedding, NewEnrichmentJob,
+    NewEvidenceLink, ObjectStatus, OriginKind, ReconciliationDecision,
+    ReconciliationDecisionKind, RelationshipObjectJson, RetrievalIntent, RetrievalResultSet,
+    ScopeType, SummaryObjectJson, SupportStrength, WriteDerivationAttempt, WriteDerivedObject,
 };
 use log::{debug, error, info, warn};
 use rand::random;
@@ -345,6 +345,7 @@ fn process_extract_job_batch(
             artifact_class: loaded.artifact.artifact_class,
             source_type,
             title: loaded.artifact.title.clone(),
+            imported_note_metadata: payload.imported_note_metadata.clone(),
             participants: loaded.participants,
             segments: loaded.segments,
         };
@@ -711,6 +712,7 @@ fn process_extract_job(
         artifact_class: loaded.artifact.artifact_class,
         source_type,
         title: loaded.artifact.title.clone(),
+        imported_note_metadata: payload.imported_note_metadata.clone(),
         participants: loaded.participants,
         segments: loaded.segments,
     };
@@ -1468,7 +1470,7 @@ pub(crate) fn merge_chunk_outputs(
         }
     }
 
-    cleanup_artifact_processor_output(ArtifactProcessorOutput {
+    cleanup_artifact_processor_output(input, ArtifactProcessorOutput {
         pipeline_name: first.pipeline_name,
         pipeline_version: first.pipeline_version,
         provider_name: first.provider_name,
@@ -1661,6 +1663,16 @@ pub(crate) fn build_reconciliation_input(
                 evidence_segment_ids: memory.evidence_segment_ids.clone(),
             })
             .collect(),
+        entities: extraction_result
+            .entities
+            .iter()
+            .map(|entity| EntityOutput {
+                entity_key: entity.entity_key.clone(),
+                display_name: entity.display_name.clone(),
+                entity_type: entity.entity_type.clone(),
+                evidence_segment_ids: entity.evidence_segment_ids.clone(),
+            })
+            .collect(),
         relationships: extraction_result
             .relationships
             .iter()
@@ -1736,6 +1748,10 @@ fn relationship_target_key_from_output(relationship: &RelationshipOutput) -> Str
         "{}:{}:{}",
         relationship.relationship_type, relationship.subject_key, relationship.object_key
     )
+}
+
+fn entity_target_key(entity: &CandidateEntity) -> String {
+    entity.entity_key.clone()
 }
 
 fn extend_unique(target: &mut Vec<String>, values: &[String]) {
@@ -1844,7 +1860,9 @@ pub(crate) fn build_derivation_attempt(
     let started_at = SourceTimestamp::from(chrono::Utc::now());
     let completed_at = started_at.clone();
     let mut objects = Vec::with_capacity(
-        1 + extraction_result.classifications.len() + extraction_result.memories.len(),
+        1 + extraction_result.classifications.len()
+            + extraction_result.memories.len()
+            + extraction_result.entities.len(),
     );
 
     let summary_object_id = new_id("dobj");
@@ -1956,6 +1974,61 @@ pub(crate) fn build_derivation_attempt(
                 },
             },
             evidence_links: build_evidence_links(&derived_object_id, &memory.evidence_segment_ids),
+        });
+    }
+
+    for entity in &extraction_result.entities {
+        let decision = decisions
+            .iter()
+            .find(|decision| decision.target_kind == "entity" && decision.target_key == entity_target_key(entity));
+        if let Some(decision) = decision {
+            if matches!(
+                decision.decision_kind,
+                ReconciliationDecisionKind::AttachToExisting
+                    | ReconciliationDecisionKind::StrengthenExisting
+                    | ReconciliationDecisionKind::InsufficientEvidence
+            ) {
+                if let Some(existing_id) = &decision.matched_object_id {
+                    attached_existing.insert(existing_id.clone());
+                }
+                continue;
+            }
+        }
+
+        let derived_object_id = new_id("dobj");
+        let supersedes_derived_object_id = decision.and_then(|decision| {
+            matches!(
+                decision.decision_kind,
+                ReconciliationDecisionKind::SupersedeExisting
+            )
+            .then(|| decision.matched_object_id.clone())
+            .flatten()
+        });
+        objects.push(WriteDerivedObject {
+            object: NewDerivedObject {
+                derived_object_id: derived_object_id.clone(),
+                artifact_id: artifact_id.to_string(),
+                derivation_run_id: derivation_run_id.clone(),
+                origin_kind: OriginKind::Inferred,
+                object_status: ObjectStatus::Active,
+                confidence_score: None,
+                confidence_label: None,
+                scope_type: ScopeType::Artifact,
+                scope_id: artifact_id.to_string(),
+                supersedes_derived_object_id,
+                payload: DerivedObjectPayload::Entity {
+                    title: Some(entity.display_name.clone()),
+                    body_text: format!(
+                        "{} is a named {} mentioned in this artifact.",
+                        entity.display_name, entity.entity_type
+                    ),
+                    object_json: EntityObjectJson {
+                        entity_type: entity.entity_type.clone(),
+                        candidate_key: entity_target_key(entity),
+                    },
+                },
+            },
+            evidence_links: build_evidence_links(&derived_object_id, &entity.evidence_segment_ids),
         });
     }
 
@@ -2092,6 +2165,21 @@ fn handle_processor_error(
     job_id: &str,
     err: ProcessorError,
 ) -> String {
+    if err.should_reschedule_without_attempt() {
+        let message = format!("Processor execution rate-limited: {err}");
+        if let Err(reschedule_err) = job_store.reschedule_running_job(
+            worker_id,
+            job_id,
+            &message,
+            err.recommended_retry_after_seconds(),
+        ) {
+            return format!(
+                "{message}; additionally failed to reschedule job without consuming attempt: {reschedule_err}"
+            );
+        }
+        return message;
+    }
+
     if err.is_retryable() {
         let message = format!("Processor execution failed: {err}");
         return mark_job_retryable_message(
@@ -2099,7 +2187,7 @@ fn handle_processor_error(
             worker_id,
             job_id,
             message,
-            RETRYABLE_INFERENCE_BACKOFF_SECONDS,
+            err.recommended_retry_after_seconds(),
         );
     }
 

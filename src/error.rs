@@ -375,6 +375,38 @@ pub enum StorageError {
         source: Box<oracle::Error>,
     },
 
+    #[error("failed to insert imported note property {property_key} for artifact {artifact_id}")]
+    InsertImportedNoteProperty {
+        artifact_id: String,
+        property_key: String,
+        #[source]
+        source: Box<dyn StdError + Send + Sync>,
+    },
+
+    #[error("failed to insert imported note tag {tag_value} for artifact {artifact_id}")]
+    InsertImportedNoteTag {
+        artifact_id: String,
+        tag_value: String,
+        #[source]
+        source: Box<dyn StdError + Send + Sync>,
+    },
+
+    #[error("failed to insert imported note alias for artifact {artifact_id}: {alias_text}")]
+    InsertImportedNoteAlias {
+        artifact_id: String,
+        alias_text: String,
+        #[source]
+        source: Box<dyn StdError + Send + Sync>,
+    },
+
+    #[error("failed to insert imported note link {link_id} for artifact {artifact_id}")]
+    InsertImportedNoteLink {
+        artifact_id: String,
+        link_id: String,
+        #[source]
+        source: Box<dyn StdError + Send + Sync>,
+    },
+
     #[error("failed to insert derivation run {derivation_run_id} for artifact {artifact_id}")]
     InsertDerivationRun {
         derivation_run_id: String,
@@ -531,11 +563,20 @@ pub enum ParserError {
     #[error("invalid JSON: {detail}")]
     InvalidJson { detail: String },
 
+    #[error("invalid Obsidian vault: {detail}")]
+    InvalidObsidianVault { detail: String },
+
+    #[error("invalid frontmatter in note {note_path}: {detail}")]
+    InvalidFrontmatter { note_path: String, detail: String },
+
     #[error("export contains no conversations")]
     EmptyExport,
 
     #[error("document contains no usable text")]
     EmptyDocument,
+
+    #[error("vault contains no Markdown notes")]
+    EmptyVault,
 
     #[error("conversation {conversation_id} has an empty mapping")]
     EmptyConversation { conversation_id: String },

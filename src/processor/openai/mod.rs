@@ -437,6 +437,7 @@ impl OpenAiClient {
             return Err(ProcessorError::InferenceHttpStatus {
                 status: status.as_u16(),
                 body_preview: preview(&response_text),
+                retry_after_seconds: None,
             });
         }
 
@@ -587,6 +588,7 @@ impl OpenAiClient {
             return Err(ProcessorError::InferenceHttpStatus {
                 status: status.as_u16(),
                 body_preview: preview(&response_text),
+                retry_after_seconds: None,
             });
         }
         Ok(response_text)
@@ -603,6 +605,7 @@ impl OpenAiClient {
             return Err(ProcessorError::InferenceHttpStatus {
                 status: status.as_u16(),
                 body_preview: preview(&response_text),
+                retry_after_seconds: None,
             });
         }
         serde_json::from_str(&response_text).map_err(|source| {
@@ -622,6 +625,12 @@ impl OpenAiClient {
         }
 
         let model = model.to_ascii_lowercase();
+        if model.contains("gpt-5.4-mini") {
+            return Some(OpenAiReasoningEffort::Medium);
+        }
+        if model.contains("gpt-5.4-nano") {
+            return Some(OpenAiReasoningEffort::None);
+        }
         if model.contains("gpt-5.4") {
             return Some(OpenAiReasoningEffort::Low);
         }

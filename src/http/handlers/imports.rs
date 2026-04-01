@@ -48,6 +48,15 @@ pub(in crate::http) fn handle_post_imports_markdown(
     handle_import_request(request, |body| app.imports.import_markdown_payload(body))
 }
 
+pub(in crate::http) fn handle_post_imports_obsidian(
+    request: &mut Request,
+    app: &ArchiveApplication,
+) -> HttpResponse {
+    handle_import_request(request, |body| {
+        app.imports.import_obsidian_vault_payload(body)
+    })
+}
+
 fn handle_import_request<T, F>(request: &mut Request, import: F) -> HttpResponse
 where
     T: serde::Serialize,

@@ -1,6 +1,7 @@
 use crate::error::StorageResult;
 use crate::storage::types::{
-    DerivedObjectType, EnrichmentStatus, EvidenceRole, ScopeType, SourceType, SupportStrength,
+    DerivedObjectType, EnrichmentStatus, EvidenceRole, ImportedNoteLinkRecord,
+    ImportedNoteMetadata, ScopeType, SourceType, SupportStrength,
 };
 use crate::ParticipantRole;
 
@@ -8,11 +9,18 @@ use crate::ParticipantRole;
 pub struct SearchFilters {
     pub object_type: Option<DerivedObjectType>,
     pub source_type: Option<SourceType>,
+    pub tag: Option<String>,
+    pub alias: Option<String>,
+    pub path_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SearchCandidateKind {
     ArtifactTitle,
+    ImportedNoteTag,
+    ImportedNoteAlias,
+    ImportedNotePath,
+    ImportedExternalLink,
     DerivedObject { derived_type: DerivedObjectType },
     SegmentExcerpt,
 }
@@ -41,6 +49,7 @@ pub struct ArtifactDetailRecord {
     pub title: Option<String>,
     pub source_type: SourceType,
     pub enrichment_status: EnrichmentStatus,
+    pub note_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +74,8 @@ pub struct ArtifactDetailDerivedObject {
 pub struct ArtifactDetailView {
     pub artifact: ArtifactDetailRecord,
     pub segments: Vec<ArtifactDetailSegment>,
+    pub imported_note_metadata: ImportedNoteMetadata,
+    pub inbound_note_links: Vec<ImportedNoteLinkRecord>,
     pub derived_objects: Vec<ArtifactDetailDerivedObject>,
 }
 

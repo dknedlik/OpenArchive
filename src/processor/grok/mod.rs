@@ -222,6 +222,7 @@ impl GrokClient {
             return Err(ProcessorError::InferenceHttpStatus {
                 status: status.as_u16(),
                 body_preview: preview(&response_text),
+                retry_after_seconds: None,
             });
         }
 

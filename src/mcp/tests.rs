@@ -334,6 +334,7 @@ impl crate::storage::ArtifactDetailReadStore for MockArtifactDetailStore {
                 title: Some("Artifact".to_string()),
                 source_type: crate::storage::SourceType::ChatGptExport,
                 enrichment_status: crate::storage::EnrichmentStatus::Completed,
+                note_path: None,
             },
             segments: vec![crate::storage::ArtifactDetailSegment {
                 segment_id: "seg-1".to_string(),
@@ -365,6 +366,8 @@ impl crate::storage::ArtifactDetailReadStore for MockArtifactDetailStore {
                     confidence_score: None,
                 },
             ],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
         }))
     }
 }
@@ -385,6 +388,7 @@ impl crate::storage::ArtifactContextPackReadStore for MockContextPackStore {
                 title: Some("Artifact".to_string()),
                 source_type: crate::storage::SourceType::ChatGptExport,
                 enrichment_status: crate::storage::EnrichmentStatus::Completed,
+                note_path: None,
             },
             segments: vec![],
             derived_objects: vec![],

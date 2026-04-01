@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use log::info;
 use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE, RETRY_AFTER};
 
 use crate::config::GeminiConfig;
 use crate::storage::types::EnrichmentTier;
@@ -297,15 +297,17 @@ impl GeminiClient {
             .map_err(|source| ProcessorError::SendInferenceRequest { source })?;
 
         let status = response.status();
+        let headers = response.headers().clone();
         let response_text = response
             .text()
             .map_err(|source| ProcessorError::ReadInferenceResponse { source })?;
 
         if !status.is_success() {
-            return Err(ProcessorError::InferenceHttpStatus {
-                status: status.as_u16(),
-                body_preview: preview(&response_text),
-            });
+            return Err(processor_http_status(
+                status.as_u16(),
+                &response_text,
+                &headers,
+            ));
         }
 
         let parsed: GeminiGenerateContentResponse =
@@ -541,15 +543,17 @@ impl GeminiBatchClient {
             .map_err(|source| ProcessorError::SendInferenceRequest { source })?;
 
         let status = response.status();
+        let headers = response.headers().clone();
         let response_text = response
             .text()
             .map_err(|source| ProcessorError::ReadInferenceResponse { source })?;
 
         if !status.is_success() {
-            return Err(ProcessorError::InferenceHttpStatus {
-                status: status.as_u16(),
-                body_preview: preview(&response_text),
-            });
+            return Err(processor_http_status(
+                status.as_u16(),
+                &response_text,
+                &headers,
+            ));
         }
 
         let operation: GeminiBatchOperation =
@@ -585,15 +589,17 @@ impl GeminiBatchClient {
             .map_err(|source| ProcessorError::SendInferenceRequest { source })?;
 
         let status = response.status();
+        let headers = response.headers().clone();
         let response_text = response
             .text()
             .map_err(|source| ProcessorError::ReadInferenceResponse { source })?;
 
         if !status.is_success() {
-            return Err(ProcessorError::InferenceHttpStatus {
-                status: status.as_u16(),
-                body_preview: preview(&response_text),
-            });
+            return Err(processor_http_status(
+                status.as_u16(),
+                &response_text,
+                &headers,
+            ));
         }
 
         let operation: GeminiBatchOperation =
@@ -664,4 +670,52 @@ fn normalize_model_resource(model: &str) -> String {
     } else {
         format!("models/{model}")
     }
+}
+
+fn processor_http_status(status: u16, response_text: &str, headers: &HeaderMap) -> ProcessorError {
+    ProcessorError::InferenceHttpStatus {
+        status,
+        body_preview: preview(response_text),
+        retry_after_seconds: parse_retry_after_seconds(headers)
+            .or_else(|| parse_google_retry_delay_seconds(response_text)),
+    }
+}
+
+fn parse_retry_after_seconds(headers: &HeaderMap) -> Option<i64> {
+    let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
+    if let Ok(seconds) = value.parse::<i64>() {
+        return Some(seconds.max(1));
+    }
+
+    httpdate::parse_http_date(value)
+        .ok()
+        .and_then(|when| when.duration_since(SystemTime::now()).ok())
+        .and_then(|delay| i64::try_from(delay.as_secs()).ok())
+        .map(|seconds| seconds.max(1))
+}
+
+fn parse_google_retry_delay_seconds(response_text: &str) -> Option<i64> {
+    let parsed: serde_json::Value = serde_json::from_str(response_text).ok()?;
+    let details = parsed.pointer("/error/details")?.as_array()?;
+    for detail in details {
+        if detail.get("@type").and_then(serde_json::Value::as_str)
+            != Some("type.googleapis.com/google.rpc.RetryInfo")
+        {
+            continue;
+        }
+
+        if let Some(delay) = detail.get("retryDelay").and_then(serde_json::Value::as_str) {
+            return parse_google_duration_seconds(delay);
+        }
+    }
+    None
+}
+
+fn parse_google_duration_seconds(value: &str) -> Option<i64> {
+    let trimmed = value.trim().strip_suffix('s')?;
+    let seconds = trimmed.parse::<f64>().ok()?;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return None;
+    }
+    Some(seconds.ceil() as i64)
 }

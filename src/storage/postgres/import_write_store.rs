@@ -2,12 +2,13 @@ use crate::config::PostgresConfig;
 use crate::error::StorageResult;
 use crate::storage::types::ImportStatus;
 use crate::storage::{
-    ArtifactIngestResult, ImportWriteResult, ImportWriteStore, ImportedArtifact, StorageTx,
-    WriteImportSet,
+    ArtifactIngestResult, ImportWriteResult, ImportWriteStore, ImportedArtifact,
+    NewImportedNoteLink, StorageTx, WriteImportSet,
 };
+use std::collections::HashMap;
 
 use super::tx::{begin_storage_tx, begin_transaction, rollback_transaction};
-use super::{artifact, import, job, segment};
+use super::{artifact, import, imported_note, job, segment};
 
 pub struct PostgresImportWriteStore {
     config: PostgresConfig,
@@ -43,9 +44,11 @@ impl ImportWriteStore for PostgresImportWriteStore {
         let mut count_imported: i32 = 0;
         let mut count_failed: i32 = 0;
         let mut artifact_errors: Vec<String> = Vec::new();
+        let mut planned_to_actual_artifact_ids: HashMap<String, String> = HashMap::new();
+        let mut deferred_links: Vec<(String, Vec<NewImportedNoteLink>)> = Vec::new();
 
         for artifact_set in import_set.artifact_sets {
-            let artifact_id = artifact_set.artifact.artifact_id.clone();
+            let planned_artifact_id = artifact_set.artifact.artifact_id.clone();
 
             if let Some((existing_artifact_id, enrichment_status)) =
                 artifact::find_artifact_by_source_hash(
@@ -55,6 +58,8 @@ impl ImportWriteStore for PostgresImportWriteStore {
                     &artifact_set.artifact.source_conversation_hash,
                 )?
             {
+                planned_to_actual_artifact_ids
+                    .insert(planned_artifact_id.clone(), existing_artifact_id.clone());
                 artifacts.push(ImportedArtifact {
                     artifact_id: existing_artifact_id,
                     enrichment_status,
@@ -78,6 +83,18 @@ impl ImportWriteStore for PostgresImportWriteStore {
                     seg_count += 1;
                 }
 
+                for property in &artifact_set.imported_note_metadata.properties {
+                    imported_note::insert_imported_note_property(&mut tx.client, property)?;
+                }
+
+                for tag in &artifact_set.imported_note_metadata.tags {
+                    imported_note::insert_imported_note_tag(&mut tx.client, tag)?;
+                }
+
+                for alias in &artifact_set.imported_note_metadata.aliases {
+                    imported_note::insert_imported_note_alias(&mut tx.client, alias)?;
+                }
+
                 job::insert_job(&mut tx.client, &artifact_set.job)?;
                 Ok(seg_count)
             })();
@@ -85,8 +102,14 @@ impl ImportWriteStore for PostgresImportWriteStore {
             match phase2_result {
                 Ok(seg_count) => {
                     tx.commit()?;
+                    planned_to_actual_artifact_ids
+                        .insert(planned_artifact_id.clone(), planned_artifact_id.clone());
+                    deferred_links.push((
+                        planned_artifact_id.clone(),
+                        artifact_set.imported_note_metadata.links,
+                    ));
                     artifacts.push(ImportedArtifact {
-                        artifact_id,
+                        artifact_id: planned_artifact_id,
                         enrichment_status: artifact_set.artifact.enrichment_status,
                         ingest_result: ArtifactIngestResult::Created,
                     });
@@ -95,7 +118,38 @@ impl ImportWriteStore for PostgresImportWriteStore {
                 }
                 Err(error) => {
                     rollback_transaction(&mut tx.client, &self.config.connection_string)?;
-                    failed_artifact_ids.push(artifact_id.clone());
+                    failed_artifact_ids.push(planned_artifact_id.clone());
+                    count_failed += 1;
+                    artifact_errors.push(format!("artifact {}: {error:#}", planned_artifact_id));
+                }
+            }
+        }
+
+        for (artifact_id, links) in deferred_links {
+            if links.is_empty() {
+                continue;
+            }
+
+            begin_transaction(&mut tx.client, &self.config.connection_string)?;
+
+            let link_result: StorageResult<()> = (|| {
+                for link in &links {
+                    let resolved_artifact_id = link
+                        .resolved_artifact_id
+                        .as_ref()
+                        .and_then(|artifact_id| planned_to_actual_artifact_ids.get(artifact_id))
+                        .cloned();
+                    let mut remapped_link = link.clone();
+                    remapped_link.resolved_artifact_id = resolved_artifact_id;
+                    imported_note::insert_imported_note_link(&mut tx.client, &remapped_link)?;
+                }
+                Ok(())
+            })();
+
+            match link_result {
+                Ok(()) => tx.commit()?,
+                Err(error) => {
+                    rollback_transaction(&mut tx.client, &self.config.connection_string)?;
                     count_failed += 1;
                     artifact_errors.push(format!("artifact {}: {error:#}", artifact_id));
                 }

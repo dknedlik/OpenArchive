@@ -15,7 +15,10 @@ pub(in crate::mcp) fn tool_definitions() -> Vec<Value> {
                     "query": { "type": "string", "description": "Search query text." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": SEARCH_LIMIT_CAP, "description": "Optional result limit; values above 50 are silently clamped." },
                     "object_type": { "type": "string", "enum": ["summary", "classification", "memory", "relationship", "entity"], "description": "Filter results to a specific derived object type." },
-                    "source_type": { "type": "string", "enum": ["chatgpt_export", "claude_export", "grok_export", "gemini_takeout", "text_file", "markdown_file"], "description": "Filter results to artifacts from a specific source." }
+                    "source_type": { "type": "string", "enum": ["chatgpt_export", "claude_export", "grok_export", "gemini_takeout", "text_file", "markdown_file", "obsidian_vault"], "description": "Filter results to artifacts from a specific source." },
+                    "tag": { "type": "string", "description": "Optional exact normalized imported note tag filter." },
+                    "alias": { "type": "string", "description": "Optional exact imported note alias filter." },
+                    "path_prefix": { "type": "string", "description": "Optional imported note path prefix filter." }
                 },
                 "required": ["query"],
                 "additionalProperties": false
@@ -116,8 +119,11 @@ pub(in crate::mcp) fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "source_type": { "type": "string", "enum": ["chatgpt_export", "claude_export", "grok_export", "gemini_takeout", "text_file", "markdown_file"], "description": "Filter to artifacts from a specific source." },
+                    "source_type": { "type": "string", "enum": ["chatgpt_export", "claude_export", "grok_export", "gemini_takeout", "text_file", "markdown_file", "obsidian_vault"], "description": "Filter to artifacts from a specific source." },
                     "enrichment_status": { "type": "string", "enum": ["pending", "running", "completed", "partial", "failed"], "description": "Filter by enrichment status." },
+                    "tag": { "type": "string", "description": "Optional exact normalized imported note tag filter." },
+                    "alias": { "type": "string", "description": "Optional exact imported note alias filter." },
+                    "path_prefix": { "type": "string", "description": "Optional imported note path prefix filter." },
                     "captured_after": { "type": "string", "description": "ISO 8601 lower bound on capture time (inclusive)." },
                     "captured_before": { "type": "string", "description": "ISO 8601 upper bound on capture time (exclusive)." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Max results, default 20." },
@@ -191,7 +197,9 @@ pub(in crate::mcp) fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "keyword": { "type": "string", "description": "Optional keyword to filter artifacts by title (full-text search)." },
-                    "source_type": { "type": "string", "enum": ["chatgpt_export", "claude_export", "grok_export", "gemini_takeout", "text_file", "markdown_file"], "description": "Filter to artifacts from a specific source." },
+                    "source_type": { "type": "string", "enum": ["chatgpt_export", "claude_export", "grok_export", "gemini_takeout", "text_file", "markdown_file", "obsidian_vault"], "description": "Filter to artifacts from a specific source." },
+                    "tag": { "type": "string", "description": "Optional exact normalized imported note tag filter." },
+                    "path_prefix": { "type": "string", "description": "Optional imported note path prefix filter." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Max results, default 20." },
                     "offset": { "type": "integer", "minimum": 0, "description": "Pagination offset, default 0." }
                 },

@@ -65,6 +65,23 @@
 - For docs-only changes, do not run tests unless the docs changed commands or
   runtime assumptions that should be verified.
 
+## Probes And Experiments
+
+- Use probes and experiments to drive and inspect production behavior, not to
+  create parallel implementations of core logic.
+- Shared extraction, reconciliation, ranking, and routing behavior must live in
+  production modules first. Probes should call those modules rather than
+  reimplementing them.
+- Probe-specific code may add visibility, sampling, reporting, fixtures, or
+  ergonomic entrypoints, but it must not become the only place where important
+  business logic exists.
+- If an experimental rule or policy looks useful, move it into the shared
+  runtime path before relying on probe results from it.
+- Avoid benchmark-driven overfitting. Small regression sets are guardrails for
+  catching breakage, not targets to optimize against in isolation.
+- Prefer one production path with observable knobs over separate "test mode" and
+  "real mode" behaviors that must be kept in sync.
+
 ## Product Pressure That Should Not Distort The Core
 
 The following are real product needs, but they should be built on top of the

@@ -470,6 +470,7 @@ mod tests {
             title: Some("Test conversation".to_string()),
             source_type: SourceType::ChatGptExport,
             enrichment_status: status,
+            note_path: None,
         }
     }
 

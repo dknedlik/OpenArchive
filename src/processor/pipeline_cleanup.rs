@@ -5,13 +5,153 @@ use crate::storage::types::RetrievalIntent;
 use super::*;
 
 pub(crate) fn cleanup_artifact_processor_output(
+    input: &ArtifactProcessorInput,
     mut output: ArtifactProcessorOutput,
 ) -> ArtifactProcessorOutput {
+    let policy = extraction_policy_for(input);
     output.memories = dedupe_memory_outputs(output.memories);
+    output.memories =
+        filter_memory_outputs_for_archetype(output.memories, policy.profile.primary_archetype);
     output.entities = dedupe_entity_outputs(output.entities);
     output.relationships = sanitize_relationship_outputs(output.relationships, &output.entities);
     output.retrieval_intents = dedupe_retrieval_intents(output.retrieval_intents);
+    output.retrieval_intents = filter_retrieval_intents_for_archetype(
+        output.retrieval_intents,
+        policy.profile.primary_archetype,
+    );
+    if output.classifications.len() > policy.classification_limit {
+        output.classifications.truncate(policy.classification_limit);
+    }
+    if output.memories.len() > policy.memory_limit {
+        output.memories.truncate(policy.memory_limit);
+    }
+    if output.entities.len() > policy.entity_limit {
+        output.entities.truncate(policy.entity_limit);
+    }
+    if output.relationships.len() > policy.relationship_limit {
+        output.relationships.truncate(policy.relationship_limit);
+    }
+    if output.retrieval_intents.len() > policy.retrieval_limit {
+        output.retrieval_intents.truncate(policy.retrieval_limit);
+    }
     output
+}
+
+fn filter_memory_outputs_for_archetype(
+    memories: Vec<MemoryOutput>,
+    archetype: ArtifactArchetype,
+) -> Vec<MemoryOutput> {
+    memories
+        .into_iter()
+        .filter(|memory| should_keep_memory_output(memory, archetype))
+        .collect()
+}
+
+fn should_keep_memory_output(memory: &MemoryOutput, archetype: ArtifactArchetype) -> bool {
+    if !matches!(
+        archetype,
+        ArtifactArchetype::ProceduralNote
+            | ArtifactArchetype::ReferenceNote
+            | ArtifactArchetype::DefinitionNote
+            | ArtifactArchetype::WorkingNote
+            | ArtifactArchetype::DashboardTemplate
+            | ArtifactArchetype::JournalLog
+    ) {
+        return true;
+    }
+
+    let normalized = normalize_merge_text(&format!(
+        "{} {}",
+        memory.title.as_deref().unwrap_or_default(),
+        memory.body_text
+    ));
+    if looks_like_low_value_document_memory(&normalized) {
+        return false;
+    }
+    if archetype == ArtifactArchetype::DashboardTemplate
+        && looks_like_low_value_dashboard_navigation_memory(&normalized)
+    {
+        return false;
+    }
+    true
+}
+
+fn filter_retrieval_intents_for_archetype(
+    intents: Vec<RetrievalIntent>,
+    archetype: ArtifactArchetype,
+) -> Vec<RetrievalIntent> {
+    if !matches!(
+        archetype,
+        ArtifactArchetype::ProceduralNote
+            | ArtifactArchetype::ReferenceNote
+            | ArtifactArchetype::DefinitionNote
+            | ArtifactArchetype::DashboardTemplate
+    ) {
+        return intents;
+    }
+
+    intents
+        .into_iter()
+        .filter(|intent| {
+            let normalized = normalize_merge_text(&format!("{} {}", intent.question, intent.query_text));
+            !looks_like_low_value_document_memory(&normalized)
+        })
+        .collect()
+}
+
+fn looks_like_low_value_document_memory(normalized: &str) -> bool {
+    const LOW_VALUE_PATTERNS: &[&str] = &[
+        "note structure",
+        "section structure",
+        "document type",
+        "note title",
+        "note metadata",
+        "navigation link",
+        "dashboard link",
+        "journal dashboard link",
+        "linked to journal dashboard",
+        "linked to dashboard",
+        "link to journal dashboard",
+        "link to dashboard",
+        "creation and modification date",
+        "creation date",
+        "modification date",
+        "created and modified",
+        "note tag",
+        "imported tag",
+        "imported alias",
+        "journal tag",
+        "tagged as",
+        "concept board association",
+        "association with concept board",
+        "file metadata",
+        "placeholder text",
+        "example significant event text",
+    ];
+
+    LOW_VALUE_PATTERNS
+        .iter()
+        .any(|pattern| normalized.contains(pattern))
+}
+
+fn looks_like_low_value_dashboard_navigation_memory(normalized: &str) -> bool {
+    const DASHBOARD_NAVIGATION_PATTERNS: &[&str] = &[
+        "navigation structure",
+        "dashboard section",
+        "display limit",
+        "project navigation",
+        "recent item",
+        "dashboard home",
+        "home dashboard",
+        "index page",
+        "project index",
+        "index note",
+        "latest entry",
+    ];
+
+    DASHBOARD_NAVIGATION_PATTERNS
+        .iter()
+        .any(|pattern| normalized.contains(pattern))
 }
 
 fn dedupe_memory_outputs(memories: Vec<MemoryOutput>) -> Vec<MemoryOutput> {
@@ -373,6 +513,129 @@ pub(crate) fn canonicalize_memory_type(raw: &str, title: &str, body_text: &str) 
         other if other.contains("reference") => "reference".to_string(),
         _ => "personal_fact".to_string(),
     }
+}
+
+pub(crate) fn canonicalize_memory_type_for_input(
+    input: &ArtifactProcessorInput,
+    raw: &str,
+    title: &str,
+    body_text: &str,
+) -> String {
+    let normalized = canonicalize_memory_type(raw, title, body_text);
+    if !raw.trim().is_empty() {
+        return normalized;
+    }
+
+    let policy = extraction_policy_for(input);
+    let archetype = policy.profile.primary_archetype;
+    let combined = normalize_candidate_key_text(&format!("{title} {body_text}"));
+    if memory_looks_personal(&combined)
+        || memory_looks_preference(&combined)
+        || memory_looks_ongoing(&combined)
+        || memory_looks_reference(&combined)
+    {
+        return normalized;
+    }
+    if matches!(
+        archetype,
+        ArtifactArchetype::Conversation | ArtifactArchetype::WorkingNote | ArtifactArchetype::Unknown
+    ) && memory_looks_project(&combined)
+    {
+        return normalized;
+    }
+    if archetype == ArtifactArchetype::DashboardTemplate
+        && policy.profile.facets.contains(&ArtifactFacet::Project)
+        && memory_looks_project(&combined)
+    {
+        return "project_fact".to_string();
+    }
+
+    match archetype {
+        ArtifactArchetype::ProceduralNote
+        | ArtifactArchetype::ReferenceNote
+        | ArtifactArchetype::DefinitionNote
+        | ArtifactArchetype::DashboardTemplate => "reference".to_string(),
+        ArtifactArchetype::WorkingNote => "project_fact".to_string(),
+        ArtifactArchetype::JournalLog => "ongoing_state".to_string(),
+        ArtifactArchetype::Conversation | ArtifactArchetype::Unknown => normalized,
+    }
+}
+
+fn memory_looks_personal(combined: &str) -> bool {
+    combined.contains("user weigh")
+        || combined.contains("body weight")
+        || combined.contains("weight history")
+        || combined.contains("user age")
+        || combined.contains("cholesterol")
+        || combined.contains("ldl")
+        || combined.contains("apob")
+        || combined.contains("lp a")
+        || combined.contains("egfr")
+        || combined.contains("tbi")
+        || combined.contains("concussion")
+        || combined.contains("brain hemorrhage")
+        || combined.contains("hemorrhage")
+        || combined.contains("lung nodule")
+        || combined.contains("smoking history")
+        || combined.contains("pack year")
+        || combined.contains("fracture")
+        || combined.contains("broken back")
+        || combined.contains("broke my back")
+        || combined.contains("injur")
+        || combined.contains("elite cyclist")
+        || combined.contains("cycling history")
+        || combined.contains("racing year")
+        || combined.contains("university of")
+        || combined.contains("lab result")
+}
+
+fn memory_looks_preference(combined: &str) -> bool {
+    combined.contains("prefer")
+        || combined.contains("avoid")
+        || combined.contains("likes ")
+        || combined.contains("dislike")
+        || combined.contains("favorite")
+        || combined.contains("prefers ")
+}
+
+fn memory_looks_ongoing(combined: &str) -> bool {
+    combined.contains("protocol")
+        || combined.contains("current plan")
+        || combined.contains("planned")
+        || combined.contains("schedule")
+        || combined.contains("rotation")
+        || combined.contains("transition")
+        || combined.contains("trial")
+        || combined.contains("current ")
+        || combined.contains("currently ")
+        || combined.contains("taking ")
+        || combined.contains("supply")
+        || combined.contains("dose")
+        || combined.contains("dosing")
+        || combined.contains("arriv")
+        || combined.contains("week")
+        || combined.contains("daily ")
+}
+
+fn memory_looks_project(combined: &str) -> bool {
+    combined.contains("program")
+        || combined.contains("system")
+        || combined.contains("workflow")
+        || combined.contains("architecture")
+        || combined.contains("clean engine")
+        || combined.contains("project")
+        || combined.contains("decision")
+        || combined.contains("should ")
+        || combined.contains("must ")
+}
+
+fn memory_looks_reference(combined: &str) -> bool {
+    combined.contains("reference")
+        || combined.contains("cheatsheet")
+        || combined.contains("cheat sheet")
+        || combined.contains("script")
+        || combined.contains("template")
+        || combined.contains("guide")
 }
 
 pub(crate) fn canonicalize_entity_type(raw: &str) -> String {

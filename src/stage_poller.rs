@@ -10,7 +10,7 @@
 //
 use std::collections::HashMap;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
 
@@ -42,11 +42,27 @@ use crate::storage::{
 /// Returned from `StageBehavior::submit` and `process_completed` when no
 /// jobs could be submitted (all failed individually during preparation).
 #[derive(Debug)]
-pub struct StageError;
+pub enum StageError {
+    NoJobsSubmitted,
+    Backoff {
+        retry_after_seconds: i64,
+        reason: String,
+    },
+}
 
 impl std::fmt::Display for StageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("stage error: no jobs could be submitted")
+        match self {
+            StageError::NoJobsSubmitted => f.write_str("stage error: no jobs could be submitted"),
+            StageError::Backoff {
+                retry_after_seconds,
+                reason,
+            } => write!(
+                f,
+                "stage error: provider backoff requested for {}s: {}",
+                retry_after_seconds, reason
+            ),
+        }
     }
 }
 
@@ -221,6 +237,8 @@ pub fn stage_poller_loop(
     );
 
     let mut in_flight: HashMap<String, InFlightBatch> = HashMap::new();
+    let mut stage_backoff_until: Option<Instant> = None;
+    let mut consecutive_rate_limits: u32 = 0;
     if let Err(err) = job_store.reconcile_stale_running_jobs(stage.stage_name()) {
         error!(
             "[{}] failed to reconcile stale running jobs at startup: {}",
@@ -294,54 +312,81 @@ pub fn stage_poller_loop(
             );
         }
 
+        let stage_backoff_active = stage_backoff_until
+            .map(|until| until > Instant::now())
+            .unwrap_or(false);
+        if stage_backoff_active {
+            debug!(
+                "[{}] stage backoff active; skipping provider work this cycle",
+                stage.stage_name()
+            );
+        }
+
         // -----------------------------------------------------------------
         // Step 1: Poll all in-flight batches
         // -----------------------------------------------------------------
         let mut completed: Vec<(String, Box<dyn std::any::Any>)> = Vec::new();
         let mut failed: Vec<(String, String)> = Vec::new();
 
-        for (batch_id, batch) in in_flight.iter() {
-            debug!(
-                "[{}] polling batch {} (jobs={}, submitted_for_ms={})",
-                stage.stage_name(),
-                batch_id,
-                batch.jobs.len(),
-                batch.handle.submitted_at.elapsed().as_millis()
-            );
+        if !stage_backoff_active {
+            for (batch_id, batch) in in_flight.iter() {
+                debug!(
+                    "[{}] polling batch {} (jobs={}, submitted_for_ms={})",
+                    stage.stage_name(),
+                    batch_id,
+                    batch.jobs.len(),
+                    batch.handle.submitted_at.elapsed().as_millis()
+                );
 
-            match stage.poll(batch) {
-                Ok(BatchPollResult::Succeeded(data)) => {
-                    info!(
-                        "[{}] batch {} completed successfully",
-                        stage.stage_name(),
-                        batch_id
-                    );
-                    completed.push((batch_id.clone(), data));
-                }
-                Ok(BatchPollResult::Failed(msg)) => {
-                    error!(
-                        "[{}] batch {} failed: {}",
-                        stage.stage_name(),
-                        batch_id,
-                        msg
-                    );
-                    failed.push((batch_id.clone(), msg));
-                }
-                Ok(BatchPollResult::Pending) => {
-                    debug!("[{}] batch {} still pending", stage.stage_name(), batch_id);
-                }
-                Err(err) => {
-                    error!(
-                        "[{}] error polling batch {}: {}",
-                        stage.stage_name(),
-                        batch_id,
-                        err
-                    );
-                    // If the poll error itself is retryable, leave the batch
-                    // in-flight for a subsequent poll attempt. Otherwise,
-                    // treat as a terminal failure.
-                    if !err.is_retryable() {
-                        failed.push((batch_id.clone(), format!("{err}")));
+                match stage.poll(batch) {
+                    Ok(BatchPollResult::Succeeded(data)) => {
+                        clear_stage_backoff(&mut stage_backoff_until, &mut consecutive_rate_limits);
+                        info!(
+                            "[{}] batch {} completed successfully",
+                            stage.stage_name(),
+                            batch_id
+                        );
+                        completed.push((batch_id.clone(), data));
+                    }
+                    Ok(BatchPollResult::Failed(msg)) => {
+                        clear_stage_backoff(&mut stage_backoff_until, &mut consecutive_rate_limits);
+                        error!(
+                            "[{}] batch {} failed: {}",
+                            stage.stage_name(),
+                            batch_id,
+                            msg
+                        );
+                        failed.push((batch_id.clone(), msg));
+                    }
+                    Ok(BatchPollResult::Pending) => {
+                        clear_stage_backoff(&mut stage_backoff_until, &mut consecutive_rate_limits);
+                        debug!("[{}] batch {} still pending", stage.stage_name(), batch_id);
+                    }
+                    Err(err) => {
+                        error!(
+                            "[{}] error polling batch {}: {}",
+                            stage.stage_name(),
+                            batch_id,
+                            err
+                        );
+                        if let Some(retry_after_seconds) =
+                            err.recommended_stage_backoff_seconds(consecutive_rate_limits)
+                        {
+                            apply_stage_backoff(
+                                stage.stage_name(),
+                                &mut stage_backoff_until,
+                                &mut consecutive_rate_limits,
+                                retry_after_seconds,
+                                &format!("polling batch {}: {}", batch_id, err),
+                            );
+                            break;
+                        }
+                        // If the poll error itself is retryable, leave the batch
+                        // in-flight for a subsequent poll attempt. Otherwise,
+                        // treat as a terminal failure.
+                        if !err.is_retryable() {
+                            failed.push((batch_id.clone(), format!("{err}")));
+                        }
                     }
                 }
             }
@@ -430,7 +475,33 @@ pub fn stage_poller_loop(
                         batch_id
                     );
                 }
-                Err(_) => {
+                Err(StageError::Backoff {
+                    retry_after_seconds,
+                    reason,
+                }) => {
+                    if let Err(err) = job_store.complete_batch(&batch_id) {
+                        error!(
+                            "[{}] failed to close completed batch record {} after per-job errors: {}",
+                            stage.stage_name(),
+                            batch_id,
+                            err
+                        );
+                    }
+                    apply_stage_backoff(
+                        stage.stage_name(),
+                        &mut stage_backoff_until,
+                        &mut consecutive_rate_limits,
+                        retry_after_seconds,
+                        &reason,
+                    );
+                    // Errors already handled inside process_completed per-job.
+                    warn!(
+                        "[{}] batch {} processing encountered provider backoff (handled per-job)",
+                        stage.stage_name(),
+                        batch_id
+                    );
+                }
+                Err(StageError::NoJobsSubmitted) => {
                     if let Err(err) = job_store.complete_batch(&batch_id) {
                         error!(
                             "[{}] failed to close completed batch record {} after per-job errors: {}",
@@ -470,7 +541,11 @@ pub fn stage_poller_loop(
         // -----------------------------------------------------------------
         // Step 3: Claim new jobs until this stage reaches in-flight capacity.
         // -----------------------------------------------------------------
-        while in_flight.len() < stage.max_concurrent() {
+        while stage_backoff_until
+            .map(|until| until <= Instant::now())
+            .unwrap_or(true)
+            && in_flight.len() < stage.max_concurrent()
+        {
             match job_store.claim_jobs_by_type(
                 &worker_id,
                 stage.job_type(),
@@ -492,6 +567,10 @@ pub fn stage_poller_loop(
                         &worker_id,
                     ) {
                         Ok(batch) => {
+                            clear_stage_backoff(
+                                &mut stage_backoff_until,
+                                &mut consecutive_rate_limits,
+                            );
                             let id = batch.handle.batch_id.clone();
                             let context_json = match stage.serialize_context(&batch) {
                                 Ok(context) => context,
@@ -540,7 +619,20 @@ pub fn stage_poller_loop(
                             );
                             in_flight.insert(id, batch);
                         }
-                        Err(_) => {
+                        Err(StageError::Backoff {
+                            retry_after_seconds,
+                            reason,
+                        }) => {
+                            apply_stage_backoff(
+                                stage.stage_name(),
+                                &mut stage_backoff_until,
+                                &mut consecutive_rate_limits,
+                                retry_after_seconds,
+                                &reason,
+                            );
+                            break;
+                        }
+                        Err(StageError::NoJobsSubmitted) => {
                             // All individual jobs were failed in submit().
                             warn!(
                                 "[{}] all claimed jobs failed during submit preparation",
@@ -621,6 +713,7 @@ impl ExtractStage {
                 artifact_class: loaded.artifact.artifact_class,
                 source_type,
                 title: loaded.artifact.title.clone(),
+                imported_note_metadata: payload.imported_note_metadata.clone(),
                 participants: loaded.participants,
                 segments: loaded.segments,
             },
@@ -724,7 +817,7 @@ impl StageBehavior for ExtractStage {
         }
 
         if valid_jobs.is_empty() {
-            return Err(StageError);
+            return Err(StageError::NoJobsSubmitted);
         }
 
         let flat_inputs: Vec<_> = groups
@@ -755,7 +848,14 @@ impl StageBehavior for ExtractStage {
                         poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
                     }
                 }
-                Err(StageError)
+                if err.should_reschedule_without_attempt() {
+                    Err(StageError::Backoff {
+                        retry_after_seconds: err.recommended_retry_after_seconds(),
+                        reason: format!("extract submit throttled: {err}"),
+                    })
+                } else {
+                    Err(StageError::NoJobsSubmitted)
+                }
             }
         }
     }
@@ -777,7 +877,7 @@ impl StageBehavior for ExtractStage {
             InFlightContext::Extract { groups } => groups,
             _ => {
                 error!("[extract] process_completed called with wrong context variant");
-                return Err(StageError);
+                return Err(StageError::NoJobsSubmitted);
             }
         };
 
@@ -956,7 +1056,14 @@ impl StageBehavior for ExtractStage {
                             poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
                         }
                     }
-                    Err(StageError)
+                    if err.should_reschedule_without_attempt() {
+                        Err(StageError::Backoff {
+                            retry_after_seconds: err.recommended_retry_after_seconds(),
+                            reason: format!("extract retry submit throttled: {err}"),
+                        })
+                    } else {
+                        Err(StageError::NoJobsSubmitted)
+                    }
                 }
             }
         }
@@ -991,7 +1098,7 @@ impl StageBehavior for ExtractStage {
                         "[extract] failed to deserialize extract recovery context for {}: {}",
                         persisted.provider_batch_id, err
                     );
-                    return Err(StageError);
+                    return Err(StageError::NoJobsSubmitted);
                 }
             }
         } else {
@@ -1001,7 +1108,7 @@ impl StageBehavior for ExtractStage {
                     Ok(prepared) => prepared,
                     Err(message) => {
                         poller_fail_job_message(job_store, worker_id, &job.job_id, message);
-                        return Err(StageError);
+                        return Err(StageError::NoJobsSubmitted);
                     }
                 };
                 let chunk_inputs =
@@ -1016,7 +1123,7 @@ impl StageBehavior for ExtractStage {
                             job.artifact_id
                         ),
                     );
-                    return Err(StageError);
+                    return Err(StageError::NoJobsSubmitted);
                 }
                 groups.push(ExtractPreparedJob {
                     parent_input,
@@ -1246,7 +1353,7 @@ impl StageBehavior for ReconcileStage {
         }
 
         if valid_jobs.is_empty() {
-            return Err(StageError);
+            return Err(StageError::NoJobsSubmitted);
         }
 
         match self.submitter.prepare_and_submit(&inputs) {
@@ -1266,7 +1373,14 @@ impl StageBehavior for ReconcileStage {
                 for job in &valid_jobs {
                     poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
                 }
-                Err(StageError)
+                if err.should_reschedule_without_attempt() {
+                    Err(StageError::Backoff {
+                        retry_after_seconds: err.recommended_retry_after_seconds(),
+                        reason: format!("reconcile submit throttled: {err}"),
+                    })
+                } else {
+                    Err(StageError::NoJobsSubmitted)
+                }
             }
         }
     }
@@ -1301,7 +1415,7 @@ impl StageBehavior for ReconcileStage {
                 ),
                 _ => {
                     error!("[reconcile] process_completed called with wrong context variant");
-                    return Err(StageError);
+                    return Err(StageError::NoJobsSubmitted);
                 }
             };
 
@@ -1405,7 +1519,7 @@ impl StageBehavior for ReconcileStage {
                             worker_id,
                             &job.job_id,
                             &format!("Processor execution failed: {err}"),
-                            RETRYABLE_INFERENCE_BACKOFF_SECONDS,
+                            err.recommended_retry_after_seconds(),
                         );
                     } else {
                         poller_handle_processor_error(job_store, worker_id, &job.job_id, &err);
@@ -1449,7 +1563,7 @@ impl StageBehavior for ReconcileStage {
                         "Failed to parse reconcile payload JSON during recovery",
                         err,
                     );
-                    return Err(StageError);
+                    return Err(StageError::NoJobsSubmitted);
                 }
             };
             let loaded = match read_store.load_artifact_for_enrichment(&job.artifact_id) {
@@ -1464,7 +1578,7 @@ impl StageBehavior for ReconcileStage {
                             job.artifact_id
                         ),
                     );
-                    return Err(StageError);
+                    return Err(StageError::NoJobsSubmitted);
                 }
                 Err(err) => {
                     poller_fail_job(
@@ -1474,7 +1588,7 @@ impl StageBehavior for ReconcileStage {
                         "Failed to load artifact for reconciliation recovery",
                         err,
                     );
-                    return Err(StageError);
+                    return Err(StageError::NoJobsSubmitted);
                 }
             };
             let extraction_result =
@@ -1490,7 +1604,7 @@ impl StageBehavior for ReconcileStage {
                                 payload.extraction_result_id
                             ),
                         );
-                        return Err(StageError);
+                        return Err(StageError::NoJobsSubmitted);
                     }
                     Err(err) => {
                         poller_fail_job(
@@ -1500,7 +1614,7 @@ impl StageBehavior for ReconcileStage {
                             "Failed to load extraction result for reconciliation recovery",
                             err,
                         );
-                        return Err(StageError);
+                        return Err(StageError::NoJobsSubmitted);
                     }
                 };
             let retrieval_result_set =
@@ -1516,7 +1630,7 @@ impl StageBehavior for ReconcileStage {
                                 payload.retrieval_result_set_id
                             ),
                         );
-                        return Err(StageError);
+                        return Err(StageError::NoJobsSubmitted);
                     }
                     Err(err) => {
                         poller_fail_job(
@@ -1526,7 +1640,7 @@ impl StageBehavior for ReconcileStage {
                             "Failed to load retrieval result set for reconciliation recovery",
                             err,
                         );
-                        return Err(StageError);
+                        return Err(StageError::NoJobsSubmitted);
                     }
                 };
             let input = match worker_build_reconciliation_input(
@@ -1544,7 +1658,7 @@ impl StageBehavior for ReconcileStage {
                         "Failed to build reconciliation input during recovery",
                         err,
                     );
-                    return Err(StageError);
+                    return Err(StageError::NoJobsSubmitted);
                 }
             };
             inputs.push(input);
@@ -1571,6 +1685,33 @@ impl StageBehavior for ReconcileStage {
             },
         })
     }
+}
+
+fn clear_stage_backoff(
+    stage_backoff_until: &mut Option<Instant>,
+    consecutive_rate_limits: &mut u32,
+) {
+    *stage_backoff_until = None;
+    *consecutive_rate_limits = 0;
+}
+
+fn apply_stage_backoff(
+    stage_name: &str,
+    stage_backoff_until: &mut Option<Instant>,
+    consecutive_rate_limits: &mut u32,
+    retry_after_seconds: i64,
+    reason: &str,
+) {
+    let retry_after_seconds = retry_after_seconds.max(1);
+    let until = Instant::now()
+        .checked_add(Duration::from_secs(retry_after_seconds as u64))
+        .unwrap_or_else(Instant::now);
+    *stage_backoff_until = Some(until);
+    *consecutive_rate_limits = consecutive_rate_limits.saturating_add(1);
+    warn!(
+        "[{}] entering provider backoff for {}s after {}",
+        stage_name, retry_after_seconds, reason
+    );
 }
 
 fn poller_fail_job(
@@ -1603,6 +1744,18 @@ fn poller_handle_processor_error(
     job_id: &str,
     err: &ProcessorError,
 ) {
+    if err.should_reschedule_without_attempt() {
+        let message = format!("Processor execution rate-limited: {err}");
+        poller_reschedule_without_attempt(
+            job_store,
+            worker_id,
+            job_id,
+            &message,
+            err.recommended_retry_after_seconds(),
+        );
+        return;
+    }
+
     if err.is_retryable() {
         let message = format!("Processor execution failed: {err}");
         poller_mark_retryable(
@@ -1610,7 +1763,7 @@ fn poller_handle_processor_error(
             worker_id,
             job_id,
             &message,
-            RETRYABLE_INFERENCE_BACKOFF_SECONDS,
+            err.recommended_retry_after_seconds(),
         );
         return;
     }
@@ -1750,4 +1903,363 @@ fn complete_reconcile_without_candidates(
         return Err(());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::StorageResult;
+    use crate::storage::types::{
+        ArtifactListFilters, ArtifactListItem, TimelineEntry, TimelineFilters,
+    };
+    use crate::storage::{DerivationWriteResult, WriteDerivationAttempt};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    struct BackoffSubmitStage {
+        submit_calls: AtomicUsize,
+    }
+
+    impl BackoffSubmitStage {
+        fn new() -> Self {
+            Self {
+                submit_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl StageBehavior for BackoffSubmitStage {
+        fn job_type(&self) -> JobType {
+            JobType::ArtifactReconcile
+        }
+
+        fn enrichment_tier(&self) -> EnrichmentTier {
+            EnrichmentTier::Standard
+        }
+
+        fn stage_name(&self) -> &'static str {
+            "test_backoff"
+        }
+
+        fn batch_size(&self) -> usize {
+            1
+        }
+
+        fn max_concurrent(&self) -> usize {
+            3
+        }
+
+        fn submit(
+            &self,
+            _jobs: Vec<ClaimedJob>,
+            _read_store: &dyn ArtifactReadStore,
+            _state_store: &dyn EnrichmentStateStore,
+            _derived_store: &dyn DerivedMetadataWriteStore,
+            _job_store: &dyn EnrichmentJobLifecycleStore,
+            _worker_id: &str,
+        ) -> Result<InFlightBatch, StageError> {
+            self.submit_calls.fetch_add(1, Ordering::SeqCst);
+            Err(StageError::Backoff {
+                retry_after_seconds: 300,
+                reason: "test throttle".to_string(),
+            })
+        }
+
+        fn poll(&self, _batch: &InFlightBatch) -> Result<BatchPollResult, ProcessorError> {
+            Ok(BatchPollResult::Pending)
+        }
+
+        fn process_completed(
+            &self,
+            _batch: InFlightBatch,
+            _data: Box<dyn std::any::Any>,
+            _job_store: &dyn EnrichmentJobLifecycleStore,
+            _state_store: &dyn EnrichmentStateStore,
+            _derived_store: &dyn DerivedMetadataWriteStore,
+            _worker_id: &str,
+        ) -> Result<Option<InFlightBatch>, StageError> {
+            Ok(None)
+        }
+
+        fn phase_name(&self, _batch: &InFlightBatch) -> &'static str {
+            "test_backoff"
+        }
+
+        fn serialize_context(
+            &self,
+            _batch: &InFlightBatch,
+        ) -> Result<Option<String>, ProcessorError> {
+            Ok(None)
+        }
+
+        fn recover_batch(
+            &self,
+            _persisted: PersistedEnrichmentBatch,
+            _read_store: &dyn ArtifactReadStore,
+            _state_store: &dyn EnrichmentStateStore,
+            _job_store: &dyn EnrichmentJobLifecycleStore,
+            _worker_id: &str,
+        ) -> Result<InFlightBatch, StageError> {
+            Err(StageError::NoJobsSubmitted)
+        }
+    }
+
+    struct BackoffAwareJobStore {
+        queued_jobs: Mutex<Vec<ClaimedJob>>,
+        claim_calls: AtomicUsize,
+    }
+
+    impl BackoffAwareJobStore {
+        fn with_jobs(count: usize) -> Self {
+            let queued_jobs = (0..count)
+                .map(|index| ClaimedJob {
+                    job_id: format!("job-{index}"),
+                    artifact_id: format!("artifact-{index}"),
+                    job_type: JobType::ArtifactReconcile,
+                    enrichment_tier: EnrichmentTier::Standard,
+                    spawned_by_job_id: None,
+                    attempt_count: 1,
+                    max_attempts: 3,
+                    required_capabilities: Vec::new(),
+                    payload_json: "{}".to_string(),
+                })
+                .collect();
+            Self {
+                queued_jobs: Mutex::new(queued_jobs),
+                claim_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl EnrichmentJobLifecycleStore for BackoffAwareJobStore {
+        fn enqueue_jobs(&self, _jobs: &[NewEnrichmentJob]) -> StorageResult<()> {
+            Ok(())
+        }
+
+        fn claim_next_job(&self, _worker_id: &str) -> StorageResult<Option<ClaimedJob>> {
+            Ok(None)
+        }
+
+        fn claim_matching_jobs(
+            &self,
+            _worker_id: &str,
+            _template_job: &ClaimedJob,
+            _limit: usize,
+        ) -> StorageResult<Vec<ClaimedJob>> {
+            Ok(Vec::new())
+        }
+
+        fn claim_jobs_by_type(
+            &self,
+            _worker_id: &str,
+            _job_type: JobType,
+            _enrichment_tier: Option<EnrichmentTier>,
+            limit: usize,
+        ) -> StorageResult<Vec<ClaimedJob>> {
+            self.claim_calls.fetch_add(1, Ordering::SeqCst);
+            let mut queued_jobs = self.queued_jobs.lock().unwrap();
+            let count = limit.min(queued_jobs.len());
+            Ok(queued_jobs.drain(..count).collect())
+        }
+
+        fn complete_job(&self, _worker_id: &str, _job_id: &str) -> StorageResult<()> {
+            Ok(())
+        }
+
+        fn fail_job(
+            &self,
+            _worker_id: &str,
+            _job_id: &str,
+            _error_message: &str,
+        ) -> StorageResult<()> {
+            Ok(())
+        }
+
+        fn mark_job_retryable(
+            &self,
+            _worker_id: &str,
+            _job_id: &str,
+            _error_message: &str,
+            _retry_after_seconds: i64,
+        ) -> StorageResult<crate::storage::RetryOutcome> {
+            Ok(crate::storage::RetryOutcome::Retried)
+        }
+
+        fn reschedule_running_job(
+            &self,
+            _worker_id: &str,
+            _job_id: &str,
+            _message: &str,
+            _retry_after_seconds: i64,
+        ) -> StorageResult<()> {
+            Ok(())
+        }
+
+        fn record_batch_submission(
+            &self,
+            _batch: &NewEnrichmentBatch,
+            _jobs: &[ClaimedJob],
+        ) -> StorageResult<()> {
+            Ok(())
+        }
+
+        fn transition_batch_submission(
+            &self,
+            _completed_provider_batch_id: &str,
+            _next_batch: &NewEnrichmentBatch,
+            _jobs: &[ClaimedJob],
+        ) -> StorageResult<()> {
+            Ok(())
+        }
+
+        fn complete_batch(&self, _provider_batch_id: &str) -> StorageResult<()> {
+            Ok(())
+        }
+
+        fn fail_batch_record(
+            &self,
+            _provider_batch_id: &str,
+            _error_message: &str,
+        ) -> StorageResult<()> {
+            Ok(())
+        }
+
+        fn load_running_batches(
+            &self,
+            _stage_name: &str,
+        ) -> StorageResult<Vec<PersistedEnrichmentBatch>> {
+            Ok(Vec::new())
+        }
+
+        fn reconcile_stale_running_batches(&self, _stage_name: &str) -> StorageResult<usize> {
+            Ok(0)
+        }
+
+        fn reconcile_stale_running_jobs(&self, _stage_name: &str) -> StorageResult<usize> {
+            Ok(0)
+        }
+    }
+
+    struct NullArtifactReadStore;
+
+    impl ArtifactReadStore for NullArtifactReadStore {
+        fn list_artifacts(&self) -> StorageResult<Vec<ArtifactListItem>> {
+            Ok(Vec::new())
+        }
+
+        fn list_artifacts_filtered(
+            &self,
+            _filters: &ArtifactListFilters,
+            _limit: usize,
+            _offset: usize,
+        ) -> StorageResult<Vec<ArtifactListItem>> {
+            Ok(Vec::new())
+        }
+
+        fn get_timeline(
+            &self,
+            _filters: &TimelineFilters,
+            _limit: usize,
+            _offset: usize,
+        ) -> StorageResult<Vec<TimelineEntry>> {
+            Ok(Vec::new())
+        }
+
+        fn load_artifact_for_enrichment(
+            &self,
+            _artifact_id: &str,
+        ) -> StorageResult<Option<LoadedArtifactForEnrichment>> {
+            Ok(None)
+        }
+    }
+
+    struct NullEnrichmentStateStore;
+
+    impl EnrichmentStateStore for NullEnrichmentStateStore {
+        fn save_extraction_result(&self, _result: &ArtifactExtractionResult) -> StorageResult<()> {
+            Ok(())
+        }
+
+        fn load_extraction_result(
+            &self,
+            _extraction_result_id: &str,
+        ) -> StorageResult<Option<ArtifactExtractionResult>> {
+            Ok(None)
+        }
+
+        fn save_retrieval_result_set(&self, _result_set: &RetrievalResultSet) -> StorageResult<()> {
+            Ok(())
+        }
+
+        fn load_retrieval_result_set(
+            &self,
+            _retrieval_result_set_id: &str,
+        ) -> StorageResult<Option<RetrievalResultSet>> {
+            Ok(None)
+        }
+
+        fn save_reconciliation_decisions(
+            &self,
+            _decisions: &[ReconciliationDecision],
+        ) -> StorageResult<()> {
+            Ok(())
+        }
+
+        fn load_reconciliation_decisions(
+            &self,
+            _extraction_result_id: &str,
+        ) -> StorageResult<Vec<ReconciliationDecision>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct NullDerivedMetadataWriteStore;
+
+    impl DerivedMetadataWriteStore for NullDerivedMetadataWriteStore {
+        fn write_derivation_attempt(
+            &self,
+            _attempt: WriteDerivationAttempt,
+        ) -> StorageResult<DerivationWriteResult> {
+            Ok(DerivationWriteResult {
+                derivation_run_id: "run-1".to_string(),
+                derived_object_ids: Vec::new(),
+                evidence_links_written: 0,
+            })
+        }
+    }
+
+    #[test]
+    fn throttled_submit_stops_claim_loop_for_current_cycle() {
+        let stage = Arc::new(BackoffSubmitStage::new());
+        let job_store = Arc::new(BackoffAwareJobStore::with_jobs(3));
+        let read_store = NullArtifactReadStore;
+        let state_store = NullEnrichmentStateStore;
+        let derived_store = NullDerivedMetadataWriteStore;
+        let shutdown = ShutdownToken::new();
+        let shutdown_for_thread = shutdown.clone();
+        let stage_for_thread = Arc::clone(&stage);
+        let job_store_for_thread = Arc::clone(&job_store);
+
+        let handle = thread::spawn(move || {
+            stage_poller_loop(
+                stage_for_thread.as_ref(),
+                "test-worker".to_string(),
+                StagePollerContext {
+                    job_store: job_store_for_thread.as_ref(),
+                    read_store: &read_store,
+                    state_store: &state_store,
+                    derived_store: &derived_store,
+                },
+                Duration::from_millis(5),
+                shutdown_for_thread,
+            );
+        });
+
+        thread::sleep(Duration::from_millis(30));
+        shutdown.signal();
+        handle.join().expect("stage poller should exit cleanly");
+
+        assert_eq!(job_store.claim_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(stage.submit_calls.load(Ordering::SeqCst), 1);
+    }
 }

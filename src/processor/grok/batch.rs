@@ -29,7 +29,10 @@ impl ExtractionBatchSubmitter for GrokExtractionSubmitter {
                 &self.candidate_model,
                 candidate_system_prompt(input),
                 &build_two_phase_candidate_user_prompt(input)?,
-                &candidate_output_schema_with_allowed_refs(&allowed_artifact_evidence_refs(input)),
+                &candidate_output_schema_with_allowed_refs(
+                    input,
+                    &allowed_artifact_evidence_refs(input),
+                ),
                 self.client
                     .max_output_tokens
                     .max(TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS),
@@ -223,6 +226,7 @@ where
                         "Grok batch item {} retryable error: {}",
                         item.batch_request_id, error
                     ),
+                    retry_after_seconds: None,
                 })
             } else {
                 Err(ProcessorError::Message {
@@ -241,6 +245,7 @@ where
                         item.batch_request_id,
                         preview(&item.debug_snapshot())
                     ),
+                    retry_after_seconds: None,
                 })
                 .and_then(|response_value| {
                     Ok(GrokBatchParsedResult {
@@ -342,6 +347,7 @@ pub(super) fn parse_grok_json_response<T: serde::de::DeserializeOwned>(
         return Err(ProcessorError::InferenceHttpStatus {
             status: status.as_u16(),
             body_preview: preview(&response_text),
+            retry_after_seconds: None,
         });
     }
     serde_json::from_str(&response_text).map_err(|source| ProcessorError::ParseInferenceResponse {

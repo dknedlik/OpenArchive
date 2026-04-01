@@ -1,7 +1,7 @@
 use postgres::Client;
 
 use crate::error::{StorageError, StorageResult};
-use crate::storage::postgres::embedding::vector_literal;
+use crate::storage::postgres::{embedding::vector_literal, imported_note};
 use crate::storage::retrieval_read_store::{
     ArchiveSearchCandidate, ArtifactContextDerivedObject, ArtifactContextEvidenceLink,
     ArtifactContextPackMaterial, ArtifactDetailDerivedObject, ArtifactDetailRecord,
@@ -96,6 +96,9 @@ pub fn search_candidates(
 
     let object_type_str: String;
     let source_type_str: String;
+    let tag_str: String;
+    let alias_str: String;
+    let path_prefix_str: String;
 
     // Precompute string values for filter params so they live long enough.
     if let Some(ref ot) = filters.object_type {
@@ -107,6 +110,21 @@ pub fn search_candidates(
         source_type_str = st.as_str().to_string();
     } else {
         source_type_str = String::new();
+    }
+    if let Some(ref tag) = filters.tag {
+        tag_str = tag.to_lowercase();
+    } else {
+        tag_str = String::new();
+    }
+    if let Some(ref alias) = filters.alias {
+        alias_str = alias.to_lowercase();
+    } else {
+        alias_str = String::new();
+    }
+    if let Some(ref path_prefix) = filters.path_prefix {
+        path_prefix_str = path_prefix.to_lowercase();
+    } else {
+        path_prefix_str = String::new();
     }
 
     let mut next_param = 3usize;
@@ -121,6 +139,30 @@ pub fn search_candidates(
     let source_type_param: Option<usize> = if filters.source_type.is_some() {
         let idx = next_param;
         params.push(&source_type_str);
+        next_param += 1;
+        Some(idx)
+    } else {
+        None
+    };
+    let tag_param: Option<usize> = if filters.tag.is_some() {
+        let idx = next_param;
+        params.push(&tag_str);
+        next_param += 1;
+        Some(idx)
+    } else {
+        None
+    };
+    let alias_param: Option<usize> = if filters.alias.is_some() {
+        let idx = next_param;
+        params.push(&alias_str);
+        next_param += 1;
+        Some(idx)
+    } else {
+        None
+    };
+    let path_prefix_param: Option<usize> = if filters.path_prefix.is_some() {
+        let idx = next_param;
+        params.push(&path_prefix_str);
         Some(idx)
     } else {
         None
@@ -132,12 +174,28 @@ pub fn search_candidates(
     let mut union_branches: Vec<String> = Vec::new();
 
     if include_non_derived {
+        let mut artifact_filter = String::new();
+        if let Some(idx) = source_type_param {
+            artifact_filter.push_str(&format!(" AND a.source_type = ${idx}"));
+        }
+        if let Some(idx) = tag_param {
+            artifact_filter.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM oa_artifact_note_tag t WHERE t.artifact_id = a.artifact_id AND t.normalized_tag = ${idx})"
+            ));
+        }
+        if let Some(idx) = alias_param {
+            artifact_filter.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM oa_artifact_note_alias na WHERE na.artifact_id = a.artifact_id AND na.normalized_alias = ${idx})"
+            ));
+        }
+        if let Some(idx) = path_prefix_param {
+            artifact_filter.push_str(&format!(
+                " AND lower(coalesce(a.source_conversation_key, '')) LIKE (${} || '%')",
+                idx
+            ));
+        }
+
         // Artifact title branch
-        let source_join = if let Some(idx) = source_type_param {
-            format!(" AND a.source_type = ${idx}")
-        } else {
-            String::new()
-        };
         union_branches.push(format!(
             "SELECT a.artifact_id AS artifact_id,
                     a.artifact_id AS match_record_id,
@@ -146,7 +204,60 @@ pub fn search_candidates(
                     COALESCE(a.title, '') AS snippet,
                     300 + LEAST(99, GREATEST(0, FLOOR(ts_rank_cd(a.title_tsv, {tsquery}) * 100)::int)) AS score_hint
                FROM oa_artifact a
-              WHERE a.title_tsv @@ {tsquery}{source_join}"
+              WHERE a.title_tsv @@ {tsquery}{artifact_filter}"
+        ));
+        union_branches.push(format!(
+            "SELECT a.artifact_id AS artifact_id,
+                    t.artifact_note_tag_id AS match_record_id,
+                    'imported_note_tag' AS match_kind,
+                    NULL::text AS derived_object_type,
+                    t.raw_tag AS snippet,
+                    380 AS score_hint
+               FROM oa_artifact_note_tag t
+               JOIN oa_artifact a ON a.artifact_id = t.artifact_id
+              WHERE t.normalized_tag = lower($1){artifact_filter}"
+        ));
+        union_branches.push(format!(
+            "SELECT a.artifact_id AS artifact_id,
+                    na.artifact_note_alias_id AS match_record_id,
+                    'imported_note_alias' AS match_kind,
+                    NULL::text AS derived_object_type,
+                    na.alias_text AS snippet,
+                    370 AS score_hint
+               FROM oa_artifact_note_alias na
+               JOIN oa_artifact a ON a.artifact_id = na.artifact_id
+              WHERE na.normalized_alias = lower($1){artifact_filter}"
+        ));
+        union_branches.push(format!(
+            "SELECT a.artifact_id AS artifact_id,
+                    a.artifact_id AS match_record_id,
+                    'imported_note_path' AS match_kind,
+                    NULL::text AS derived_object_type,
+                    COALESCE(a.source_conversation_key, '') AS snippet,
+                    360 AS score_hint
+               FROM oa_artifact a
+              WHERE lower(coalesce(a.source_conversation_key, '')) LIKE ('%' || lower($1) || '%'){artifact_filter}"
+        ));
+        union_branches.push(format!(
+            "SELECT a.artifact_id AS artifact_id,
+                    nl.artifact_note_link_id AS match_record_id,
+                    'imported_external_link' AS match_kind,
+                    NULL::text AS derived_object_type,
+                    COALESCE(nl.display_text, nl.external_url, nl.raw_target, '') AS snippet,
+                    CASE
+                        WHEN lower(coalesce(nl.external_url, '')) = lower($1) THEN 395
+                        WHEN lower(coalesce(nl.external_url, '')) LIKE ('%' || lower($1) || '%') THEN 390
+                        WHEN lower(coalesce(nl.display_text, '')) LIKE ('%' || lower($1) || '%') THEN 380
+                        ELSE 370
+                    END AS score_hint
+               FROM oa_artifact_note_link nl
+               JOIN oa_artifact a ON a.artifact_id = nl.artifact_id
+              WHERE nl.resolution_status = 'external'
+                AND (
+                    lower(coalesce(nl.external_url, '')) LIKE ('%' || lower($1) || '%')
+                    OR lower(coalesce(nl.display_text, '')) LIKE ('%' || lower($1) || '%')
+                    OR lower(coalesce(nl.raw_target, '')) LIKE ('%' || lower($1) || '%')
+                ){artifact_filter}"
         ));
     }
 
@@ -159,6 +270,22 @@ pub fn search_candidates(
         if let Some(idx) = source_type_param {
             derived_extra.push_str(&format!(
                 " AND d.artifact_id IN (SELECT a2.artifact_id FROM oa_artifact a2 WHERE a2.source_type = ${idx})"
+            ));
+        }
+        if let Some(idx) = tag_param {
+            derived_extra.push_str(&format!(
+                " AND d.artifact_id IN (SELECT a2.artifact_id FROM oa_artifact_note_tag a2 WHERE a2.normalized_tag = ${idx})"
+            ));
+        }
+        if let Some(idx) = alias_param {
+            derived_extra.push_str(&format!(
+                " AND d.artifact_id IN (SELECT a3.artifact_id FROM oa_artifact_note_alias a3 WHERE a3.normalized_alias = ${idx})"
+            ));
+        }
+        if let Some(idx) = path_prefix_param {
+            derived_extra.push_str(&format!(
+                " AND d.artifact_id IN (SELECT a4.artifact_id FROM oa_artifact a4 WHERE lower(coalesce(a4.source_conversation_key, '')) LIKE (${} || '%'))",
+                idx
             ));
         }
         union_branches.push(format!(
@@ -176,13 +303,28 @@ pub fn search_candidates(
 
     if include_non_derived {
         // Segment excerpt branch
-        let source_join = if let Some(idx) = source_type_param {
-            format!(
+        let mut source_join = String::new();
+        if let Some(idx) = source_type_param {
+            source_join.push_str(&format!(
                 " AND s.artifact_id IN (SELECT a3.artifact_id FROM oa_artifact a3 WHERE a3.source_type = ${idx})"
-            )
-        } else {
-            String::new()
-        };
+            ));
+        }
+        if let Some(idx) = tag_param {
+            source_join.push_str(&format!(
+                " AND s.artifact_id IN (SELECT a4.artifact_id FROM oa_artifact_note_tag a4 WHERE a4.normalized_tag = ${idx})"
+            ));
+        }
+        if let Some(idx) = alias_param {
+            source_join.push_str(&format!(
+                " AND s.artifact_id IN (SELECT a5.artifact_id FROM oa_artifact_note_alias a5 WHERE a5.normalized_alias = ${idx})"
+            ));
+        }
+        if let Some(idx) = path_prefix_param {
+            source_join.push_str(&format!(
+                " AND s.artifact_id IN (SELECT a6.artifact_id FROM oa_artifact a6 WHERE lower(coalesce(a6.source_conversation_key, '')) LIKE (${} || '%'))",
+                idx
+            ));
+        }
         union_branches.push(format!(
             "SELECT s.artifact_id AS artifact_id,
                     s.segment_id AS match_record_id,
@@ -214,6 +356,10 @@ pub fn search_candidates(
 
         let match_kind = match match_kind_value.as_str() {
             "artifact_title" => SearchCandidateKind::ArtifactTitle,
+            "imported_note_tag" => SearchCandidateKind::ImportedNoteTag,
+            "imported_note_alias" => SearchCandidateKind::ImportedNoteAlias,
+            "imported_note_path" => SearchCandidateKind::ImportedNotePath,
+            "imported_external_link" => SearchCandidateKind::ImportedExternalLink,
             "derived_object" => {
                 let derived_object_type: String = row.get(3);
                 SearchCandidateKind::DerivedObject {
@@ -271,9 +417,7 @@ pub fn retrieve_for_intents(
             "relationship_lookup" => "AND d.derived_object_type = 'relationship'",
             "topic_lookup" => "AND d.derived_object_type IN ('classification', 'summary')",
             "contradiction_check" => "AND d.derived_object_type IN ('memory', 'relationship')",
-            "entity_lookup" => {
-                "AND d.derived_object_type IN ('memory', 'relationship', 'classification', 'summary')"
-            }
+            "entity_lookup" => "AND d.derived_object_type IN ('entity', 'memory', 'relationship', 'classification', 'summary')",
             _ => "",
         };
         let rows = client
@@ -339,8 +483,19 @@ pub fn load_artifact_detail(
     };
 
     Ok(Some(ArtifactDetailView {
-        artifact,
+        imported_note_metadata: imported_note::load_imported_note_metadata(
+            client,
+            connection_string,
+            artifact_id,
+            artifact.note_path.clone(),
+        )?,
+        inbound_note_links: imported_note::load_inbound_note_links(
+            client,
+            connection_string,
+            artifact_id,
+        )?,
         segments: load_artifact_segments(client, connection_string, artifact_id)?,
+        artifact,
         derived_objects: load_artifact_detail_derived_objects(
             client,
             connection_string,
@@ -381,7 +536,7 @@ fn load_artifact_record(
 ) -> StorageResult<Option<ArtifactDetailRecord>> {
     let row = client
         .query_opt(
-            "SELECT artifact_id, title, source_type, enrichment_status
+            "SELECT artifact_id, title, source_type, enrichment_status, source_conversation_key
              FROM oa_artifact
              WHERE artifact_id = $1",
             &[&artifact_id],
@@ -409,6 +564,7 @@ fn load_artifact_record(
                 value: enrichment_status,
             }
         })?,
+        note_path: row.get(4),
     }))
 }
 
@@ -748,7 +904,7 @@ pub fn search_objects_by_embedding(
 
     let mut conditions = vec![
         "d.object_status = 'active'".to_string(),
-        "d.derived_object_type IN ('summary', 'memory', 'relationship')".to_string(),
+        "d.derived_object_type IN ('summary', 'memory', 'relationship', 'entity')".to_string(),
     ];
 
     if filters.object_type.is_some() {
@@ -902,6 +1058,20 @@ pub fn get_related_objects(
                WHEN al.source_object_id = $1 THEN al.target_object_id
                ELSE al.source_object_id END
         WHERE (al.source_object_id = $1 OR al.target_object_id = $1)
+          AND d.object_status = 'active'
+
+        UNION ALL
+
+        SELECT DISTINCT d.derived_object_id, d.artifact_id, d.derived_object_type,
+               d.title, d.body_text,
+               'shared_candidate_key'::text AS relation_kind,
+               NULL::text, NULL::float8, NULL::text
+        FROM oa_derived_object source
+        JOIN oa_derived_object d
+          ON d.candidate_key = source.candidate_key
+         AND d.derived_object_id != source.derived_object_id
+        WHERE source.derived_object_id = $1
+          AND COALESCE(source.candidate_key, '') <> ''
           AND d.object_status = 'active'
 
         UNION ALL

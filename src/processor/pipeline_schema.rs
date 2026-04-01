@@ -7,13 +7,15 @@ pub(crate) fn candidate_output_schema_wrapper(input: &ArtifactProcessorInput) ->
         "type": "json_schema",
         "name": "openarchive_artifact_candidate_extraction",
         "strict": true,
-        "schema": candidate_output_schema_with_allowed_refs(&allowed_artifact_evidence_refs(input))
+        "schema": candidate_output_schema_with_allowed_refs(input, &allowed_artifact_evidence_refs(input))
     })
 }
 
 pub(crate) fn candidate_output_schema_with_allowed_refs(
+    input: &ArtifactProcessorInput,
     allowed_refs: &[String],
 ) -> serde_json::Value {
+    let policy = extraction_policy_for(input);
     let evidence_id_item = if allowed_refs.is_empty() {
         json!({ "type": "string", "minLength": 1 })
     } else {
@@ -48,6 +50,7 @@ pub(crate) fn candidate_output_schema_with_allowed_refs(
             },
             "classification_candidates": {
                 "type": "array",
+                "maxItems": policy.classification_limit,
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
@@ -73,6 +76,7 @@ pub(crate) fn candidate_output_schema_with_allowed_refs(
             },
             "memory_candidates": {
                 "type": "array",
+                "maxItems": policy.memory_limit,
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
@@ -102,6 +106,7 @@ pub(crate) fn candidate_output_schema_with_allowed_refs(
             },
             "entity_candidates": {
                 "type": "array",
+                "maxItems": policy.entity_limit,
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
@@ -120,6 +125,7 @@ pub(crate) fn candidate_output_schema_with_allowed_refs(
             },
             "relationship_candidates": {
                 "type": "array",
+                "maxItems": policy.relationship_limit,
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
@@ -149,6 +155,7 @@ pub(crate) fn candidate_output_schema_with_allowed_refs(
             },
             "retrieval_candidates": {
                 "type": "array",
+                "maxItems": policy.retrieval_limit,
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
@@ -388,7 +395,7 @@ pub(crate) fn reconciliation_output_schema() -> serde_json::Value {
                                 "insufficient_evidence"
                             ]
                         },
-                        "target_kind": { "type": "string", "enum": ["memory", "relationship"] },
+                        "target_kind": { "type": "string", "enum": ["memory", "entity", "relationship"] },
                         "target_key": { "type": "string", "minLength": 1 },
                         "matched_object_id": { "type": "string", "minLength": 1 },
                         "rationale": { "type": "string", "minLength": 1 },

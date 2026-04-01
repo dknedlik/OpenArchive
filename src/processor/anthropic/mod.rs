@@ -201,6 +201,7 @@ impl InferenceClient for AnthropicClient {
             return Err(ProcessorError::InferenceHttpStatus {
                 status: status.as_u16(),
                 body_preview: preview(&response_text),
+                retry_after_seconds: None,
             });
         }
 
@@ -296,6 +297,7 @@ impl AnthropicClient {
             return Err(ProcessorError::InferenceHttpStatus {
                 status: status.as_u16(),
                 body_preview: preview(&response_text),
+                retry_after_seconds: None,
             });
         }
         Ok(response_text)
@@ -313,6 +315,7 @@ fn parse_json_response<T: serde::de::DeserializeOwned>(
         return Err(ProcessorError::InferenceHttpStatus {
             status: status.as_u16(),
             body_preview: preview(&response_text),
+            retry_after_seconds: None,
         });
     }
     serde_json::from_str(&response_text).map_err(|source| ProcessorError::ParseInferenceResponse {

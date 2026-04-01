@@ -8,6 +8,8 @@ use crate::storage::types::{
 };
 use crate::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 
+use super::imported_note;
+
 pub fn find_artifact_by_source_hash(
     conn: &Connection,
     source_type: SourceType,
@@ -115,6 +117,7 @@ pub fn list_artifacts(conn: &Connection) -> StorageResult<Vec<ArtifactListItem>>
         .query(
             "SELECT artifact_id, \
                     title, \
+                    source_conversation_key, \
                     source_type, \
                     TO_CHAR(created_at_source, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9TZH:TZM'), \
                     TO_CHAR(captured_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9TZH:TZM'), \
@@ -136,7 +139,7 @@ pub fn list_artifacts(conn: &Connection) -> StorageResult<Vec<ArtifactListItem>>
             source: Box::new(source),
         })?;
         let enrichment_status: String =
-            row.get(5).map_err(|source| StorageError::ListArtifacts {
+            row.get(6).map_err(|source| StorageError::ListArtifacts {
                 source: Box::new(source),
             })?;
 
@@ -146,13 +149,16 @@ pub fn list_artifacts(conn: &Connection) -> StorageResult<Vec<ArtifactListItem>>
             title: row.get(1).map_err(|source| StorageError::ListArtifacts {
                 source: Box::new(source),
             })?,
-            source_type: row.get(2).map_err(|source| StorageError::ListArtifacts {
+            note_path: row.get(2).map_err(|source| StorageError::ListArtifacts {
                 source: Box::new(source),
             })?,
-            created_at_source: row.get(3).map_err(|source| StorageError::ListArtifacts {
+            source_type: row.get(3).map_err(|source| StorageError::ListArtifacts {
                 source: Box::new(source),
             })?,
-            captured_at: row.get(4).map_err(|source| StorageError::ListArtifacts {
+            created_at_source: row.get(4).map_err(|source| StorageError::ListArtifacts {
+                source: Box::new(source),
+            })?,
+            captured_at: row.get(5).map_err(|source| StorageError::ListArtifacts {
                 source: Box::new(source),
             })?,
             enrichment_status: EnrichmentStatus::parse(&enrichment_status).ok_or_else(|| {
@@ -172,8 +178,8 @@ pub fn load_artifact_for_enrichment(
     artifact_id: &str,
 ) -> StorageResult<Option<LoadedArtifactForEnrichment>> {
     let artifact_row = conn
-        .query_row_as::<(String, String, String, String, Option<String>)>(
-            "SELECT artifact_id, import_id, artifact_class, source_type, title \
+        .query_row_as::<(String, String, String, String, Option<String>, Option<String>)>(
+            "SELECT artifact_id, import_id, artifact_class, source_type, title, source_conversation_key \
              FROM oa_artifact WHERE artifact_id = :1",
             &[&artifact_id],
         )
@@ -185,7 +191,7 @@ pub fn load_artifact_for_enrichment(
             }),
         })?;
 
-    let Some((artifact_id_value, import_id, artifact_class_str, source_type_str, title)) =
+    let Some((artifact_id_value, import_id, artifact_class_str, source_type_str, title, note_path)) =
         artifact_row
     else {
         return Ok(None);
@@ -319,5 +325,10 @@ pub fn load_artifact_for_enrichment(
         artifact,
         participants,
         segments,
+        imported_note_metadata: imported_note::load_imported_note_metadata(
+            conn,
+            artifact_id,
+            note_path,
+        )?,
     }))
 }

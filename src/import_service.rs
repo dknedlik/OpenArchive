@@ -11,9 +11,10 @@ use crate::object_store::{NewObject, ObjectStore, PutObjectResult};
 use crate::parser::{self, document::DocumentFormat, ParsedConversation, ParsedMessage};
 use crate::storage::{
     ArtifactClass, ArtifactExtractPayload, ArtifactStatus, EnrichmentStatus, ImportStatus,
-    ImportWriteStore, JobStatus, JobType, NewArtifact, NewEnrichmentJob, NewImport,
-    NewImportObjectRef, NewParticipant, NewSegment, PayloadFormat, SegmentType, SourceType,
-    WriteArtifactSet, WriteImportSet,
+    ImportWriteStore, ImportedNoteMetadata, ImportedNoteMetadataWriteSet, JobStatus, JobType,
+    NewArtifact, NewEnrichmentJob, NewImport, NewImportObjectRef, NewImportedNoteAlias,
+    NewImportedNoteLink, NewImportedNoteProperty, NewImportedNoteTag, NewParticipant, NewSegment,
+    PayloadFormat, SegmentType, SourceType, WriteArtifactSet, WriteImportSet,
 };
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -190,6 +191,41 @@ where
     )
 }
 
+pub fn import_obsidian_vault_payload<S, O>(
+    store: &S,
+    object_store: &O,
+    payload_bytes: &[u8],
+) -> Result<ImportResponse, OpenArchiveError>
+where
+    S: ImportWriteStore + ?Sized,
+    O: ObjectStore + ?Sized,
+{
+    let spec = source_import_spec(SourceType::ObsidianVault, PayloadFormat::ObsidianVaultZip);
+    let parsed = parser::obsidian::parse_vault_zip(payload_bytes)?;
+    let prepared = build_obsidian_import_set(payload_bytes, spec, parsed, object_store)?;
+    let result = match store.write_import(prepared.write_set) {
+        Ok(result) => result,
+        Err(err) => {
+            cleanup_unreferenced_payload_object(object_store, &prepared.payload_put, &err);
+            return Err(err.into());
+        }
+    };
+
+    Ok(ImportResponse {
+        import_id: result.import_id,
+        import_status: result.import_status.as_str().to_string(),
+        artifacts: result
+            .artifacts
+            .into_iter()
+            .map(|artifact| ImportArtifactStatus {
+                artifact_id: artifact.artifact_id,
+                enrichment_status: artifact.enrichment_status.as_str().to_string(),
+                ingest_result: artifact.ingest_result.as_str().to_string(),
+            })
+            .collect(),
+    })
+}
+
 fn import_document_payload<S, O>(
     store: &S,
     object_store: &O,
@@ -277,6 +313,8 @@ fn build_import_set(
                 payload_object_id,
                 source_filename: None,
                 source_content_hash: payload_sha256,
+                // The persisted field predates document-style imports; for an
+                // Obsidian vault this records the detected note count.
                 conversation_count_detected: artifact_sets.len() as i32,
             },
             artifact_sets,
@@ -327,6 +365,75 @@ fn build_document_import_set(
                 conversation_count_detected: 1,
             },
             artifact_sets: vec![artifact_set],
+        },
+        payload_put,
+    })
+}
+
+fn build_obsidian_import_set(
+    payload_bytes: &[u8],
+    spec: SourceImportSpec,
+    vault: parser::obsidian::ParsedVault,
+    object_store: &(impl ObjectStore + ?Sized),
+) -> Result<PreparedImportSet, OpenArchiveError> {
+    let payload_sha256 = sha256_hex(payload_bytes);
+    let payload_object_id = new_id("payload");
+    let import_id = new_id("import");
+    let payload_put = persist_raw_payload(
+        object_store,
+        &payload_object_id,
+        payload_bytes,
+        &payload_sha256,
+        spec.payload_mime_type,
+    )?;
+    let content_facets_json = serde_json::to_string(spec.content_facets).map_err(|err| {
+        OpenArchiveError::Invariant(format!("failed to serialize content facets: {err}"))
+    })?;
+
+    let planned_notes = vault
+        .notes
+        .into_iter()
+        .map(|note| (new_id("artifact"), note))
+        .collect::<Vec<_>>();
+    let artifact_ids_by_path = planned_notes
+        .iter()
+        .map(|(artifact_id, note)| (note.note_path.clone(), artifact_id.clone()))
+        .collect::<HashMap<_, _>>();
+
+    let artifact_sets = planned_notes
+        .into_iter()
+        .map(|(artifact_id, note)| {
+            build_obsidian_artifact_set(
+                &import_id,
+                &content_facets_json,
+                spec,
+                artifact_id,
+                note,
+                &artifact_ids_by_path,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(PreparedImportSet {
+        write_set: WriteImportSet {
+            payload_object: NewImportObjectRef {
+                object_id: payload_object_id.clone(),
+                payload_format: spec.payload_format,
+                mime_type: spec.payload_mime_type.to_string(),
+                size_bytes: payload_bytes.len() as i64,
+                sha256: payload_sha256.clone(),
+                stored_object: payload_put.stored_object.clone(),
+            },
+            import: NewImport {
+                import_id,
+                source_type: spec.source_type,
+                import_status: ImportStatus::Pending,
+                payload_object_id,
+                source_filename: None,
+                source_content_hash: payload_sha256,
+                conversation_count_detected: artifact_sets.len() as i32,
+            },
+            artifact_sets,
         },
         payload_put,
     })
@@ -437,6 +544,7 @@ fn build_artifact_set(
         },
         participants,
         segments,
+        imported_note_metadata: ImportedNoteMetadataWriteSet::default(),
         job: NewEnrichmentJob {
             job_id: new_id("job"),
             artifact_id: artifact_id.clone(),
@@ -451,6 +559,7 @@ fn build_artifact_set(
                 &artifact_id,
                 import_id,
                 spec.source_type,
+                None,
                 Vec::new(),
                 Vec::new(),
             )
@@ -468,7 +577,7 @@ fn parse_conversations_for_source(
         SourceType::ClaudeExport => parser::claude::parse_conversations(payload_bytes),
         SourceType::GrokExport => parser::grok::parse_conversations(payload_bytes),
         SourceType::GeminiTakeout => parser::gemini::parse_conversations(payload_bytes),
-        SourceType::TextFile | SourceType::MarkdownFile => {
+        SourceType::TextFile | SourceType::MarkdownFile | SourceType::ObsidianVault => {
             return Err(OpenArchiveError::Invariant(format!(
                 "conversation parser requested for non-conversation source {}",
                 source_type.as_str()
@@ -534,6 +643,26 @@ fn source_import_spec(source_type: SourceType, payload_format: PayloadFormat) ->
             normalization_version: parser::document::MARKDOWN_NORMALIZATION_VERSION,
             content_hash_version: parser::document::MARKDOWN_CONTENT_HASH_VERSION,
             content_facets: parser::document::MARKDOWN_CONTENT_FACETS,
+        },
+        SourceType::ObsidianVault => SourceImportSpec {
+            source_type,
+            payload_format,
+            artifact_class: ArtifactClass::Document,
+            payload_mime_type: "application/zip",
+            normalization_version: "obsidian-v1",
+            content_hash_version: parser::document::MARKDOWN_CONTENT_HASH_VERSION,
+            content_facets: &[
+                "blocks",
+                "text",
+                "headings",
+                "lists",
+                "code",
+                "properties",
+                "tags",
+                "aliases",
+                "links",
+                "embeds",
+            ],
         },
     }
 }
@@ -635,6 +764,7 @@ fn build_document_artifact_set(
         },
         participants: Vec::new(),
         segments,
+        imported_note_metadata: ImportedNoteMetadataWriteSet::default(),
         job: NewEnrichmentJob {
             job_id: new_id("job"),
             artifact_id: artifact_id.clone(),
@@ -649,12 +779,224 @@ fn build_document_artifact_set(
                 &artifact_id,
                 import_id,
                 spec.source_type,
+                None,
                 Vec::new(),
                 Vec::new(),
             )
             .to_json(),
         },
     })
+}
+
+fn build_obsidian_artifact_set(
+    import_id: &str,
+    content_facets_json: &str,
+    spec: SourceImportSpec,
+    artifact_id: String,
+    note: parser::obsidian::ParsedVaultNote,
+    artifact_ids_by_path: &HashMap<String, String>,
+) -> Result<WriteArtifactSet, OpenArchiveError> {
+    let note_identity_hash =
+        obsidian_note_identity_hash(&note.note_path, &note.document.content_hash);
+    let segments = note
+        .document
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(sequence_no, block)| NewSegment {
+            segment_id: new_id("segment"),
+            artifact_id: artifact_id.clone(),
+            participant_id: None,
+            segment_type: SegmentType::ContentBlock,
+            source_segment_key: Some(format!("block-{sequence_no}")),
+            parent_segment_id: None,
+            sequence_no: sequence_no as i32,
+            created_at_source: None,
+            text_content_hash: sha256_hex(block.text_content.as_bytes()),
+            text_content: block.text_content.clone(),
+            locator_json: block.locator_json.clone(),
+            visibility_status: crate::domain::VisibilityStatus::Visible,
+            unsupported_content_json: None,
+        })
+        .collect::<Vec<_>>();
+
+    let imported_note_metadata = ImportedNoteMetadata {
+        note_path: Some(note.note_path.clone()),
+        properties: note
+            .properties
+            .iter()
+            .map(|property| crate::storage::ImportedNotePropertyRecord {
+                property_key: property.property_key.clone(),
+                value_kind: property.value_kind,
+                value_text: property.value_text.clone(),
+                value_json: property.value_json.clone(),
+            })
+            .collect(),
+        tags: note
+            .tags
+            .iter()
+            .map(|tag| crate::storage::ImportedNoteTagRecord {
+                raw_tag: tag.raw_tag.clone(),
+                normalized_tag: tag.normalized_tag.clone(),
+                tag_path: tag.tag_path.clone(),
+                source_kind: tag.source_kind,
+            })
+            .collect(),
+        aliases: note
+            .aliases
+            .iter()
+            .map(|alias| crate::storage::ImportedNoteAliasRecord {
+                alias_text: alias.alias_text.clone(),
+                normalized_alias: alias.normalized_alias.clone(),
+            })
+            .collect(),
+        outbound_links: note
+            .links
+            .iter()
+            .map(|link| crate::storage::ImportedNoteLinkRecord {
+                imported_note_link_id: String::new(),
+                source_segment_id: None,
+                link_kind: link.link_kind,
+                target_kind: link.target_kind,
+                raw_target: link.raw_target.clone(),
+                normalized_target: link.normalized_target.clone(),
+                display_text: link.display_text.clone(),
+                target_path: link.target_path.clone(),
+                target_heading: link.target_heading.clone(),
+                target_block: link.target_block.clone(),
+                external_url: link.external_url.clone(),
+                resolved_artifact_id: link
+                    .target_path
+                    .as_ref()
+                    .and_then(|path| artifact_ids_by_path.get(path))
+                    .cloned(),
+                resolution_status: link.resolution_status,
+                locator_json: link.locator_json.clone(),
+            })
+            .collect(),
+    };
+
+    let metadata_write_set = ImportedNoteMetadataWriteSet {
+        properties: note
+            .properties
+            .into_iter()
+            .enumerate()
+            .map(|(sequence_no, property)| NewImportedNoteProperty {
+                imported_note_property_id: new_id("noteprop"),
+                artifact_id: artifact_id.clone(),
+                property_key: property.property_key,
+                value_kind: property.value_kind,
+                value_text: property.value_text,
+                value_json: property.value_json.to_string(),
+                sequence_no: sequence_no as i32,
+            })
+            .collect(),
+        tags: note
+            .tags
+            .into_iter()
+            .enumerate()
+            .map(|(sequence_no, tag)| NewImportedNoteTag {
+                imported_note_tag_id: new_id("notetag"),
+                artifact_id: artifact_id.clone(),
+                raw_tag: tag.raw_tag,
+                normalized_tag: tag.normalized_tag,
+                tag_path: tag.tag_path,
+                source_kind: tag.source_kind,
+                sequence_no: sequence_no as i32,
+            })
+            .collect(),
+        aliases: note
+            .aliases
+            .into_iter()
+            .enumerate()
+            .map(|(sequence_no, alias)| NewImportedNoteAlias {
+                imported_note_alias_id: new_id("notealias"),
+                artifact_id: artifact_id.clone(),
+                alias_text: alias.alias_text,
+                normalized_alias: alias.normalized_alias,
+                sequence_no: sequence_no as i32,
+            })
+            .collect(),
+        links: note
+            .links
+            .into_iter()
+            .enumerate()
+            .map(|(sequence_no, link)| NewImportedNoteLink {
+                imported_note_link_id: new_id("notelink"),
+                artifact_id: artifact_id.clone(),
+                source_segment_id: None,
+                link_kind: link.link_kind,
+                target_kind: link.target_kind,
+                raw_target: link.raw_target,
+                normalized_target: link.normalized_target,
+                display_text: link.display_text,
+                target_path: link.target_path.clone(),
+                target_heading: link.target_heading,
+                target_block: link.target_block,
+                external_url: link.external_url,
+                resolved_artifact_id: link
+                    .target_path
+                    .as_ref()
+                    .and_then(|path| artifact_ids_by_path.get(path))
+                    .cloned(),
+                resolution_status: link.resolution_status,
+                locator_json: link.locator_json,
+                sequence_no: sequence_no as i32,
+            })
+            .collect(),
+    };
+
+    Ok(WriteArtifactSet {
+        artifact: NewArtifact {
+            artifact_id: artifact_id.clone(),
+            import_id: import_id.to_string(),
+            artifact_class: spec.artifact_class,
+            source_type: spec.source_type,
+            artifact_status: ArtifactStatus::Captured,
+            enrichment_status: EnrichmentStatus::Pending,
+            source_conversation_key: Some(note.note_path),
+            source_conversation_hash: note_identity_hash,
+            title: note.title,
+            created_at_source: None,
+            started_at: None,
+            ended_at: None,
+            primary_language: None,
+            content_hash_version: spec.content_hash_version.to_string(),
+            content_facets_json: content_facets_json.to_string(),
+            normalization_version: spec.normalization_version.to_string(),
+        },
+        participants: Vec::new(),
+        segments,
+        imported_note_metadata: metadata_write_set,
+        job: NewEnrichmentJob {
+            job_id: new_id("job"),
+            artifact_id: artifact_id.clone(),
+            job_type: JobType::ArtifactExtract,
+            enrichment_tier: crate::storage::EnrichmentTier::Standard,
+            spawned_by_job_id: None,
+            job_status: JobStatus::Pending,
+            max_attempts: 3,
+            priority_no: 100,
+            required_capabilities: vec!["text".to_string()],
+            payload_json: ArtifactExtractPayload::new_v1(
+                &artifact_id,
+                import_id,
+                spec.source_type,
+                Some(imported_note_metadata),
+                Vec::new(),
+                Vec::new(),
+            )
+            .to_json(),
+        },
+    })
+}
+
+fn obsidian_note_identity_hash(note_path: &str, content_hash: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(note_path.as_bytes());
+    hasher.update([0]);
+    hasher.update(content_hash.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn new_id(prefix: &str) -> String {
@@ -680,7 +1022,10 @@ mod tests {
     use crate::storage::{
         ArtifactIngestResult, EnrichmentStatus, ImportWriteResult, ImportedArtifact, WriteImportSet,
     };
+    use std::fs;
+    use std::io::{Cursor, Write};
     use std::sync::Mutex;
+    use zip::write::SimpleFileOptions;
 
     struct MockStore {
         captured: Mutex<Vec<WriteImportSet>>,
@@ -900,6 +1245,122 @@ mod tests {
         assert_eq!(import_set.artifact_sets[0].segments.len(), 3);
     }
 
+    #[test]
+    fn import_obsidian_payload_builds_first_class_note_metadata() {
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+
+        let response =
+            import_obsidian_vault_payload(&store, &object_store, &obsidian_fixture_zip())
+                .expect("obsidian import should succeed");
+
+        assert_eq!(response.artifacts.len(), 2);
+
+        let captured = store.captured.lock().unwrap();
+        let import_set = captured.last().expect("import set should exist");
+        assert_eq!(import_set.import.source_type, SourceType::ObsidianVault);
+        assert_eq!(
+            import_set.payload_object.payload_format,
+            PayloadFormat::ObsidianVaultZip
+        );
+        assert_eq!(import_set.payload_object.mime_type, "application/zip");
+
+        let artifact_ids_by_path = import_set
+            .artifact_sets
+            .iter()
+            .map(|artifact_set| {
+                (
+                    artifact_set
+                        .artifact
+                        .source_conversation_key
+                        .clone()
+                        .expect("note path should exist"),
+                    artifact_set.artifact.artifact_id.clone(),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+
+        let inbox = import_set
+            .artifact_sets
+            .iter()
+            .find(|artifact_set| {
+                artifact_set.artifact.source_conversation_key.as_deref() == Some("Inbox.md")
+            })
+            .expect("Inbox.md artifact should exist");
+        assert_eq!(inbox.artifact.artifact_class, ArtifactClass::Document);
+        assert!(inbox.participants.is_empty());
+        assert_eq!(inbox.imported_note_metadata.properties.len(), 5);
+        assert_eq!(inbox.imported_note_metadata.tags.len(), 2);
+        assert_eq!(inbox.imported_note_metadata.aliases.len(), 1);
+        assert_eq!(inbox.imported_note_metadata.links.len(), 2);
+        assert_eq!(
+            inbox.imported_note_metadata.links[0]
+                .resolved_artifact_id
+                .as_deref(),
+            artifact_ids_by_path
+                .get("Projects/Acme.md")
+                .map(String::as_str)
+        );
+
+        let payload = crate::storage::ArtifactExtractPayload::from_json(&inbox.job.payload_json)
+            .expect("payload must deserialize");
+        let note_metadata = payload
+            .imported_note_metadata
+            .expect("obsidian payload should include imported note metadata");
+        assert_eq!(payload.source_type, SourceType::ObsidianVault.as_str());
+        assert_eq!(note_metadata.note_path.as_deref(), Some("Inbox.md"));
+        assert_eq!(note_metadata.tags.len(), 2);
+        assert_eq!(note_metadata.aliases[0].normalized_alias, "oa inbox");
+        assert_eq!(
+            note_metadata.outbound_links[0]
+                .resolved_artifact_id
+                .as_deref(),
+            artifact_ids_by_path
+                .get("Projects/Acme.md")
+                .map(String::as_str)
+        );
+    }
+
+    #[test]
+    fn obsidian_source_hash_includes_note_path_identity() {
+        let first = obsidian_note_identity_hash("Inbox.md", "abc123");
+        let second = obsidian_note_identity_hash("Projects/Inbox.md", "abc123");
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn import_obsidian_payload_keeps_distinct_note_paths_with_same_content() {
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+
+        let response = import_obsidian_vault_payload(
+            &store,
+            &object_store,
+            &obsidian_same_content_fixture_zip(),
+        )
+        .expect("obsidian import should succeed");
+
+        assert_eq!(response.artifacts.len(), 2);
+
+        let captured = store.captured.lock().unwrap();
+        let import_set = captured.last().expect("import set should exist");
+        assert_eq!(import_set.artifact_sets.len(), 2);
+
+        let mut source_hashes = import_set
+            .artifact_sets
+            .iter()
+            .map(|artifact_set| artifact_set.artifact.source_conversation_hash.clone())
+            .collect::<Vec<_>>();
+        source_hashes.sort();
+        source_hashes.dedup();
+        assert_eq!(
+            source_hashes.len(),
+            2,
+            "same-content notes under different paths must not collapse"
+        );
+    }
+
     fn single_conversation_export() -> &'static str {
         r#"[{
           "id": "conv-1",
@@ -992,6 +1453,57 @@ mod tests {
           },
           "default_model_slug": null
         }]"#
+    }
+
+    fn obsidian_fixture_zip() -> Vec<u8> {
+        let root = format!(
+            "{}/tests/fixtures/obsidian_vault",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let files = [
+            ("Inbox.md", format!("{root}/Inbox.md")),
+            ("Projects/Acme.md", format!("{root}/Projects/Acme.md")),
+            (
+                ".obsidian/workspace.json",
+                format!("{root}/.obsidian/workspace.json"),
+            ),
+        ];
+        let cursor = Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        for (zip_path, file_path) in files {
+            writer
+                .start_file(zip_path, SimpleFileOptions::default())
+                .expect("file should start");
+            writer
+                .write_all(&fs::read(file_path).expect("fixture should read"))
+                .expect("fixture bytes should write");
+        }
+        writer.finish().expect("zip should finish").into_inner()
+    }
+
+    fn obsidian_same_content_fixture_zip() -> Vec<u8> {
+        let cursor = Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let files = [
+            (
+                "Templates/Header 1.md",
+                "# Repeated Header\n\nShared body.\n",
+            ),
+            (
+                "Templates/Header 2.md",
+                "# Repeated Header\n\nShared body.\n",
+            ),
+            (".obsidian/workspace.json", "{}"),
+        ];
+        for (zip_path, contents) in files {
+            writer
+                .start_file(zip_path, SimpleFileOptions::default())
+                .expect("file should start");
+            writer
+                .write_all(contents.as_bytes())
+                .expect("fixture bytes should write");
+        }
+        writer.finish().expect("zip should finish").into_inner()
     }
 
     #[test]

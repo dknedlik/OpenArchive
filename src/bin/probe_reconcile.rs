@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use open_archive::config::{GeminiConfig, PostgresConfig};
 use open_archive::processor::{
-    memory_candidate_key_from_fields, InferenceUsage, MemoryOutput, ReconciliationProcessorInput,
-    RelationshipOutput, SummaryOutput,
+    memory_candidate_key_from_fields, EntityOutput, InferenceUsage, MemoryOutput,
+    ReconciliationProcessorInput, RelationshipOutput, SummaryOutput,
 };
 use open_archive::storage::enrichment_state_store::EnrichmentStateStore;
 use open_archive::storage::types::{ArtifactReconcilePayload, SourceType};
@@ -235,6 +235,16 @@ fn build_reconciliation_input(
                 memory_scope: memory.memory_scope,
                 memory_scope_value: memory.memory_scope_value.clone(),
                 evidence_segment_ids: memory.evidence_segment_ids.clone(),
+            })
+            .collect(),
+        entities: extraction_result
+            .entities
+            .iter()
+            .map(|entity| EntityOutput {
+                entity_key: entity.entity_key.clone(),
+                display_name: entity.display_name.clone(),
+                entity_type: entity.entity_type.clone(),
+                evidence_segment_ids: entity.evidence_segment_ids.clone(),
             })
             .collect(),
         relationships: extraction_result

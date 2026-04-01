@@ -1,3 +1,5 @@
+mod artifact_classifier;
+mod artifact_policy;
 mod anthropic;
 mod gemini;
 mod grok;
@@ -10,6 +12,10 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use artifact_classifier::{
+    classify_artifact, classify_artifact_debug, ArchetypeScore, ArtifactArchetype,
+    ArtifactClassificationDebug, ArtifactClassificationProfile, ArtifactFacet, FacetScore,
+};
 pub use anthropic::AnthropicProcessorFactory;
 pub use gemini::{
     GeminiBatchClient, GeminiBatchEnrichmentRequest, GeminiBatchJob, GeminiProcessorFactory,
@@ -47,7 +53,7 @@ pub(crate) use pipeline::{
 #[cfg(test)]
 pub(crate) use pipeline::{
     build_conversation_user_prompt, build_document_user_prompt, canonicalize_memory_type,
-    ModelReconciliationDecision,
+    canonicalize_memory_type_for_input, ModelReconciliationDecision,
 };
 pub(crate) use types::{
     artifact_processor_batch_custom_id, MAX_CLASSIFICATIONS, MAX_MEMORIES, MAX_RETRIEVAL_INTENTS,

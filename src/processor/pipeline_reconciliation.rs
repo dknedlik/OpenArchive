@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -59,6 +59,12 @@ impl ModelReconciliationOutput {
             )
             .chain(
                 input
+                    .entities
+                    .iter()
+                    .flat_map(|entity| entity.evidence_segment_ids.iter()),
+            )
+            .chain(
+                input
                     .relationships
                     .iter()
                     .flat_map(|relationship| relationship.evidence_segment_ids.iter()),
@@ -69,12 +75,35 @@ impl ModelReconciliationOutput {
             .memories
             .iter()
             .map(|memory| memory.candidate_key.clone())
+            .chain(input.entities.iter().map(|entity| entity.entity_key.clone()))
             .chain(input.relationships.iter().map(|relationship| {
                 format!(
                     "{}:{}:{}",
                     relationship.relationship_type,
                     relationship.subject_key,
                     relationship.object_key
+                )
+            }))
+            .collect();
+        let target_kinds: HashMap<String, &'static str> = input
+            .memories
+            .iter()
+            .map(|memory| (memory.candidate_key.clone(), "memory"))
+            .chain(
+                input
+                    .entities
+                    .iter()
+                    .map(|entity| (entity.entity_key.clone(), "entity")),
+            )
+            .chain(input.relationships.iter().map(|relationship| {
+                (
+                    format!(
+                        "{}:{}:{}",
+                        relationship.relationship_type,
+                        relationship.subject_key,
+                        relationship.object_key
+                    ),
+                    "relationship",
                 )
             }))
             .collect();
@@ -116,6 +145,23 @@ impl ModelReconciliationOutput {
                     ),
                 });
             }
+            let expected_target_kind = target_kinds
+                .get(&decision.target_key)
+                .copied()
+                .ok_or_else(|| ProcessorError::InvalidModelOutput {
+                    detail: format!(
+                        "decisions[{index}].target_key {:?} does not match a candidate",
+                        decision.target_key
+                    ),
+                })?;
+            if decision.target_kind != expected_target_kind {
+                return Err(ProcessorError::InvalidModelOutput {
+                    detail: format!(
+                        "decisions[{index}].target_kind {:?} does not match candidate kind {:?} for target_key {:?}",
+                        decision.target_kind, expected_target_kind, decision.target_key
+                    ),
+                });
+            }
             if !seen_targets.insert(decision.target_key.clone()) {
                 return Err(ProcessorError::InvalidModelOutput {
                     detail: format!(
@@ -133,7 +179,7 @@ impl ModelReconciliationOutput {
 
         if seen_targets != valid_targets {
             return Err(ProcessorError::InvalidModelOutput {
-                detail: "reconciliation output must provide exactly one decision for each candidate memory or relationship"
+                detail: "reconciliation output must provide exactly one decision for each candidate memory, entity, or relationship"
                     .to_string(),
             });
         }

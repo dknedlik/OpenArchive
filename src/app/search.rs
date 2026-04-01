@@ -19,6 +19,16 @@ pub struct ArchiveSearchRequest {
 #[serde(rename_all = "snake_case")]
 pub enum SearchMatchKind {
     ArtifactTitle,
+    ImportedNoteTag {
+        tag_id: String,
+    },
+    ImportedNoteAlias {
+        alias_id: String,
+    },
+    ImportedNotePath,
+    ImportedExternalLink {
+        link_id: String,
+    },
     DerivedObject {
         derived_object_id: String,
         derived_type: DerivedObjectType,
@@ -66,6 +76,18 @@ impl ArchiveSearchService {
                 artifact_id: candidate.artifact_id,
                 match_kind: match candidate.match_kind {
                     SearchCandidateKind::ArtifactTitle => SearchMatchKind::ArtifactTitle,
+                    SearchCandidateKind::ImportedNoteTag => SearchMatchKind::ImportedNoteTag {
+                        tag_id: candidate.match_record_id,
+                    },
+                    SearchCandidateKind::ImportedNoteAlias => SearchMatchKind::ImportedNoteAlias {
+                        alias_id: candidate.match_record_id,
+                    },
+                    SearchCandidateKind::ImportedNotePath => SearchMatchKind::ImportedNotePath,
+                    SearchCandidateKind::ImportedExternalLink => {
+                        SearchMatchKind::ImportedExternalLink {
+                            link_id: candidate.match_record_id,
+                        }
+                    }
                     SearchCandidateKind::DerivedObject { derived_type } => {
                         SearchMatchKind::DerivedObject {
                             derived_object_id: candidate.match_record_id,
@@ -429,6 +451,33 @@ mod tests {
 
         assert_eq!(response.hits.len(), 1);
         assert_eq!(response.hits[0].artifact_id, "artifact-1");
+    }
+
+    #[test]
+    fn search_maps_imported_external_link_hits() {
+        let service = ArchiveSearchService::new(Arc::new(MockSearchReadStore {
+            candidates: vec![ArchiveSearchCandidate {
+                artifact_id: "artifact-1".to_string(),
+                match_record_id: "link-1".to_string(),
+                match_kind: SearchCandidateKind::ImportedExternalLink,
+                snippet: "obsidian://show-plugin?id=obsidian-importer".to_string(),
+                score_hint: 390,
+            }],
+        }));
+
+        let response = service
+            .search(ArchiveSearchRequest {
+                query_text: "obsidian-importer".to_string(),
+                limit: 10,
+                filters: SearchFilters::default(),
+            })
+            .expect("search should succeed");
+
+        assert_eq!(response.hits.len(), 1);
+        assert!(matches!(
+            response.hits[0].match_kind,
+            SearchMatchKind::ImportedExternalLink { ref link_id } if link_id == "link-1"
+        ));
     }
 
     #[test]

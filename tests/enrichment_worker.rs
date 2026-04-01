@@ -177,7 +177,7 @@ fn test_worker_fails_job_when_factory_rejects_claimed_tier() {
 }
 
 #[test]
-fn test_worker_marks_job_retryable_for_transient_inference_failures() {
+fn test_worker_reschedules_quota_failures_without_consuming_attempts() {
     let config = test_config(1);
     let job_store = Arc::new(SingleJobStore::new(valid_claimed_job()));
     let read_store = Arc::new(FixedReadStore::with_sample_artifact());
@@ -217,14 +217,19 @@ fn test_worker_marks_job_retryable_for_transient_inference_failures() {
 
     assert_eq!(job_store.complete_count.load(Ordering::SeqCst), 0);
     assert_eq!(job_store.fail_count.load(Ordering::SeqCst), 0);
-    assert!(job_store.retryable_count.load(Ordering::SeqCst) > 0);
+    assert_eq!(job_store.retryable_count.load(Ordering::SeqCst), 0);
+    assert!(job_store.reschedule_count.load(Ordering::SeqCst) > 0);
     assert!(job_store
-        .last_retryable_message
+        .last_reschedule_message
         .lock()
         .unwrap()
         .as_deref()
         .unwrap_or_default()
-        .contains("Processor execution failed"));
+        .contains("Processor execution rate-limited"));
+    assert_eq!(
+        *job_store.last_reschedule_delay_seconds.lock().unwrap(),
+        Some(123)
+    );
 }
 
 #[test]
@@ -338,6 +343,7 @@ fn valid_claimed_job() -> ClaimedJob {
         "artifact-1",
         "import-1",
         SourceType::ChatGptExport,
+        None,
         Vec::new(),
         Vec::new(),
     );
@@ -360,8 +366,11 @@ struct SingleJobStore {
     complete_count: AtomicUsize,
     fail_count: AtomicUsize,
     retryable_count: AtomicUsize,
+    reschedule_count: AtomicUsize,
     last_fail_message: Mutex<Option<String>>,
     last_retryable_message: Mutex<Option<String>>,
+    last_reschedule_message: Mutex<Option<String>>,
+    last_reschedule_delay_seconds: Mutex<Option<i64>>,
 }
 
 impl SingleJobStore {
@@ -375,8 +384,11 @@ impl SingleJobStore {
             complete_count: AtomicUsize::new(0),
             fail_count: AtomicUsize::new(0),
             retryable_count: AtomicUsize::new(0),
+            reschedule_count: AtomicUsize::new(0),
             last_fail_message: Mutex::new(None),
             last_retryable_message: Mutex::new(None),
+            last_reschedule_message: Mutex::new(None),
+            last_reschedule_delay_seconds: Mutex::new(None),
         }
     }
 }
@@ -423,6 +435,9 @@ impl EnrichmentJobLifecycleStore for SingleJobStore {
         _error_message: &str,
         _retry_after_seconds: i64,
     ) -> StorageResult<()> {
+        self.reschedule_count.fetch_add(1, Ordering::SeqCst);
+        *self.last_reschedule_message.lock().unwrap() = Some(_error_message.to_string());
+        *self.last_reschedule_delay_seconds.lock().unwrap() = Some(_retry_after_seconds);
         Ok(())
     }
 
@@ -670,6 +685,7 @@ impl FixedReadStore {
                         visibility_status: VisibilityStatus::Visible,
                     },
                 ],
+                imported_note_metadata: open_archive::storage::ImportedNoteMetadata::default(),
             }),
         }
     }
@@ -892,6 +908,7 @@ impl ArtifactProcessor for RetryableProcessor {
         Err(ProcessorError::InferenceHttpStatus {
             status: 429,
             body_preview: "rate limited".to_string(),
+            retry_after_seconds: Some(123),
         })
     }
 }
@@ -909,6 +926,7 @@ impl open_archive::processor::ReconciliationProcessor for RetryableReconciliatio
         Err(ProcessorError::InferenceHttpStatus {
             status: 429,
             body_preview: "rate limited".to_string(),
+            retry_after_seconds: Some(123),
         })
     }
 }

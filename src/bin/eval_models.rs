@@ -271,6 +271,7 @@ fn build_processor_input(fixture: &EvalFixture) -> Result<ArtifactProcessorInput
         artifact_class: open_archive::storage::ArtifactClass::Conversation,
         source_type,
         title: fixture.title.clone(),
+        imported_note_metadata: None,
         participants,
         segments,
     })

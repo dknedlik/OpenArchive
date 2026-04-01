@@ -9,6 +9,7 @@ pub mod claude;
 pub mod document;
 pub mod gemini;
 pub mod grok;
+pub mod obsidian;
 
 use chrono::{DateTime, Utc};
 

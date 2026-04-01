@@ -134,6 +134,9 @@ impl DerivedMetadataHarness for OracleHarness {
                             .normalization_version
                             .clone(),
                     },
+                    imported_note_metadata: fixture.write_set.artifact_sets[0]
+                        .imported_note_metadata
+                        .clone(),
                     participants: fixture.write_set.artifact_sets[0]
                         .participants
                         .iter()

@@ -26,6 +26,7 @@ pub mod derivation_store;
 pub mod embedding_store;
 pub mod enrichment_state_store;
 pub mod import_store;
+pub mod imported_note_store;
 pub mod job_store;
 pub mod oracle;
 pub mod postgres;
@@ -45,6 +46,7 @@ pub use derivation_store::{
 pub use embedding_store::DerivedObjectEmbeddingStore;
 pub use enrichment_state_store::EnrichmentStateStore;
 pub use import_store::{ImportPayloadStore, ImportStore};
+pub use imported_note_store::ImportedNoteMetadataStore;
 pub use job_store::{EnrichmentJobLifecycleStore, EnrichmentJobStore};
 pub use oracle::{
     OracleArchiveRetrievalStore, OracleArtifactReadStore, OracleDerivedMetadataStore,
@@ -75,15 +77,19 @@ pub use types::{
     ClaimedJob, ClassificationObjectJson, ConversationWindowRef, DerivationRunStatus,
     DerivationRunType, DerivedObjectEmbeddingItem, DerivedObjectEmbeddingPayload,
     DerivedObjectPayload, DerivedObjectType, EnrichmentStatus, EnrichmentTier, EntityObjectJson,
-    EvidenceRole, ExtractedClassification, ExtractedMemory, ImportStatus, InputScopeType,
-    JobStatus, JobType, LoadedArtifactForEnrichment, LoadedArtifactRecord, LoadedParticipant,
-    LoadedSegment, MemoryObjectJson, NewArtifact, NewDerivationRun, NewDerivedObject,
-    NewDerivedObjectEmbedding, NewEnrichmentBatch, NewEnrichmentJob, NewEvidenceLink, NewImport,
-    NewImportObjectRef, NewParticipant, NewSegment, ObjectStatus, OriginKind, PayloadFormat,
-    PersistedEnrichmentBatch, ReconciliationDecision, ReconciliationDecisionKind,
-    RelationshipObjectJson, RetrievalIntent, RetrievalResultSet, RetrievedContextItem,
-    RetryOutcome, ScopeType, SegmentSpanRef, SegmentType, SourceType, SummaryObjectJson,
-    SupportStrength, TimelineEntry, TimelineFilters, TopicThreadRef,
+    EvidenceRole, ExtractedClassification, ExtractedMemory, ImportStatus, ImportedNoteAliasRecord,
+    ImportedNoteLinkKind, ImportedNoteLinkRecord, ImportedNoteLinkResolutionStatus,
+    ImportedNoteLinkTargetKind, ImportedNoteMetadata, ImportedNoteMetadataWriteSet,
+    ImportedNotePropertyRecord, ImportedNotePropertyValueKind, ImportedNoteTagRecord,
+    ImportedNoteTagSourceKind, InputScopeType, JobStatus, JobType, LoadedArtifactForEnrichment,
+    LoadedArtifactRecord, LoadedParticipant, LoadedSegment, MemoryObjectJson, NewArtifact,
+    NewDerivationRun, NewDerivedObject, NewDerivedObjectEmbedding, NewEnrichmentBatch,
+    NewEnrichmentJob, NewEvidenceLink, NewImport, NewImportObjectRef, NewImportedNoteAlias,
+    NewImportedNoteLink, NewImportedNoteProperty, NewImportedNoteTag, NewParticipant, NewSegment,
+    ObjectStatus, OriginKind, PayloadFormat, PersistedEnrichmentBatch, ReconciliationDecision,
+    ReconciliationDecisionKind, RelationshipObjectJson, RetrievalIntent, RetrievalResultSet,
+    RetrievedContextItem, RetryOutcome, ScopeType, SegmentSpanRef, SegmentType, SourceType,
+    SummaryObjectJson, SupportStrength, TimelineEntry, TimelineFilters, TopicThreadRef,
 };
 pub use writeback_store::{
     NewAgentEntity, NewAgentEvidenceLink, NewAgentMemory, NewArchiveLink, UpdateObjectStatus,
@@ -114,6 +120,7 @@ pub struct WriteArtifactSet {
     pub artifact: NewArtifact,
     pub participants: Vec<NewParticipant>,
     pub segments: Vec<NewSegment>,
+    pub imported_note_metadata: crate::storage::types::ImportedNoteMetadataWriteSet,
     pub job: NewEnrichmentJob,
 }
 

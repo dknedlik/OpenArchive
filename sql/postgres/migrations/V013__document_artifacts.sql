@@ -37,6 +37,12 @@ ALTER TABLE oa_artifact
     ADD CONSTRAINT oa_artifact_artifact_class_check
     CHECK (artifact_class IN ('conversation', 'document'));
 
+ALTER TABLE oa_segment
+    DROP CONSTRAINT IF EXISTS oa_segment_segment_type_check;
+
+ALTER TABLE oa_segment
+    DROP CONSTRAINT IF EXISTS ck_oa_segment_message_text;
+
 UPDATE oa_segment
 SET segment_type = CASE segment_type
     WHEN 'message' THEN 'content_block'
@@ -46,14 +52,8 @@ END
 WHERE segment_type IN ('message', 'message_window');
 
 ALTER TABLE oa_segment
-    DROP CONSTRAINT IF EXISTS oa_segment_segment_type_check;
-
-ALTER TABLE oa_segment
     ADD CONSTRAINT oa_segment_segment_type_check
     CHECK (segment_type IN ('content_block', 'content_window'));
-
-ALTER TABLE oa_segment
-    DROP CONSTRAINT IF EXISTS ck_oa_segment_message_text;
 
 ALTER TABLE oa_segment
     ADD CONSTRAINT ck_oa_segment_content_block_text

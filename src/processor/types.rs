@@ -1,19 +1,20 @@
 use crate::storage::types::{
-    ArtifactClass, EnrichmentTier, LoadedParticipant, LoadedSegment, ReconciliationDecisionKind,
-    RetrievalIntent, ScopeType, SourceType,
+    ArtifactClass, EnrichmentTier, ImportedNoteMetadata, LoadedParticipant, LoadedSegment,
+    ReconciliationDecisionKind, RetrievalIntent, ScopeType, SourceType,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::pipeline::ProcessorError;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ArtifactProcessorInput {
     pub artifact_id: String,
     pub import_id: String,
     pub artifact_class: ArtifactClass,
     pub source_type: SourceType,
     pub title: Option<String>,
+    pub imported_note_metadata: Option<ImportedNoteMetadata>,
     pub participants: Vec<LoadedParticipant>,
     pub segments: Vec<LoadedSegment>,
 }
@@ -116,6 +117,7 @@ pub struct ReconciliationProcessorInput {
     pub source_type: SourceType,
     pub summary: SummaryOutput,
     pub memories: Vec<MemoryOutput>,
+    pub entities: Vec<EntityOutput>,
     pub relationships: Vec<RelationshipOutput>,
     pub retrieval_results_json: String,
 }

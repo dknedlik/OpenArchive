@@ -2,6 +2,7 @@ pub mod artifact;
 pub mod derivation;
 pub mod embedding;
 pub mod import;
+pub mod imported_note;
 pub mod job;
 pub mod retrieval;
 pub mod review;

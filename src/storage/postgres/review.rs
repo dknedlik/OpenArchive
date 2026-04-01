@@ -166,6 +166,7 @@ pub fn retry_artifact_enrichment(
                 &artifact_id_value,
                 &import_id,
                 source_type,
+                None,
                 Vec::new(),
                 Vec::new(),
             )

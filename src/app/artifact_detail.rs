@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::error::{OpenArchiveError, Result};
 use crate::storage::{
-    ArtifactDetailReadStore, DerivedObjectType, EnrichmentStatus, ParticipantRole, SourceType,
+    ArtifactDetailReadStore, DerivedObjectType, EnrichmentStatus, ImportedNoteLinkRecord,
+    ImportedNoteMetadata, ParticipantRole, SourceType,
 };
 
 pub const DEFAULT_SEGMENT_LIMIT: usize = 50;
@@ -37,8 +38,11 @@ pub struct ArtifactDetailDerivedObjectView {
 pub struct ArtifactDetailResponse {
     pub artifact_id: String,
     pub title: Option<String>,
+    pub note_path: Option<String>,
     pub source_type: SourceType,
     pub enrichment_status: EnrichmentStatus,
+    pub imported_note_metadata: ImportedNoteMetadata,
+    pub inbound_note_links: Vec<ImportedNoteLinkRecord>,
     pub segment_count: usize,
     pub segment_offset: usize,
     pub segment_limit: usize,
@@ -85,8 +89,11 @@ impl ArtifactDetailService {
         Ok(Some(ArtifactDetailResponse {
             artifact_id: detail.artifact.artifact_id,
             title: detail.artifact.title,
+            note_path: detail.artifact.note_path,
             source_type: detail.artifact.source_type,
             enrichment_status: detail.artifact.enrichment_status,
+            imported_note_metadata: detail.imported_note_metadata,
+            inbound_note_links: detail.inbound_note_links,
             segment_count: total_segments,
             segment_offset,
             segment_limit,
@@ -165,6 +172,7 @@ mod tests {
                 title: Some("Artifact".to_string()),
                 source_type: SourceType::ChatGptExport,
                 enrichment_status: EnrichmentStatus::Completed,
+                note_path: None,
             },
             segments: vec![
                 ArtifactDetailSegment {
@@ -189,6 +197,8 @@ mod tests {
                 body_text: Some("summary text".to_string()),
                 confidence_score: Some(0.9),
             }],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
         }));
 
         let response = service.get(request()).unwrap().unwrap();
@@ -211,6 +221,7 @@ mod tests {
                 title: None,
                 source_type: SourceType::ChatGptExport,
                 enrichment_status: EnrichmentStatus::Pending,
+                note_path: None,
             },
             segments: vec![ArtifactDetailSegment {
                 segment_id: "seg-1".to_string(),
@@ -219,6 +230,8 @@ mod tests {
                 sequence_no: 1,
                 text_content: "raw text".to_string(),
             }],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
             derived_objects: Vec::new(),
         }));
 
@@ -237,6 +250,7 @@ mod tests {
                 title: Some("Artifact".to_string()),
                 source_type: SourceType::ChatGptExport,
                 enrichment_status: EnrichmentStatus::Completed,
+                note_path: None,
             },
             segments: vec![
                 ArtifactDetailSegment {
@@ -261,6 +275,8 @@ mod tests {
                     text_content: "three".to_string(),
                 },
             ],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
             derived_objects: vec![],
         }));
 

@@ -137,7 +137,7 @@ impl ModelCandidateArtifactOutput {
         prompt_version: &str,
     ) -> ArtifactProcessorOutput {
         let resolved = self.resolve_evidence_aliases(input);
-        cleanup_artifact_processor_output(ArtifactProcessorOutput {
+        cleanup_artifact_processor_output(input, ArtifactProcessorOutput {
             pipeline_name: pipeline_name.to_string(),
             pipeline_version: "v1".to_string(),
             provider_name: Some(provider_name.to_string()),
@@ -166,7 +166,8 @@ impl ModelCandidateArtifactOutput {
                 .map(|memory| {
                     let title = normalize_optional_text(memory.title);
                     let body_text = memory.body_text.trim().to_string();
-                    let memory_type = canonicalize_memory_type(
+                    let memory_type = canonicalize_memory_type_for_input(
+                        input,
                         "",
                         title.as_deref().unwrap_or_default(),
                         &body_text,
