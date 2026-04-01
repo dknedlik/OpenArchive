@@ -352,7 +352,7 @@ impl ArtifactProcessor for GrokArtifactProcessor {
         input: &ArtifactProcessorInput,
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
         validate_input(input)?;
-        let prompt = build_two_phase_candidate_user_prompt(input)?;
+        let prompt = build_two_phase_candidate_user_prompt_with_flavor(input, PromptFlavor::Grok)?;
         match self.process_once(input, &prompt, self.max_output_tokens) {
             Ok(output) => Ok(output),
             Err(error) if should_retry_with_repair(&error) => {

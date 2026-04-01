@@ -303,7 +303,11 @@ fn build_input_from_file(path: PathBuf) -> Result<ArtifactProcessorInput> {
         .with_context(|| format!("failed to parse {}", path.display()))?;
     let title = title_hint
         .or_else(|| preferred_markdown_title(&path, parsed.title))
-        .or_else(|| path.file_stem().and_then(|value| value.to_str()).map(str::to_string));
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+        });
 
     Ok(ArtifactProcessorInput {
         artifact_id: path.display().to_string(),
@@ -363,13 +367,18 @@ fn select_artifact_ids(
         let artifacts = read_store
             .list_artifacts_filtered(&filters, args.limit, 0)
             .context("failed to list artifacts")?;
-        return Ok(artifacts.into_iter().map(|artifact| artifact.artifact_id).collect());
+        return Ok(artifacts
+            .into_iter()
+            .map(|artifact| artifact.artifact_id)
+            .collect());
     }
 
     let mut client = postgres::Client::connect(&postgres.connection_string, NoTls)
         .context("failed to connect to Postgres")?;
     let mut artifact_ids = Vec::new();
-    let source_type = args.source_type.map(|value| value.to_source_type().as_str().to_string());
+    let source_type = args
+        .source_type
+        .map(|value| value.to_source_type().as_str().to_string());
     for import_id in &args.import_ids {
         let rows = client
             .query(

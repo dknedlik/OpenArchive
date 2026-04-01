@@ -18,7 +18,8 @@ impl ArtifactProcessor for OpenAiArtifactProcessor {
         input: &ArtifactProcessorInput,
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
         validate_input(input)?;
-        let prompt = build_two_phase_candidate_user_prompt(input)?;
+        let prompt =
+            build_two_phase_candidate_user_prompt_with_flavor(input, PromptFlavor::OpenAi)?;
         match self.process_once(input, &prompt, self.max_output_tokens) {
             Ok(output) => Ok(output),
             Err(error) if should_retry_with_repair(&error) => {
@@ -78,7 +79,8 @@ impl ExtractionBatchSubmitter for OpenAiExtractionSubmitter {
     ) -> Result<BatchHandle, ProcessorError> {
         let mut requests = Vec::with_capacity(inputs.len());
         for input in inputs {
-            let user_prompt = build_two_phase_candidate_user_prompt(input)?;
+            let user_prompt =
+                build_two_phase_candidate_user_prompt_with_flavor(input, PromptFlavor::OpenAi)?;
             requests.push(OpenAiBatchRequest {
                 custom_id: input.batch_custom_id(),
                 method: "POST".to_string(),

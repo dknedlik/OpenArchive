@@ -9,8 +9,8 @@ use crate::storage::{
     ImportedNotePropertyValueKind, ImportedNoteTagSourceKind,
 };
 
-pub use vault::parse_vault_zip;
 pub use frontmatter::{parse_frontmatter, ParsedFrontmatter};
+pub use vault::parse_vault_zip;
 
 pub fn normalize_tag(raw: &str) -> Option<String> {
     let trimmed = raw.trim().trim_start_matches('#');

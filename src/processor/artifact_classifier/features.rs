@@ -262,28 +262,17 @@ fn scan_text(features: &mut ArtifactFeatures, text: &str) {
                 "customjs",
             ],
         );
-        features.templater_marker_count += count_markers(
-            &line_lower,
-            &["<%", "%>", "{{title}}", "tp."],
-        );
+        features.templater_marker_count +=
+            count_markers(&line_lower, &["<%", "%>", "{{title}}", "tp."]);
         if looks_like_command_line(line) {
             features.command_line_count += 1;
         }
         if looks_like_config_line(line) {
             features.config_line_count += 1;
         }
-        features.setup_keyword_count += count_keyword_hits(
-            &line_lower,
-            SETUP_KEYWORDS,
-        );
-        features.planning_keyword_count += count_keyword_hits(
-            &line_lower,
-            PLANNING_KEYWORDS,
-        );
-        features.project_keyword_count += count_keyword_hits(
-            &line_lower,
-            PROJECT_KEYWORDS,
-        );
+        features.setup_keyword_count += count_keyword_hits(&line_lower, SETUP_KEYWORDS);
+        features.planning_keyword_count += count_keyword_hits(&line_lower, PLANNING_KEYWORDS);
+        features.project_keyword_count += count_keyword_hits(&line_lower, PROJECT_KEYWORDS);
         features.journal_keyword_count += count_keyword_hits(
             &line_lower,
             &[
@@ -297,14 +286,8 @@ fn scan_text(features: &mut ArtifactFeatures, text: &str) {
                 "i want",
             ],
         );
-        features.scientific_keyword_count += count_keyword_hits(
-            &line_lower,
-            SCIENTIFIC_KEYWORDS,
-        );
-        features.technical_keyword_count += count_keyword_hits(
-            &line_lower,
-            TECHNICAL_KEYWORDS,
-        );
+        features.scientific_keyword_count += count_keyword_hits(&line_lower, SCIENTIFIC_KEYWORDS);
+        features.technical_keyword_count += count_keyword_hits(&line_lower, TECHNICAL_KEYWORDS);
         features.definition_phrase_count += count_definition_phrases(&line_lower);
         features.first_person_count += count_keyword_hits(
             &line_lower,
@@ -385,11 +368,17 @@ const TECHNICAL_KEYWORDS: &[&str] = &[
 const PERSONAL_KEYWORDS: &[&str] = &["my ", "myself", "personal", "for me", "i "];
 
 fn count_markers(line: &str, markers: &[&str]) -> usize {
-    markers.iter().filter(|marker| line.contains(**marker)).count()
+    markers
+        .iter()
+        .filter(|marker| line.contains(**marker))
+        .count()
 }
 
 fn count_keyword_hits(line: &str, keywords: &[&str]) -> usize {
-    keywords.iter().filter(|keyword| line.contains(**keyword)).count()
+    keywords
+        .iter()
+        .filter(|keyword| line.contains(**keyword))
+        .count()
 }
 
 fn count_definition_phrases(line: &str) -> usize {

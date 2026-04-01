@@ -21,12 +21,12 @@ use crate::storage::{
     ClassificationObjectJson, ConversationWindowRef, DerivationRunStatus, DerivationRunType,
     DerivedMetadataWriteStore, DerivedObjectEmbeddingItem, DerivedObjectEmbeddingPayload,
     DerivedObjectEmbeddingStore, DerivedObjectPayload, EnrichmentJobLifecycleStore,
-    EnrichmentStateStore, EnrichmentTier, EntityObjectJson, EvidenceRole,
-    ExtractedClassification, ExtractedMemory, InputScopeType, JobStatus, MemoryObjectJson,
-    NewDerivationRun, NewDerivedObject, NewDerivedObjectEmbedding, NewEnrichmentJob,
-    NewEvidenceLink, ObjectStatus, OriginKind, ReconciliationDecision,
-    ReconciliationDecisionKind, RelationshipObjectJson, RetrievalIntent, RetrievalResultSet,
-    ScopeType, SummaryObjectJson, SupportStrength, WriteDerivationAttempt, WriteDerivedObject,
+    EnrichmentStateStore, EnrichmentTier, EntityObjectJson, EvidenceRole, ExtractedClassification,
+    ExtractedMemory, InputScopeType, JobStatus, MemoryObjectJson, NewDerivationRun,
+    NewDerivedObject, NewDerivedObjectEmbedding, NewEnrichmentJob, NewEvidenceLink, ObjectStatus,
+    OriginKind, ReconciliationDecision, ReconciliationDecisionKind, RelationshipObjectJson,
+    RetrievalIntent, RetrievalResultSet, ScopeType, SummaryObjectJson, SupportStrength,
+    WriteDerivationAttempt, WriteDerivedObject,
 };
 use log::{debug, error, info, warn};
 use rand::random;
@@ -1470,28 +1470,31 @@ pub(crate) fn merge_chunk_outputs(
         }
     }
 
-    cleanup_artifact_processor_output(input, ArtifactProcessorOutput {
-        pipeline_name: first.pipeline_name,
-        pipeline_version: first.pipeline_version,
-        provider_name: first.provider_name,
-        model_name: first.model_name,
-        prompt_version: first.prompt_version,
-        usage: None,
-        summary: SummaryOutput {
-            title: summary_titles
-                .first()
-                .cloned()
-                .or_else(|| input.title.clone()),
-            body_text: summary_bodies.join(" "),
-            evidence_segment_ids: summary_evidence,
+    cleanup_artifact_processor_output(
+        input,
+        ArtifactProcessorOutput {
+            pipeline_name: first.pipeline_name,
+            pipeline_version: first.pipeline_version,
+            provider_name: first.provider_name,
+            model_name: first.model_name,
+            prompt_version: first.prompt_version,
+            usage: None,
+            summary: SummaryOutput {
+                title: summary_titles
+                    .first()
+                    .cloned()
+                    .or_else(|| input.title.clone()),
+                body_text: summary_bodies.join(" "),
+                evidence_segment_ids: summary_evidence,
+            },
+            classifications: classifications.into_values().collect(),
+            memories: memories.into_values().collect(),
+            entities: entities.into_values().collect(),
+            relationships: relationships.into_values().collect(),
+            retrieval_intents: retrieval_intents.into_values().collect(),
+            importance_score,
         },
-        classifications: classifications.into_values().collect(),
-        memories: memories.into_values().collect(),
-        entities: entities.into_values().collect(),
-        relationships: relationships.into_values().collect(),
-        retrieval_intents: retrieval_intents.into_values().collect(),
-        importance_score,
-    })
+    )
 }
 
 fn collected_output_evidence_segment_ids(output: &ArtifactProcessorOutput) -> HashSet<String> {
@@ -1978,9 +1981,9 @@ pub(crate) fn build_derivation_attempt(
     }
 
     for entity in &extraction_result.entities {
-        let decision = decisions
-            .iter()
-            .find(|decision| decision.target_kind == "entity" && decision.target_key == entity_target_key(entity));
+        let decision = decisions.iter().find(|decision| {
+            decision.target_kind == "entity" && decision.target_key == entity_target_key(entity)
+        });
         if let Some(decision) = decision {
             if matches!(
                 decision.decision_kind,

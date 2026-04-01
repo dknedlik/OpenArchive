@@ -38,7 +38,8 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
     }
 
     fn estimate_size_bytes(&self, input: &ArtifactProcessorInput) -> Result<usize, ProcessorError> {
-        let user_prompt = build_two_phase_candidate_user_prompt(input)?;
+        let user_prompt =
+            build_two_phase_candidate_user_prompt_with_flavor(input, PromptFlavor::Gemini)?;
         Ok(candidate_system_prompt(input).len() + user_prompt.len())
     }
 
@@ -52,7 +53,7 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
 
         let mut requests = Vec::with_capacity(inputs.len());
         for input in inputs {
-            match build_two_phase_candidate_user_prompt(input) {
+            match build_two_phase_candidate_user_prompt_with_flavor(input, PromptFlavor::Gemini) {
                 Ok(user_prompt) => requests.push(GeminiBatchEnrichmentRequest {
                     key: input.artifact_id.clone(),
                     system_prompt: candidate_system_prompt(input).to_string(),
@@ -71,7 +72,7 @@ impl ArtifactBatchProcessor for GeminiBatchProcessor {
                                 message: err.to_string(),
                             })
                         })
-                        .collect();
+                        .collect::<Vec<_>>();
                 }
             }
         }
@@ -276,7 +277,8 @@ impl ExtractionBatchSubmitter for GeminiExtractionSubmitter {
     ) -> Result<BatchHandle, ProcessorError> {
         let mut requests = Vec::with_capacity(inputs.len());
         for input in inputs {
-            let user_prompt = build_two_phase_candidate_user_prompt(input)?;
+            let user_prompt =
+                build_two_phase_candidate_user_prompt_with_flavor(input, PromptFlavor::Gemini)?;
             requests.push(GeminiBatchEnrichmentRequest {
                 key: artifact_processor_batch_custom_id(input),
                 system_prompt: candidate_system_prompt(input).to_string(),

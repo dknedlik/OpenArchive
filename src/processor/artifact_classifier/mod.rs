@@ -3,8 +3,8 @@ mod scoring;
 mod types;
 
 pub use types::{
-    ArchetypeScore, ArtifactArchetype, ArtifactClassificationDebug,
-    ArtifactClassificationProfile, ArtifactFacet, FacetScore,
+    ArchetypeScore, ArtifactArchetype, ArtifactClassificationDebug, ArtifactClassificationProfile,
+    ArtifactFacet, FacetScore,
 };
 
 use super::ArtifactProcessorInput;
@@ -54,7 +54,11 @@ mod tests {
                 },
             ],
             segments: vec![
-                segment(0, Some(ParticipantRole::User), "How do I set this up with Docker?"),
+                segment(
+                    0,
+                    Some(ParticipantRole::User),
+                    "How do I set this up with Docker?",
+                ),
                 segment(
                     1,
                     Some(ParticipantRole::Assistant),
@@ -129,7 +133,10 @@ mod tests {
         };
 
         let profile = classify_artifact(&input);
-        assert_eq!(profile.primary_archetype, ArtifactArchetype::DashboardTemplate);
+        assert_eq!(
+            profile.primary_archetype,
+            ArtifactArchetype::DashboardTemplate
+        );
         assert!(profile.facets.contains(&ArtifactFacet::Automation));
     }
 
@@ -151,7 +158,10 @@ mod tests {
         };
 
         let profile = classify_artifact(&input);
-        assert_ne!(profile.primary_archetype, ArtifactArchetype::DashboardTemplate);
+        assert_ne!(
+            profile.primary_archetype,
+            ArtifactArchetype::DashboardTemplate
+        );
         assert!(profile.facets.contains(&ArtifactFacet::Setup));
         assert!(profile.facets.contains(&ArtifactFacet::Technical));
     }
@@ -200,7 +210,10 @@ mod tests {
         };
 
         let profile = classify_artifact(&input);
-        assert_eq!(profile.primary_archetype, ArtifactArchetype::DashboardTemplate);
+        assert_eq!(
+            profile.primary_archetype,
+            ArtifactArchetype::DashboardTemplate
+        );
     }
 
     #[test]

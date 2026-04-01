@@ -16,6 +16,9 @@ pub(crate) fn candidate_output_schema_with_allowed_refs(
     allowed_refs: &[String],
 ) -> serde_json::Value {
     let policy = extraction_policy_for(input);
+    let memory_role_values = policy.memory_role_values();
+    let relationship_type_values = policy.relationship_type_values();
+    let retrieval_intent_values = policy.retrieval_intent_values();
     let evidence_id_item = if allowed_refs.is_empty() {
         json!({ "type": "string", "minLength": 1 })
     } else {
@@ -83,6 +86,7 @@ pub(crate) fn candidate_output_schema_with_allowed_refs(
                     "required": [
                         "title",
                         "body_text",
+                        "memory_role",
                         "evidence_segment_ids",
                         "durability_label",
                         "retrieval_value_label",
@@ -92,6 +96,7 @@ pub(crate) fn candidate_output_schema_with_allowed_refs(
                     "properties": {
                         "title": { "type": "string", "minLength": 1 },
                         "body_text": { "type": "string", "minLength": 1 },
+                        "memory_role": { "type": "string", "enum": memory_role_values },
                         "durability_label": { "type": "string", "enum": ["low", "medium", "high"] },
                         "retrieval_value_label": { "type": "string", "enum": ["low", "medium", "high"] },
                         "consequentiality_label": { "type": "string", "enum": ["low", "medium", "high"] },
@@ -139,7 +144,7 @@ pub(crate) fn candidate_output_schema_with_allowed_refs(
                         "evidence_segment_ids"
                     ],
                     "properties": {
-                        "relationship_type": { "type": "string", "minLength": 1 },
+                        "relationship_type": { "type": "string", "enum": relationship_type_values },
                         "subject_key": { "type": "string", "minLength": 1 },
                         "object_key": { "type": "string", "minLength": 1 },
                         "title": { "type": "string", "minLength": 1 },
@@ -165,7 +170,7 @@ pub(crate) fn candidate_output_schema_with_allowed_refs(
                         "query_text": { "type": "string", "minLength": 1 },
                         "intent_type": {
                             "type": "string",
-                            "enum": ["topic_lookup", "memory_match", "entity_lookup", "relationship_lookup", "contradiction_check"]
+                            "enum": retrieval_intent_values
                         },
                         "evidence_segment_ids": {
                             "type": "array",

@@ -93,7 +93,8 @@ fn filter_retrieval_intents_for_archetype(
     intents
         .into_iter()
         .filter(|intent| {
-            let normalized = normalize_merge_text(&format!("{} {}", intent.question, intent.query_text));
+            let normalized =
+                normalize_merge_text(&format!("{} {}", intent.question, intent.query_text));
             !looks_like_low_value_document_memory(&normalized)
         })
         .collect()
@@ -416,6 +417,58 @@ pub(crate) fn canonicalize_memory_type(raw: &str, title: &str, body_text: &str) 
     ) {
         return "reference".to_string();
     }
+    if matches!(
+        raw.as_str(),
+        "reference_fact"
+            | "reference fact"
+            | "definition"
+            | "alias"
+            | "comparison"
+            | "formula"
+            | "glossary_term"
+            | "glossary term"
+            | "cross_reference"
+            | "cross reference"
+            | "procedure_step"
+            | "procedure step"
+            | "requirement"
+            | "constraint"
+            | "configuration"
+            | "command"
+            | "navigation"
+            | "display_rule"
+            | "display rule"
+            | "template_rule"
+            | "template rule"
+    ) {
+        return "reference".to_string();
+    }
+    if matches!(
+        raw.as_str(),
+        "decision"
+            | "action_item"
+            | "action item"
+            | "status"
+            | "owner"
+            | "open_question"
+            | "open question"
+            | "project_fact"
+            | "project fact"
+            | "attendee"
+    ) {
+        return "project_fact".to_string();
+    }
+    if matches!(
+        raw.as_str(),
+        "state_change"
+            | "state change"
+            | "reflection"
+            | "event"
+            | "ongoing_state"
+            | "ongoing state"
+    ) {
+        return "ongoing_state".to_string();
+    }
 
     if combined.contains("user weigh")
         || combined.contains("body weight")
@@ -538,7 +591,9 @@ pub(crate) fn canonicalize_memory_type_for_input(
     }
     if matches!(
         archetype,
-        ArtifactArchetype::Conversation | ArtifactArchetype::WorkingNote | ArtifactArchetype::Unknown
+        ArtifactArchetype::Conversation
+            | ArtifactArchetype::WorkingNote
+            | ArtifactArchetype::Unknown
     ) && memory_looks_project(&combined)
     {
         return normalized;
