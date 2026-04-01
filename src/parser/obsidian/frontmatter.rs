@@ -170,7 +170,9 @@ fn extract_aliases_from_value(value: &serde_yaml::Value) -> Vec<ParsedVaultAlias
 fn flatten_tag_strings(value: &serde_yaml::Value) -> Vec<String> {
     match value {
         serde_yaml::Value::String(text) => split_tag_string(text),
-        serde_yaml::Value::Sequence(values) => values.iter().flat_map(flatten_tag_strings).collect(),
+        serde_yaml::Value::Sequence(values) => {
+            values.iter().flat_map(flatten_tag_strings).collect()
+        }
         _ => scalar_text(value)
             .into_iter()
             .flat_map(|value| split_tag_string(&value))

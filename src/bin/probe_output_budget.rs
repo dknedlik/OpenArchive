@@ -1,5 +1,6 @@
 #![deny(warnings)]
 
+use std::error::Error as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -25,7 +26,9 @@ use open_archive::VisibilityStatus;
 
 #[derive(Debug, Parser)]
 #[command(name = "probe_output_budget")]
-#[command(about = "Replay imported artifacts or raw markdown/text files against real extraction budgets")]
+#[command(
+    about = "Replay imported artifacts or raw markdown/text files against real extraction budgets"
+)]
 struct Args {
     /// Artifact ids to probe.
     #[arg()]
@@ -66,7 +69,9 @@ fn main() -> Result<()> {
         load_inputs_from_paths(&args)?
     } else {
         if args.artifact_ids.is_empty() {
-            return Err(anyhow!("provide at least one artifact id or use --path/--dir"));
+            return Err(anyhow!(
+                "provide at least one artifact id or use --path/--dir"
+            ));
         }
         let postgres =
             PostgresConfig::from_env().context("failed to load Postgres config from env")?;
@@ -184,7 +189,7 @@ fn main() -> Result<()> {
                 .map_err(|err| anyhow!("failed to build processor: {err}"))?;
 
             let started = Instant::now();
-            match processor.process(&input) {
+            match processor.process(input) {
                 Ok(output) => {
                     println!(
                         "  budget {:>4}: ok ({:.2}s) | memories {} | classifications {} | importance {}{}",
@@ -210,6 +215,13 @@ fn main() -> Result<()> {
                         started.elapsed().as_secs_f64(),
                         err
                     );
+                    let mut source = err.source();
+                    let mut depth = 0;
+                    while let Some(cause) = source {
+                        depth += 1;
+                        println!("    caused by[{depth}]: {}", cause);
+                        source = cause.source();
+                    }
                 }
             }
         }
@@ -319,7 +331,11 @@ fn build_input_from_file(path: PathBuf) -> Result<ArtifactProcessorInput> {
         .with_context(|| format!("failed to parse {}", path.display()))?;
     let title = title_hint
         .or_else(|| preferred_markdown_title(&path, parsed.title))
-        .or_else(|| path.file_stem().and_then(|value| value.to_str()).map(str::to_string));
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+        });
 
     Ok(ArtifactProcessorInput {
         artifact_id: path.display().to_string(),

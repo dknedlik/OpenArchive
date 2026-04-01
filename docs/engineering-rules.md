@@ -62,6 +62,11 @@
 
 - For Rust changes, run focused tests first and broader tests second.
 - Prefer `cargo test --lib` and targeted tests over speculative large refactors.
+- Before calling Rust changes ready, run `make verify`. Keep that target aligned
+  with `.github/workflows/ci.yml` so local verification matches CI.
+- The local repo installs a `pre-push` hook through `core.hooksPath=.githooks`
+  so pushes run `make verify` automatically. Keep the hook thin and keep the
+  real checks in `make verify`.
 - For docs-only changes, do not run tests unless the docs changed commands or
   runtime assumptions that should be verified.
 

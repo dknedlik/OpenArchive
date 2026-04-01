@@ -39,6 +39,7 @@ struct ModelClassification {
 struct ModelCandidateMemory {
     title: String,
     body_text: String,
+    memory_role: String,
     evidence_segment_ids: Vec<String>,
     durability_label: String,
     retrieval_value_label: String,
@@ -137,96 +138,99 @@ impl ModelCandidateArtifactOutput {
         prompt_version: &str,
     ) -> ArtifactProcessorOutput {
         let resolved = self.resolve_evidence_aliases(input);
-        cleanup_artifact_processor_output(input, ArtifactProcessorOutput {
-            pipeline_name: pipeline_name.to_string(),
-            pipeline_version: "v1".to_string(),
-            provider_name: Some(provider_name.to_string()),
-            model_name: Some(model_name),
-            prompt_version: Some(prompt_version.to_string()),
-            usage,
-            summary: SummaryOutput {
-                title: normalize_optional_text(resolved.summary_draft.title),
-                body_text: resolved.summary_draft.body_text.trim().to_string(),
-                evidence_segment_ids: resolved.summary_draft.evidence_segment_ids,
+        cleanup_artifact_processor_output(
+            input,
+            ArtifactProcessorOutput {
+                pipeline_name: pipeline_name.to_string(),
+                pipeline_version: "v1".to_string(),
+                provider_name: Some(provider_name.to_string()),
+                model_name: Some(model_name),
+                prompt_version: Some(prompt_version.to_string()),
+                usage,
+                summary: SummaryOutput {
+                    title: normalize_optional_text(resolved.summary_draft.title),
+                    body_text: resolved.summary_draft.body_text.trim().to_string(),
+                    evidence_segment_ids: resolved.summary_draft.evidence_segment_ids,
+                },
+                classifications: resolved
+                    .classification_candidates
+                    .into_iter()
+                    .map(|classification| ClassificationOutput {
+                        title: normalize_optional_text(classification.title),
+                        body_text: normalize_optional_text(classification.body_text),
+                        classification_type: classification.classification_type,
+                        classification_value: classification.classification_value,
+                        evidence_segment_ids: classification.evidence_segment_ids,
+                    })
+                    .collect(),
+                memories: resolved
+                    .memory_candidates
+                    .into_iter()
+                    .map(|memory| {
+                        let title = normalize_optional_text(memory.title);
+                        let body_text = memory.body_text.trim().to_string();
+                        let memory_type = canonicalize_memory_type_for_input(
+                            input,
+                            &memory.memory_role,
+                            title.as_deref().unwrap_or_default(),
+                            &body_text,
+                        );
+                        let candidate_key = memory_candidate_key_from_fields(
+                            &memory_type,
+                            ScopeType::Artifact,
+                            &input.artifact_id,
+                            title.as_deref(),
+                            &body_text,
+                        );
+                        MemoryOutput {
+                            candidate_key,
+                            title,
+                            body_text,
+                            memory_type,
+                            memory_scope: ScopeType::Artifact,
+                            memory_scope_value: input.artifact_id.clone(),
+                            evidence_segment_ids: memory.evidence_segment_ids,
+                        }
+                    })
+                    .collect(),
+                entities: resolved
+                    .entity_candidates
+                    .into_iter()
+                    .map(|entity| EntityOutput {
+                        entity_key: entity.entity_key.trim().to_string(),
+                        display_name: entity.display_name.trim().to_string(),
+                        entity_type: canonicalize_entity_type(&entity.entity_type),
+                        evidence_segment_ids: entity.evidence_segment_ids,
+                    })
+                    .collect(),
+                relationships: resolved
+                    .relationship_candidates
+                    .into_iter()
+                    .map(|relationship| RelationshipOutput {
+                        relationship_type: relationship.relationship_type.trim().to_string(),
+                        subject_key: relationship.subject_key.trim().to_string(),
+                        object_key: relationship.object_key.trim().to_string(),
+                        title: normalize_optional_text(relationship.title),
+                        body_text: relationship.body_text.trim().to_string(),
+                        confidence_label: relationship.confidence_label.trim().to_string(),
+                        evidence_segment_ids: relationship.evidence_segment_ids,
+                    })
+                    .collect(),
+                retrieval_intents: resolved
+                    .retrieval_candidates
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, intent)| RetrievalIntent {
+                        intent_id: format!("intent-{}", index + 1),
+                        question: intent.question.trim().to_string(),
+                        query_text: intent.query_text.trim().to_string(),
+                        intent_type: intent.intent_type.trim().to_string(),
+                        evidence_segment_ids: intent.evidence_segment_ids,
+                    })
+                    .collect(),
+                importance_score: resolved.importance_score,
             },
-            classifications: resolved
-                .classification_candidates
-                .into_iter()
-                .map(|classification| ClassificationOutput {
-                    title: normalize_optional_text(classification.title),
-                    body_text: normalize_optional_text(classification.body_text),
-                    classification_type: classification.classification_type,
-                    classification_value: classification.classification_value,
-                    evidence_segment_ids: classification.evidence_segment_ids,
-                })
-                .collect(),
-            memories: resolved
-                .memory_candidates
-                .into_iter()
-                .map(|memory| {
-                    let title = normalize_optional_text(memory.title);
-                    let body_text = memory.body_text.trim().to_string();
-                    let memory_type = canonicalize_memory_type_for_input(
-                        input,
-                        "",
-                        title.as_deref().unwrap_or_default(),
-                        &body_text,
-                    );
-                    let candidate_key = memory_candidate_key_from_fields(
-                        &memory_type,
-                        ScopeType::Artifact,
-                        &input.artifact_id,
-                        title.as_deref(),
-                        &body_text,
-                    );
-                    MemoryOutput {
-                        candidate_key,
-                        title,
-                        body_text,
-                        memory_type,
-                        memory_scope: ScopeType::Artifact,
-                        memory_scope_value: input.artifact_id.clone(),
-                        evidence_segment_ids: memory.evidence_segment_ids,
-                    }
-                })
-                .collect(),
-            entities: resolved
-                .entity_candidates
-                .into_iter()
-                .map(|entity| EntityOutput {
-                    entity_key: entity.entity_key.trim().to_string(),
-                    display_name: entity.display_name.trim().to_string(),
-                    entity_type: canonicalize_entity_type(&entity.entity_type),
-                    evidence_segment_ids: entity.evidence_segment_ids,
-                })
-                .collect(),
-            relationships: resolved
-                .relationship_candidates
-                .into_iter()
-                .map(|relationship| RelationshipOutput {
-                    relationship_type: relationship.relationship_type.trim().to_string(),
-                    subject_key: relationship.subject_key.trim().to_string(),
-                    object_key: relationship.object_key.trim().to_string(),
-                    title: normalize_optional_text(relationship.title),
-                    body_text: relationship.body_text.trim().to_string(),
-                    confidence_label: relationship.confidence_label.trim().to_string(),
-                    evidence_segment_ids: relationship.evidence_segment_ids,
-                })
-                .collect(),
-            retrieval_intents: resolved
-                .retrieval_candidates
-                .into_iter()
-                .enumerate()
-                .map(|(index, intent)| RetrievalIntent {
-                    intent_id: format!("intent-{}", index + 1),
-                    question: intent.question.trim().to_string(),
-                    query_text: intent.query_text.trim().to_string(),
-                    intent_type: intent.intent_type.trim().to_string(),
-                    evidence_segment_ids: intent.evidence_segment_ids,
-                })
-                .collect(),
-            importance_score: resolved.importance_score,
-        })
+        )
     }
 
     pub(crate) fn validate(
@@ -278,12 +282,29 @@ impl ModelCandidateArtifactOutput {
             },
         );
 
+        let policy = extraction_policy_for(input);
+        let allowed_memory_roles = policy.memory_role_values();
+        let allowed_relationship_types = policy.relationship_type_values();
+        let allowed_retrieval_intents = policy.retrieval_intent_values();
         self.memory_candidates = retain_valid_items(self.memory_candidates, |index, memory| {
             validate_text_field(&format!("memory_candidates[{index}].title"), &memory.title)?;
             validate_text_field(
                 &format!("memory_candidates[{index}].body_text"),
                 &memory.body_text,
             )?;
+            validate_text_field(
+                &format!("memory_candidates[{index}].memory_role"),
+                &memory.memory_role,
+            )?;
+            if !allowed_memory_roles.contains(&memory.memory_role.as_str()) {
+                return Err(ProcessorError::InvalidModelOutput {
+                    detail: format!(
+                        "memory_candidates[{index}].memory_role {:?} is not allowed for {}",
+                        memory.memory_role,
+                        policy.profile.primary_archetype.as_str()
+                    ),
+                });
+            }
             if !matches!(memory.durability_label.as_str(), "low" | "medium" | "high") {
                 return Err(ProcessorError::InvalidModelOutput {
                     detail: format!(
@@ -352,12 +373,22 @@ impl ModelCandidateArtifactOutput {
             )
         });
 
-        self.relationship_candidates =
-            retain_valid_items(self.relationship_candidates, |index, relationship| {
+        self.relationship_candidates = retain_valid_items(
+            self.relationship_candidates,
+            |index, relationship| {
                 validate_text_field(
                     &format!("relationship_candidates[{index}].relationship_type"),
                     &relationship.relationship_type,
                 )?;
+                if !allowed_relationship_types.contains(&relationship.relationship_type.as_str()) {
+                    return Err(ProcessorError::InvalidModelOutput {
+                        detail: format!(
+                            "relationship_candidates[{index}].relationship_type {:?} is not allowed for {}",
+                            relationship.relationship_type,
+                            policy.profile.primary_archetype.as_str()
+                        ),
+                    });
+                }
                 validate_text_field(
                     &format!("relationship_candidates[{index}].subject_key"),
                     &relationship.subject_key,
@@ -390,7 +421,8 @@ impl ModelCandidateArtifactOutput {
                     &relationship.evidence_segment_ids,
                     &valid_segment_ids,
                 )
-            });
+            },
+        );
 
         self.retrieval_candidates =
             retain_valid_items(self.retrieval_candidates, |index, intent| {
@@ -402,18 +434,12 @@ impl ModelCandidateArtifactOutput {
                     &format!("retrieval_candidates[{index}].query_text"),
                     &intent.query_text,
                 )?;
-                if !matches!(
-                    intent.intent_type.as_str(),
-                    "topic_lookup"
-                        | "memory_match"
-                        | "entity_lookup"
-                        | "relationship_lookup"
-                        | "contradiction_check"
-                ) {
+                if !allowed_retrieval_intents.contains(&intent.intent_type.as_str()) {
                     return Err(ProcessorError::InvalidModelOutput {
                         detail: format!(
-                            "retrieval_candidates[{index}].intent_type {:?} is not allowed",
-                            intent.intent_type
+                            "retrieval_candidates[{index}].intent_type {:?} is not allowed for {}",
+                            intent.intent_type,
+                            policy.profile.primary_archetype.as_str()
                         ),
                     });
                 }

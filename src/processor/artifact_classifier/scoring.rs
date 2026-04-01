@@ -60,7 +60,10 @@ pub(super) fn classify(features: &ArtifactFeatures) -> ArtifactClassificationDeb
             .then_with(|| left.facet.as_str().cmp(right.facet.as_str()))
     });
 
-    let second_score = archetype_scores.get(1).map(|score| score.score).unwrap_or(0);
+    let second_score = archetype_scores
+        .get(1)
+        .map(|score| score.score)
+        .unwrap_or(0);
     let primary_archetype = if primary.score >= 4 {
         primary.archetype
     } else {
@@ -86,9 +89,7 @@ pub(super) fn classify(features: &ArtifactFeatures) -> ArtifactClassificationDeb
     }
 }
 
-fn score_archetypes(
-    features: &ArtifactFeatures,
-) -> Vec<(ArtifactArchetype, ScoreCard)> {
+fn score_archetypes(features: &ArtifactFeatures) -> Vec<(ArtifactArchetype, ScoreCard)> {
     vec![
         (
             ArtifactArchetype::Conversation,
@@ -98,22 +99,13 @@ fn score_archetypes(
             ArtifactArchetype::ProceduralNote,
             score_procedural(features),
         ),
-        (
-            ArtifactArchetype::ReferenceNote,
-            score_reference(features),
-        ),
+        (ArtifactArchetype::ReferenceNote, score_reference(features)),
         (
             ArtifactArchetype::DefinitionNote,
             score_definition(features),
         ),
-        (
-            ArtifactArchetype::WorkingNote,
-            score_working(features),
-        ),
-        (
-            ArtifactArchetype::JournalLog,
-            score_journal(features),
-        ),
+        (ArtifactArchetype::WorkingNote, score_working(features)),
+        (ArtifactArchetype::JournalLog, score_journal(features)),
         (
             ArtifactArchetype::DashboardTemplate,
             score_dashboard(features),
@@ -143,8 +135,14 @@ fn score_facets(
             ArtifactFacet::Planning,
             score_planning_facet(features, primary_archetype),
         ),
-        (ArtifactFacet::Personal, score_personal_facet(features, primary_archetype)),
-        (ArtifactFacet::Reference, score_reference_facet(features, primary_archetype)),
+        (
+            ArtifactFacet::Personal,
+            score_personal_facet(features, primary_archetype),
+        ),
+        (
+            ArtifactFacet::Reference,
+            score_reference_facet(features, primary_archetype),
+        ),
         (
             ArtifactFacet::Scientific,
             score_scientific_facet(features, primary_archetype),
@@ -174,10 +172,16 @@ fn score_conversation(features: &ArtifactFeatures) -> ScoreCard {
         card.add(2, "the artifact contains multiple questions");
     }
     if features.heading_count >= 4 {
-        card.add(-2, "heavy heading structure looks more like a document than a chat");
+        card.add(
+            -2,
+            "heavy heading structure looks more like a document than a chat",
+        );
     }
     if features.has_document_type_definition || features.dataview_marker_count > 0 {
-        card.add(-3, "note metadata or query syntax points away from a conversation");
+        card.add(
+            -3,
+            "note metadata or query syntax points away from a conversation",
+        );
     }
     card
 }
@@ -191,7 +195,10 @@ fn score_procedural(features: &ArtifactFeatures) -> ScoreCard {
         card.add(6, "numbered steps suggest a procedure");
     }
     if features.imperative_line_count >= 3 {
-        card.add(5, "multiple imperative instruction lines suggest a procedure");
+        card.add(
+            5,
+            "multiple imperative instruction lines suggest a procedure",
+        );
     }
     if features.setup_keyword_count >= 3 {
         card.add(5, "setup and configuration language is prominent");
@@ -206,13 +213,22 @@ fn score_procedural(features: &ArtifactFeatures) -> ScoreCard {
         card.add(3, "section headings align with setup or usage content");
     }
     if features.imperative_line_count >= 2 && features.heading_count > 0 {
-        card.add(2, "instructional headings and imperative lines reinforce a guide format");
+        card.add(
+            2,
+            "instructional headings and imperative lines reinforce a guide format",
+        );
     }
     if features.artifact_class == crate::storage::types::ArtifactClass::Conversation {
-        card.add(-5, "conversation artifacts should not be routed as procedures by default");
+        card.add(
+            -5,
+            "conversation artifacts should not be routed as procedures by default",
+        );
     }
     if features.dataview_marker_count > 0 || features.templater_marker_count > 0 {
-        card.add(-4, "automation syntax points toward a dashboard or template");
+        card.add(
+            -4,
+            "automation syntax points toward a dashboard or template",
+        );
     }
     card
 }
@@ -220,34 +236,64 @@ fn score_procedural(features: &ArtifactFeatures) -> ScoreCard {
 fn score_reference(features: &ArtifactFeatures) -> ScoreCard {
     let mut card = ScoreCard::default();
     if features.artifact_class == crate::storage::types::ArtifactClass::Document {
-        card.add(2, "document artifacts default toward reference unless stronger cues win");
+        card.add(
+            2,
+            "document artifacts default toward reference unless stronger cues win",
+        );
     }
     if features.task_count == 0 && features.numbered_list_count == 0 {
-        card.add(2, "lack of tasks or procedures suggests a reference-style note");
+        card.add(
+            2,
+            "lack of tasks or procedures suggests a reference-style note",
+        );
     }
     if features.definition_phrase_count > 0 {
-        card.add(2, "definition-like phrasing overlaps with reference material");
+        card.add(
+            2,
+            "definition-like phrasing overlaps with reference material",
+        );
     }
     if features.char_count > 0 && features.char_count < 4_000 {
-        card.add(2, "short focused documents often behave like reference notes");
+        card.add(
+            2,
+            "short focused documents often behave like reference notes",
+        );
     }
     if features.heading_count >= 3 && features.char_count > 1_500 {
-        card.add(2, "multi-section descriptive documents often behave like reference material");
+        card.add(
+            2,
+            "multi-section descriptive documents often behave like reference material",
+        );
     }
     if features.imperative_line_count == 0 && features.heading_count > 0 {
-        card.add(2, "descriptive sectioning without imperative steps suggests reference material");
+        card.add(
+            2,
+            "descriptive sectioning without imperative steps suggests reference material",
+        );
     }
     if features.has_document_type_definition {
-        card.add(-4, "explicit definition metadata should route to the definition archetype");
+        card.add(
+            -4,
+            "explicit definition metadata should route to the definition archetype",
+        );
     }
     if features.has_document_type_meeting {
-        card.add(-5, "explicit meeting metadata should route to active work or meeting-style notes");
+        card.add(
+            -5,
+            "explicit meeting metadata should route to active work or meeting-style notes",
+        );
     }
     if features.numbered_list_count >= 2 || features.task_count > 0 {
-        card.add(-3, "procedural or working-note structure is stronger than reference");
+        card.add(
+            -3,
+            "procedural or working-note structure is stronger than reference",
+        );
     }
     if features.imperative_line_count >= 3 {
-        card.add(-4, "imperative instruction flow is stronger than reference prose");
+        card.add(
+            -4,
+            "imperative instruction flow is stronger than reference prose",
+        );
     }
     card
 }
@@ -270,10 +316,16 @@ fn score_definition(features: &ArtifactFeatures) -> ScoreCard {
         card.add(2, "short focused notes often match definition entries");
     }
     if features.heading_count >= 4 && features.char_count > 4_000 {
-        card.add(-3, "long multi-section documents are broader than a single definition entry");
+        card.add(
+            -3,
+            "long multi-section documents are broader than a single definition entry",
+        );
     }
     if features.numbered_list_count >= 2 || features.task_count > 0 {
-        card.add(-4, "task or step structure is atypical for a glossary entry");
+        card.add(
+            -4,
+            "task or step structure is atypical for a glossary entry",
+        );
     }
     card
 }
@@ -287,19 +339,31 @@ fn score_working(features: &ArtifactFeatures) -> ScoreCard {
         card.add(2, "title points at project coordination or meeting work");
     }
     if features.title_project_keyword_count > 0 && features.planning_keyword_count >= 2 {
-        card.add(3, "project or meeting titles paired with planning language suggest active work");
+        card.add(
+            3,
+            "project or meeting titles paired with planning language suggest active work",
+        );
     }
     if features.title_project_keyword_count > 0 && features.heading_count >= 2 {
-        card.add(2, "project or meeting titles with structured sections suggest an active work note");
+        card.add(
+            2,
+            "project or meeting titles with structured sections suggest an active work note",
+        );
     }
     if features.title_looks_date && features.title_project_keyword_count > 0 {
-        card.add(3, "dated project titles often indicate meetings or work-log notes");
+        card.add(
+            3,
+            "dated project titles often indicate meetings or work-log notes",
+        );
     }
     if features.task_count >= 2 {
         card.add(4, "checkboxes or task lines suggest a working note");
     }
     if features.task_count > 0 && features.planning_keyword_count >= 2 {
-        card.add(3, "tasks and planning language together suggest active work tracking");
+        card.add(
+            3,
+            "tasks and planning language together suggest active work tracking",
+        );
     }
     if features.planning_keyword_count >= 3 {
         card.add(4, "planning and decision language is prominent");
@@ -311,7 +375,10 @@ fn score_working(features: &ArtifactFeatures) -> ScoreCard {
         card.add(2, "metadata suggests project or concept tracking");
     }
     if features.numbered_list_count > 0 && features.task_count > 0 {
-        card.add(2, "step lists and tasks often appear together in working notes");
+        card.add(
+            2,
+            "step lists and tasks often appear together in working notes",
+        );
     }
     if features.metadata_property_keys.contains("status")
         || features.metadata_property_keys.contains("owner")
@@ -321,13 +388,22 @@ fn score_working(features: &ArtifactFeatures) -> ScoreCard {
         card.add(2, "metadata includes active work tracking fields");
     }
     if features.imperative_line_count >= 3 && features.task_count == 0 {
-        card.add(-3, "instruction-heavy documents without task tracking are less likely to be working notes");
+        card.add(
+            -3,
+            "instruction-heavy documents without task tracking are less likely to be working notes",
+        );
     }
     if features.char_count > 5_000 && features.task_count < 2 {
-        card.add(-2, "long documents without strong task structure are less likely to be working notes");
+        card.add(
+            -2,
+            "long documents without strong task structure are less likely to be working notes",
+        );
     }
     if features.artifact_class == crate::storage::types::ArtifactClass::Conversation {
-        card.add(-2, "conversation artifacts should not route to working notes without stronger cues");
+        card.add(
+            -2,
+            "conversation artifacts should not route to working notes without stronger cues",
+        );
     }
     card
 }
@@ -347,7 +423,10 @@ fn score_journal(features: &ArtifactFeatures) -> ScoreCard {
         card.add(2, "first-person language is prominent");
     }
     if features.command_line_count > 0 || features.dataview_marker_count > 0 {
-        card.add(-3, "automation or code heavy notes are unlikely to be journals");
+        card.add(
+            -3,
+            "automation or code heavy notes are unlikely to be journals",
+        );
     }
     card
 }
@@ -355,7 +434,10 @@ fn score_journal(features: &ArtifactFeatures) -> ScoreCard {
 fn score_dashboard(features: &ArtifactFeatures) -> ScoreCard {
     let mut card = ScoreCard::default();
     if features.has_document_type_dashboard {
-        card.add(5, "document_type explicitly marks this as a dashboard or index note");
+        card.add(
+            5,
+            "document_type explicitly marks this as a dashboard or index note",
+        );
     }
     if features.dataview_marker_count >= 2 {
         card.add(8, "dataview or query markers dominate the note");
@@ -379,7 +461,10 @@ fn score_dashboard(features: &ArtifactFeatures) -> ScoreCard {
         card.add(2, "link-heavy, lower-prose notes often act as dashboards");
     }
     if features.artifact_class == crate::storage::types::ArtifactClass::Conversation {
-        card.add(-6, "conversation artifacts should not route to dashboard/template");
+        card.add(
+            -6,
+            "conversation artifacts should not route to dashboard/template",
+        );
     }
     card
 }
@@ -403,7 +488,10 @@ fn score_technical_facet(
             card.add(3, "code fences indicate technical content");
         }
         if features.technical_keyword_count >= 5 {
-            card.add(2, "technical vocabulary is sustained across the conversation");
+            card.add(
+                2,
+                "technical vocabulary is sustained across the conversation",
+            );
         }
         return card;
     }
@@ -467,7 +555,10 @@ fn score_project_facet(
             card.add(4, "metadata points at project or concept work");
         }
         if features.project_keyword_count >= 4 {
-            card.add(3, "project-oriented terms recur throughout the conversation");
+            card.add(
+                3,
+                "project-oriented terms recur throughout the conversation",
+            );
         }
         if features.project_keyword_count >= 2 && features.planning_keyword_count >= 3 {
             card.add(2, "project and planning language appear together");
@@ -528,7 +619,10 @@ fn score_personal_facet(
             card.add(4, "title explicitly frames the topic as personal");
         }
         if features.first_person_count >= 12 {
-            card.add(2, "first-person language is sustained throughout the conversation");
+            card.add(
+                2,
+                "first-person language is sustained throughout the conversation",
+            );
         }
         return card;
     }
@@ -565,7 +659,10 @@ fn score_scientific_facet(
             card.add(4, "title points directly at scientific subject matter");
         }
         if features.scientific_keyword_count >= 4 {
-            card.add(3, "scientific vocabulary is sustained across the conversation");
+            card.add(
+                3,
+                "scientific vocabulary is sustained across the conversation",
+            );
         }
         return card;
     }
@@ -578,10 +675,16 @@ fn score_scientific_facet(
     ) && features.title_looks_term_like
         && features.scientific_keyword_count >= 1
     {
-        card.add(2, "term-like title plus science vocabulary suggests a scientific note");
+        card.add(
+            2,
+            "term-like title plus science vocabulary suggests a scientific note",
+        );
     }
     if features.title_looks_term_like && features.scientific_keyword_count >= 1 {
-        card.add(2, "term-like titles with science vocabulary suggest a scientific note");
+        card.add(
+            2,
+            "term-like titles with science vocabulary suggest a scientific note",
+        );
     }
     card
 }
@@ -613,7 +716,10 @@ fn reasons_for(
     facet_scores: &[FacetScore],
 ) -> Vec<String> {
     let mut reasons = Vec::new();
-    if let Some((_, card)) = archetype_cards.iter().find(|(candidate, _)| *candidate == archetype) {
+    if let Some((_, card)) = archetype_cards
+        .iter()
+        .find(|(candidate, _)| *candidate == archetype)
+    {
         let mut positives: Vec<_> = card
             .contributions
             .iter()
@@ -639,11 +745,8 @@ fn reasons_for(
 }
 
 fn select_primary_archetype(archetype_scores: &[ArchetypeScore]) -> ArchetypeScore {
-    archetype_scores
-        .first()
-        .cloned()
-        .unwrap_or(ArchetypeScore {
-            archetype: ArtifactArchetype::Unknown,
-            score: 0,
-        })
+    archetype_scores.first().cloned().unwrap_or(ArchetypeScore {
+        archetype: ArtifactArchetype::Unknown,
+        score: 0,
+    })
 }

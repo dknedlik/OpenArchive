@@ -28,7 +28,7 @@ impl ExtractionBatchSubmitter for GrokExtractionSubmitter {
             Ok(self.client.build_chat_completion_body(
                 &self.candidate_model,
                 candidate_system_prompt(input),
-                &build_two_phase_candidate_user_prompt(input)?,
+                &build_two_phase_candidate_user_prompt_with_flavor(input, PromptFlavor::Grok)?,
                 &candidate_output_schema_with_allowed_refs(
                     input,
                     &allowed_artifact_evidence_refs(input),

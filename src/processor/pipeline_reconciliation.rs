@@ -75,7 +75,12 @@ impl ModelReconciliationOutput {
             .memories
             .iter()
             .map(|memory| memory.candidate_key.clone())
-            .chain(input.entities.iter().map(|entity| entity.entity_key.clone()))
+            .chain(
+                input
+                    .entities
+                    .iter()
+                    .map(|entity| entity.entity_key.clone()),
+            )
             .chain(input.relationships.iter().map(|relationship| {
                 format!(
                     "{}:{}:{}",
@@ -145,15 +150,16 @@ impl ModelReconciliationOutput {
                     ),
                 });
             }
-            let expected_target_kind = target_kinds
-                .get(&decision.target_key)
-                .copied()
-                .ok_or_else(|| ProcessorError::InvalidModelOutput {
-                    detail: format!(
-                        "decisions[{index}].target_key {:?} does not match a candidate",
-                        decision.target_key
-                    ),
-                })?;
+            let expected_target_kind =
+                target_kinds
+                    .get(&decision.target_key)
+                    .copied()
+                    .ok_or_else(|| ProcessorError::InvalidModelOutput {
+                        detail: format!(
+                            "decisions[{index}].target_key {:?} does not match a candidate",
+                            decision.target_key
+                        ),
+                    })?;
             if decision.target_kind != expected_target_kind {
                 return Err(ProcessorError::InvalidModelOutput {
                     detail: format!(

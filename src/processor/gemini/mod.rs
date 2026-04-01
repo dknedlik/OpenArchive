@@ -185,7 +185,8 @@ impl ArtifactProcessor for GeminiArtifactProcessor {
         input: &ArtifactProcessorInput,
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
         validate_input(input)?;
-        let prompt = build_two_phase_candidate_user_prompt(input)?;
+        let prompt =
+            build_two_phase_candidate_user_prompt_with_flavor(input, PromptFlavor::Gemini)?;
         match self.process_once(input, &prompt, self.max_output_tokens) {
             Ok(output) => Ok(output),
             Err(error) if should_retry_with_repair(&error) => {
@@ -243,6 +244,7 @@ impl GeminiClient {
 
         let client = Client::builder()
             .default_headers(default_headers)
+            .timeout(Duration::from_secs(180))
             .build()
             .map_err(|source| ProcessorError::BuildHttpClient { source })?;
 
@@ -468,6 +470,7 @@ impl GeminiBatchClient {
 
         let client = Client::builder()
             .default_headers(default_headers)
+            .timeout(Duration::from_secs(180))
             .build()
             .map_err(|source| ProcessorError::BuildHttpClient { source })?;
 
@@ -618,7 +621,7 @@ impl GeminiBatchClient {
             let job = match self.get_batch(name) {
                 Ok(job) => job,
                 Err(err) if err.is_retryable() => {
-                    if poll_count == 0 || poll_count % 12 == 0 {
+                    if poll_count == 0 || poll_count.is_multiple_of(12) {
                         log::warn!(
                             "gemini batch name={} poll={} transient poll error={}",
                             name,
@@ -633,7 +636,7 @@ impl GeminiBatchClient {
                 Err(err) => return Err(err),
             };
             let state = job.state.as_deref().unwrap_or_default();
-            if poll_count == 0 || poll_count % 12 == 0 {
+            if poll_count == 0 || poll_count.is_multiple_of(12) {
                 info!(
                     "gemini batch name={} poll={} state={}",
                     name, poll_count, state
