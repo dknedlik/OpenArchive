@@ -136,17 +136,15 @@ fn parse_markdown_links(
             continue;
         };
 
-        let Some(label_end) = body[open_index + 1..].find("](") else {
+        let Some(label_end) = find_markdown_label_end(bytes, open_index) else {
             index += 1;
             continue;
         };
-        let label_end = open_index + 1 + label_end;
         let target_start = label_end + 2;
-        let Some(target_end_rel) = body[target_start..].find(')') else {
+        let Some(target_end) = find_markdown_target_end(bytes, target_start) else {
             index += 1;
             continue;
         };
-        let target_end = target_start + target_end_rel;
         let label = body[open_index + 1..label_end].trim();
         let raw_target = body[target_start..target_end].trim();
         if !raw_target.is_empty() && !is_dynamic_template_target(raw_target) {
@@ -168,6 +166,56 @@ fn parse_markdown_links(
     }
 
     links
+}
+
+fn find_markdown_label_end(bytes: &[u8], open_index: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut index = open_index + 1;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'[' => {
+                depth += 1;
+                index += 1;
+            }
+            b']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return (index + 1 < bytes.len() && bytes[index + 1] == b'(').then_some(index);
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+
+    None
+}
+
+fn find_markdown_target_end(bytes: &[u8], target_start: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut index = target_start;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'(' => {
+                depth += 1;
+                index += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+
+    None
 }
 
 fn is_dynamic_template_target(raw_target: &str) -> bool {
@@ -745,6 +793,22 @@ mod tests {
         assert_eq!(
             links[1].external_url.as_deref(),
             Some("https://openarchive.dev")
+        );
+    }
+
+    #[test]
+    fn does_not_treat_callout_markers_as_markdown_link_labels() {
+        let resolver = VaultLinkResolver::new(&[]);
+        let links = resolver.parse_links(
+            "Tabs.md",
+            "> [!note] Mobile tabs\n> On mobile, tabs appear in a tray.\nSee [Plugins](https://example.com/plugins).",
+        );
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].display_text.as_deref(), Some("Plugins"));
+        assert_eq!(
+            links[0].external_url.as_deref(),
+            Some("https://example.com/plugins")
         );
     }
 

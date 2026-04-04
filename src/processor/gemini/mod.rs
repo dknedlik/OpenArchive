@@ -15,8 +15,7 @@ mod batch;
 mod types;
 
 use batch::{
-    GeminiBatchProcessor, GeminiExtractionSubmitter, GeminiReconciliationBatchProcessor,
-    GeminiReconciliationSubmitter,
+    GeminiExtractionSubmitter, GeminiReconciliationBatchProcessor, GeminiReconciliationSubmitter,
 };
 use types::{
     GeminiBatchCreateRequest, GeminiBatchDefinition, GeminiBatchInputConfig, GeminiBatchOperation,
@@ -30,26 +29,16 @@ pub use types::{GeminiBatchEnrichmentRequest, GeminiBatchJob};
 pub struct GeminiProcessorFactory {
     client: Arc<GeminiClient>,
     batch_client: Option<Arc<GeminiBatchClient>>,
-    extract_max_output_tokens: u32,
+    stage1_max_output_tokens: u32,
+    stage2_max_output_tokens: u32,
     extract_repair_max_output_tokens: u32,
-    standard_model: String,
-    quality_model: String,
-    reconcile_standard_model: String,
-    reconcile_quality_model: String,
+    heavy_model: String,
+    fast_model: String,
 }
 
 impl GeminiProcessorFactory {
     pub fn new(config: GeminiConfig) -> Result<Self, String> {
         let client = GeminiClient::new(&config).map_err(|err| err.to_string())?;
-        let quality_model = config
-            .quality_model
-            .clone()
-            .unwrap_or_else(|| config.standard_model.clone());
-        let reconcile_quality_model = config
-            .reconcile_quality_model
-            .clone()
-            .or_else(|| config.quality_model.clone())
-            .unwrap_or_else(|| config.reconcile_standard_model.clone());
 
         Ok(Self {
             client: Arc::new(client),
@@ -60,168 +49,103 @@ impl GeminiProcessorFactory {
             } else {
                 None
             },
-            extract_max_output_tokens: config.max_output_tokens,
+            stage1_max_output_tokens: config
+                .repair_max_output_tokens
+                .max(config.max_output_tokens),
+            stage2_max_output_tokens: config.max_output_tokens,
             extract_repair_max_output_tokens: config
                 .repair_max_output_tokens
                 .max(config.max_output_tokens),
-            standard_model: config.standard_model,
-            quality_model,
-            reconcile_standard_model: config.reconcile_standard_model,
-            reconcile_quality_model,
+            heavy_model: config.heavy_model,
+            fast_model: config.fast_model,
         })
     }
 }
 
 impl ArtifactProcessorFactory for GeminiProcessorFactory {
-    fn build(&self, tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError> {
-        let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
-        };
-
-        Ok(Box::new(GeminiArtifactProcessor {
-            client: Arc::clone(&self.client),
-            candidate_model: model,
-            max_output_tokens: self.extract_max_output_tokens,
-            repair_max_output_tokens: self.extract_repair_max_output_tokens,
+    fn build(&self, _tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError> {
+        let client: Arc<dyn InferenceClient> = self.client.clone();
+        Ok(Box::new(ExtractionPipelineProcessor {
+            client,
+            extract_model: self.heavy_model.clone(),
+            format_model: self.fast_model.clone(),
+            stage1_max_output_tokens: Some(self.stage1_max_output_tokens),
+            stage2_max_output_tokens: Some(self.stage2_max_output_tokens),
+            repair_max_output_tokens: Some(self.extract_repair_max_output_tokens),
+            pipeline_name: "gemini_extraction_pipeline",
+            provider_name: "gemini",
         }))
     }
 
     fn build_reconciliation_processor(
         &self,
-        tier: EnrichmentTier,
+        _tier: EnrichmentTier,
     ) -> Result<Box<dyn ReconciliationProcessor>, ProcessorError> {
-        let model = match tier {
-            EnrichmentTier::Standard => self.reconcile_standard_model.clone(),
-            EnrichmentTier::Quality => self.reconcile_quality_model.clone(),
-        };
         let client: Arc<dyn InferenceClient> = self.client.clone();
         Ok(Box::new(HostedReconciliationProcessor {
             client,
-            model,
+            model: self.fast_model.clone(),
             system_prompt: RECONCILIATION_SYSTEM_PROMPT,
         }))
     }
 
     fn build_batch_processor(
         &self,
-        tier: EnrichmentTier,
+        _tier: EnrichmentTier,
     ) -> Result<Option<Box<dyn ArtifactBatchProcessor>>, ProcessorError> {
-        let Some(batch_client) = &self.batch_client else {
-            return Ok(None);
-        };
-        let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
-        };
-        Ok(Some(Box::new(GeminiBatchProcessor {
-            client: Arc::clone(batch_client),
-            candidate_model: model,
-        })))
+        let client: Arc<dyn InferenceClient> = self.client.clone();
+        let processor: Box<dyn ArtifactProcessor> = Box::new(ExtractionPipelineProcessor {
+            client,
+            extract_model: self.heavy_model.clone(),
+            format_model: self.fast_model.clone(),
+            stage1_max_output_tokens: Some(self.stage1_max_output_tokens),
+            stage2_max_output_tokens: Some(self.stage2_max_output_tokens),
+            repair_max_output_tokens: Some(self.extract_repair_max_output_tokens),
+            pipeline_name: "gemini_extraction_pipeline",
+            provider_name: "gemini",
+        });
+        Ok(Some(Box::new(SequentialArtifactBatchProcessor::new(
+            processor, 16, 2_000_000,
+        ))))
     }
 
     fn build_reconciliation_batch_processor(
         &self,
-        tier: EnrichmentTier,
+        _tier: EnrichmentTier,
     ) -> Result<Option<Box<dyn ReconciliationBatchProcessor>>, ProcessorError> {
         let Some(batch_client) = &self.batch_client else {
             return Ok(None);
         };
-        let model = match tier {
-            EnrichmentTier::Standard => self.reconcile_standard_model.clone(),
-            EnrichmentTier::Quality => self.reconcile_quality_model.clone(),
-        };
         Ok(Some(Box::new(GeminiReconciliationBatchProcessor {
             client: Arc::clone(batch_client),
-            model,
+            model: self.fast_model.clone(),
         })))
     }
 
     fn build_extraction_submitter(
         &self,
-        tier: EnrichmentTier,
+        _tier: EnrichmentTier,
     ) -> Result<Option<Box<dyn ExtractionBatchSubmitter>>, ProcessorError> {
         let Some(batch_client) = &self.batch_client else {
             return Ok(None);
         };
-        let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
-        };
         Ok(Some(Box::new(GeminiExtractionSubmitter {
             client: Arc::clone(batch_client),
-            candidate_model: model,
+            candidate_model: self.heavy_model.clone(),
         })))
     }
 
     fn build_reconciliation_submitter(
         &self,
-        tier: EnrichmentTier,
+        _tier: EnrichmentTier,
     ) -> Result<Option<Box<dyn ReconciliationBatchSubmitter>>, ProcessorError> {
         let Some(batch_client) = &self.batch_client else {
             return Ok(None);
         };
-        let model = match tier {
-            EnrichmentTier::Standard => self.reconcile_standard_model.clone(),
-            EnrichmentTier::Quality => self.reconcile_quality_model.clone(),
-        };
         Ok(Some(Box::new(GeminiReconciliationSubmitter {
             client: Arc::clone(batch_client),
-            model,
+            model: self.fast_model.clone(),
         })))
-    }
-}
-
-struct GeminiArtifactProcessor {
-    client: Arc<GeminiClient>,
-    candidate_model: String,
-    max_output_tokens: u32,
-    repair_max_output_tokens: u32,
-}
-
-impl ArtifactProcessor for GeminiArtifactProcessor {
-    fn process(
-        &self,
-        input: &ArtifactProcessorInput,
-    ) -> Result<ArtifactProcessorOutput, ProcessorError> {
-        validate_input(input)?;
-        let prompt =
-            build_two_phase_candidate_user_prompt_with_flavor(input, PromptFlavor::Gemini)?;
-        match self.process_once(input, &prompt, self.max_output_tokens) {
-            Ok(output) => Ok(output),
-            Err(error) if should_retry_with_repair(&error) => {
-                let repair_prompt = build_repair_prompt(&prompt, &error);
-                self.process_once(input, &repair_prompt, self.repair_max_output_tokens)
-            }
-            Err(error) => Err(error),
-        }
-    }
-}
-
-impl GeminiArtifactProcessor {
-    fn process_once(
-        &self,
-        input: &ArtifactProcessorInput,
-        user_prompt: &str,
-        max_output_tokens: u32,
-    ) -> Result<ArtifactProcessorOutput, ProcessorError> {
-        let candidate_result = self.client.complete_json_with_max_output_tokens(
-            &self.candidate_model,
-            candidate_system_prompt(input),
-            user_prompt,
-            &candidate_output_schema_wrapper(input),
-            max_output_tokens.max(TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS),
-        )?;
-        let candidate = parse_candidate_output(&candidate_result.output_text, input)
-            .map_err(|err| attach_output_preview(err, &candidate_result.output_text))?;
-        Ok(candidate.into_processor_output(
-            input,
-            self.candidate_model.clone(),
-            candidate_result.usage,
-            "gemini_enrichment",
-            "gemini",
-            GEMINI_PROMPT_VERSION,
-        ))
     }
 }
 
@@ -283,8 +207,8 @@ impl GeminiClient {
                 }],
             }],
             generation_config: GeminiGenerationConfig {
-                response_mime_type: "application/json".to_string(),
-                response_schema: normalize_gemini_response_schema(schema),
+                response_mime_type: Some("application/json".to_string()),
+                response_schema: Some(normalize_gemini_response_schema(schema)),
                 max_output_tokens,
             },
         };
@@ -356,6 +280,91 @@ impl GeminiClient {
             schema,
             max_output_tokens,
         )
+    }
+
+    fn complete_text_with_max_output_tokens(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_output_tokens: u32,
+    ) -> Result<InferenceResult, ProcessorError> {
+        let endpoint = format!(
+            "{}/{}:generateContent",
+            self.base_url,
+            normalize_model_resource(model)
+        );
+
+        let body = GeminiGenerateContentRequest {
+            system_instruction: GeminiRequestContent {
+                role: None,
+                parts: vec![GeminiTextPart {
+                    text: system_prompt.to_string(),
+                }],
+            },
+            contents: vec![GeminiRequestContent {
+                role: Some("user".to_string()),
+                parts: vec![GeminiTextPart {
+                    text: user_prompt.to_string(),
+                }],
+            }],
+            generation_config: GeminiGenerationConfig {
+                response_mime_type: None,
+                response_schema: None,
+                max_output_tokens,
+            },
+        };
+        let request_body = serde_json::to_vec(&body)
+            .map_err(|source| ProcessorError::SerializePrompt { source })?;
+
+        let response = self
+            .client
+            .post(endpoint)
+            .body(request_body)
+            .send()
+            .map_err(|source| ProcessorError::SendInferenceRequest { source })?;
+
+        let status = response.status();
+        let headers = response.headers().clone();
+        let response_text = response
+            .text()
+            .map_err(|source| ProcessorError::ReadInferenceResponse { source })?;
+
+        if !status.is_success() {
+            return Err(processor_http_status(
+                status.as_u16(),
+                &response_text,
+                &headers,
+            ));
+        }
+
+        let parsed: GeminiGenerateContentResponse =
+            serde_json::from_str(&response_text).map_err(|source| {
+                ProcessorError::ParseInferenceResponse {
+                    source,
+                    body_preview: preview(&response_text),
+                }
+            })?;
+
+        let output_text = parsed
+            .flatten_text()
+            .ok_or_else(|| ProcessorError::Message {
+                message: format!(
+                    "Gemini generateContent returned empty content{}",
+                    parsed
+                        .primary_finish_reason()
+                        .map(|reason| format!(" (finish_reason={reason})"))
+                        .unwrap_or_default()
+                ),
+            })?;
+
+        Ok(InferenceResult {
+            output_text,
+            usage: parsed
+                .usage_metadata
+                .clone()
+                .and_then(InferenceUsage::from_gemini_usage),
+        })
     }
 }
 
@@ -431,6 +440,20 @@ fn sanitize_gemini_schema_value(value: &serde_json::Value) -> serde_json::Value 
 }
 
 impl InferenceClient for GeminiClient {
+    fn complete_text(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<InferenceResult, ProcessorError> {
+        self.complete_text_with_max_output_tokens(
+            model,
+            system_prompt,
+            user_prompt,
+            self.max_output_tokens,
+        )
+    }
+
     fn complete_json(
         &self,
         model: &str,
@@ -444,6 +467,38 @@ impl InferenceClient for GeminiClient {
             user_prompt,
             schema,
             self.max_output_tokens,
+        )
+    }
+
+    fn complete_text_with_max_output_tokens_override(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_output_tokens: u32,
+    ) -> Result<InferenceResult, ProcessorError> {
+        self.complete_text_with_max_output_tokens(
+            model,
+            system_prompt,
+            user_prompt,
+            max_output_tokens,
+        )
+    }
+
+    fn complete_json_with_max_output_tokens_override(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        schema: &serde_json::Value,
+        max_output_tokens: u32,
+    ) -> Result<InferenceResult, ProcessorError> {
+        self.complete_json_with_max_output_tokens(
+            model,
+            system_prompt,
+            user_prompt,
+            schema,
+            max_output_tokens,
         )
     }
 }
@@ -517,10 +572,10 @@ impl GeminiBatchClient {
                                         }],
                                     }],
                                     generation_config: GeminiGenerationConfig {
-                                        response_mime_type: "application/json".to_string(),
-                                        response_schema: normalize_gemini_response_schema(
+                                        response_mime_type: Some("application/json".to_string()),
+                                        response_schema: Some(normalize_gemini_response_schema(
                                             &request.response_json_schema,
-                                        ),
+                                        )),
                                         max_output_tokens: request
                                             .max_output_tokens
                                             .unwrap_or(self.max_output_tokens),
@@ -621,7 +676,7 @@ impl GeminiBatchClient {
             let job = match self.get_batch(name) {
                 Ok(job) => job,
                 Err(err) if err.is_retryable() => {
-                    if poll_count == 0 || poll_count.is_multiple_of(12) {
+                    if should_log_poll(poll_count) {
                         log::warn!(
                             "gemini batch name={} poll={} transient poll error={}",
                             name,
@@ -636,7 +691,7 @@ impl GeminiBatchClient {
                 Err(err) => return Err(err),
             };
             let state = job.state.as_deref().unwrap_or_default();
-            if poll_count == 0 || poll_count.is_multiple_of(12) {
+            if should_log_poll(poll_count) {
                 info!(
                     "gemini batch name={} poll={} state={}",
                     name, poll_count, state
@@ -665,6 +720,10 @@ impl GeminiBatchClient {
             thread::sleep(self.poll_interval);
         }
     }
+}
+
+fn should_log_poll(poll_count: u64) -> bool {
+    poll_count == 0 || poll_count.checked_rem(12) == Some(0)
 }
 
 fn normalize_model_resource(model: &str) -> String {

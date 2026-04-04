@@ -10,9 +10,10 @@ use crate::config::{AppConfig, InferenceConfig, ObjectStoreConfig, RelationalSto
 use crate::embedding::{build_embedding_provider, EmbeddingProvider};
 use crate::error::{ConfigError, ConfigResult};
 use crate::object_store::{LocalFsObjectStore, ObjectStore, S3CompatibleObjectStore};
+use crate::postgres_db;
 use crate::processor::{
     AnthropicProcessorFactory, ArtifactProcessorFactory, GeminiProcessorFactory,
-    GrokProcessorFactory, OpenAiProcessorFactory, StubProcessorFactory,
+    GrokProcessorFactory, OciProcessorFactory, OpenAiProcessorFactory, StubProcessorFactory,
 };
 use crate::storage::{
     ArchiveRetrievalStore, ArchiveSearchReadStore, ArtifactReadStore, EnrichmentJobLifecycleStore,
@@ -32,69 +33,6 @@ pub struct ServiceBundle {
     pub processor_factory: Arc<dyn ArtifactProcessorFactory>,
     pub embedding_store: Option<Arc<dyn crate::storage::DerivedObjectEmbeddingStore>>,
     pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
-}
-
-struct SplitStageProcessorFactory {
-    primary: Arc<dyn ArtifactProcessorFactory>,
-    reconcile: Arc<dyn ArtifactProcessorFactory>,
-}
-
-impl ArtifactProcessorFactory for SplitStageProcessorFactory {
-    fn build(
-        &self,
-        tier: crate::storage::EnrichmentTier,
-    ) -> Result<Box<dyn crate::processor::ArtifactProcessor>, crate::processor::ProcessorError>
-    {
-        self.primary.build(tier)
-    }
-
-    fn build_reconciliation_processor(
-        &self,
-        tier: crate::storage::EnrichmentTier,
-    ) -> Result<Box<dyn crate::processor::ReconciliationProcessor>, crate::processor::ProcessorError>
-    {
-        self.reconcile.build_reconciliation_processor(tier)
-    }
-
-    fn build_batch_processor(
-        &self,
-        tier: crate::storage::EnrichmentTier,
-    ) -> Result<
-        Option<Box<dyn crate::processor::ArtifactBatchProcessor>>,
-        crate::processor::ProcessorError,
-    > {
-        self.primary.build_batch_processor(tier)
-    }
-
-    fn build_reconciliation_batch_processor(
-        &self,
-        tier: crate::storage::EnrichmentTier,
-    ) -> Result<
-        Option<Box<dyn crate::processor::ReconciliationBatchProcessor>>,
-        crate::processor::ProcessorError,
-    > {
-        self.reconcile.build_reconciliation_batch_processor(tier)
-    }
-
-    fn build_extraction_submitter(
-        &self,
-        tier: crate::storage::EnrichmentTier,
-    ) -> Result<
-        Option<Box<dyn crate::processor::ExtractionBatchSubmitter>>,
-        crate::processor::ProcessorError,
-    > {
-        self.primary.build_extraction_submitter(tier)
-    }
-
-    fn build_reconciliation_submitter(
-        &self,
-        tier: crate::storage::EnrichmentTier,
-    ) -> Result<
-        Option<Box<dyn crate::processor::ReconciliationBatchSubmitter>>,
-        crate::processor::ProcessorError,
-    > {
-        self.reconcile.build_reconciliation_submitter(tier)
-    }
 }
 
 fn build_processor_factory(
@@ -118,7 +56,75 @@ fn build_processor_factory(
             GrokProcessorFactory::new(grok.clone())
                 .map_err(|message| ConfigError::InvalidInferenceConfig { message })?,
         )),
+        InferenceConfig::Oci(oci) => Ok(Arc::new(
+            OciProcessorFactory::new(oci.clone())
+                .map_err(|message| ConfigError::InvalidInferenceConfig { message })?,
+        )),
     }
+}
+
+fn validate_postgres_embedding_schema(
+    pg_config: &crate::config::PostgresConfig,
+    embedding_provider: Option<&Arc<dyn EmbeddingProvider>>,
+) -> ConfigResult<()> {
+    let Some(embedding_provider) = embedding_provider else {
+        return Ok(());
+    };
+
+    let mut client =
+        postgres_db::connect(pg_config).map_err(|err| ConfigError::InvalidEmbeddingConfig {
+            message: format!("failed to connect for embedding schema validation: {err}"),
+        })?;
+
+    let row = client
+        .query_opt(
+            "SELECT format_type(a.atttypid, a.atttypmod)
+             FROM pg_attribute a
+             JOIN pg_class c ON c.oid = a.attrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = current_schema()
+               AND c.relname = 'oa_derived_object_embedding'
+               AND a.attname = 'embedding'
+               AND NOT a.attisdropped",
+            &[],
+        )
+        .map_err(|err| ConfigError::InvalidEmbeddingConfig {
+            message: format!("failed to inspect embedding column schema: {err}"),
+        })?;
+
+    let Some(row) = row else {
+        return Ok(());
+    };
+
+    let type_name: String = row.get(0);
+    let Some(configured_dimensions) = parse_vector_dimensions(&type_name) else {
+        return Err(ConfigError::InvalidEmbeddingConfig {
+            message: format!("unexpected embedding column type: {type_name}"),
+        });
+    };
+
+    if configured_dimensions != embedding_provider.dimensions() {
+        return Err(ConfigError::InvalidEmbeddingConfig {
+            message: format!(
+                "embedding dimension mismatch: config requests {}, but database column is {}. Changing embedding dimensions requires a schema migration and re-embedding existing derived objects.",
+                embedding_provider.dimensions(),
+                configured_dimensions
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+fn parse_vector_dimensions(type_name: &str) -> Option<usize> {
+    let type_name = type_name.trim();
+    let prefix = "vector(";
+    let suffix = ")";
+    type_name
+        .strip_prefix(prefix)?
+        .strip_suffix(suffix)?
+        .parse::<usize>()
+        .ok()
 }
 
 pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
@@ -139,6 +145,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
 
     match &config.relational_store {
         RelationalStoreConfig::Postgres(pg_config) => {
+            validate_postgres_embedding_schema(pg_config, embedding_provider.as_ref())?;
             let import_store: Arc<dyn ImportWriteStore + Send + Sync> =
                 Arc::new(PostgresImportWriteStore::new(pg_config.clone()));
             let read_store: Arc<dyn ArtifactReadStore + Send + Sync> =
@@ -151,16 +158,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
             let artifact_detail_store: Arc<
                 dyn crate::storage::ArtifactDetailReadStore + Send + Sync,
             > = retrieval_impl.clone();
-            let primary_factory = build_processor_factory(&config.inference)?;
-            let processor_factory: Arc<dyn ArtifactProcessorFactory> =
-                if let Some(reconcile_inference) = &config.reconcile_inference {
-                    Arc::new(SplitStageProcessorFactory {
-                        primary: Arc::clone(&primary_factory),
-                        reconcile: build_processor_factory(reconcile_inference)?,
-                    })
-                } else {
-                    primary_factory
-                };
+            let processor_factory = build_processor_factory(&config.inference)?;
             let context_pack_store: Arc<
                 dyn crate::storage::ArtifactContextPackReadStore + Send + Sync,
             > = retrieval_impl.clone();
@@ -208,16 +206,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 Arc::new(OracleArtifactReadStore::new(db_config.clone()));
             let retrieval_store: Arc<dyn ArchiveRetrievalStore> =
                 Arc::new(OracleArchiveRetrievalStore::new(db_config.clone()));
-            let primary_factory = build_processor_factory(&config.inference)?;
-            let processor_factory: Arc<dyn ArtifactProcessorFactory> =
-                if let Some(reconcile_inference) = &config.reconcile_inference {
-                    Arc::new(SplitStageProcessorFactory {
-                        primary: Arc::clone(&primary_factory),
-                        reconcile: build_processor_factory(reconcile_inference)?,
-                    })
-                } else {
-                    primary_factory
-                };
+            let processor_factory = build_processor_factory(&config.inference)?;
             let app = Arc::new(ArchiveApplication::new(ArchiveApplicationDeps {
                 import_store: Arc::clone(&import_store),
                 read_store: Arc::clone(&read_store),
@@ -243,6 +232,18 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 embedding_provider: None,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_vector_dimensions;
+
+    #[test]
+    fn parses_vector_dimensions_from_postgres_type_name() {
+        assert_eq!(parse_vector_dimensions("vector(3072)"), Some(3072));
+        assert_eq!(parse_vector_dimensions(" vector(1536) "), Some(1536));
+        assert_eq!(parse_vector_dimensions("text"), None);
     }
 }
 

@@ -7,6 +7,7 @@ use crate::storage::derivation_store::WriteDerivationAttempt;
 use crate::storage::types::{
     NewDerivationRun, NewDerivedObject, NewEvidenceLink, ObjectStatus, ScopeType,
 };
+use crate::storage::writeback_store::NewArchiveLink;
 
 pub fn insert_derivation_run(conn: &Connection, run: &NewDerivationRun) -> StorageResult<()> {
     let run_type = run.run_type.as_str();
@@ -132,6 +133,52 @@ pub fn insert_evidence_link(conn: &Connection, link: &NewEvidenceLink) -> Storag
     Ok(())
 }
 
+pub fn insert_archive_link(conn: &Connection, link: &NewArchiveLink) -> StorageResult<()> {
+    conn.execute(
+        "MERGE INTO oa_archive_link t
+         USING (
+            SELECT :1 AS archive_link_id,
+                   :2 AS source_object_id,
+                   :3 AS target_object_id,
+                   :4 AS link_type,
+                   :5 AS confidence_score,
+                   :6 AS rationale,
+                   :7 AS contributed_by
+              FROM dual
+         ) s
+         ON (t.source_object_id = s.source_object_id
+             AND t.target_object_id = s.target_object_id
+             AND t.link_type = s.link_type)
+         WHEN MATCHED THEN UPDATE SET
+             t.confidence_score = COALESCE(s.confidence_score, t.confidence_score),
+             t.rationale = COALESCE(s.rationale, t.rationale),
+             t.origin_kind = COALESCE('inferred', t.origin_kind),
+             t.contributed_by = COALESCE(s.contributed_by, t.contributed_by)
+         WHEN NOT MATCHED THEN INSERT
+             (archive_link_id, source_object_id, target_object_id, link_type,
+              confidence_score, rationale, origin_kind, contributed_by)
+             VALUES (s.archive_link_id, s.source_object_id, s.target_object_id, s.link_type,
+                     s.confidence_score, s.rationale, 'inferred', s.contributed_by)",
+        &[
+            &link.archive_link_id,
+            &link.source_object_id,
+            &link.target_object_id,
+            &link.link_type,
+            &link.confidence_score,
+            &link.rationale,
+            &link.contributed_by,
+        ],
+    )
+    .map_err(|source| StorageError::InvalidDerivationWrite {
+        detail: format!(
+            "failed to insert archive link {}: {}",
+            link.archive_link_id, source
+        ),
+    })?;
+
+    Ok(())
+}
+
 pub fn validate_derivation_attempt(
     conn: &Connection,
     attempt: &WriteDerivationAttempt,
@@ -144,6 +191,11 @@ pub fn validate_derivation_attempt(
     }
 
     let mut derived_object_ids = HashSet::with_capacity(attempt.objects.len());
+    let valid_new_object_ids = attempt
+        .objects
+        .iter()
+        .map(|object_write| object_write.object.derived_object_id.as_str())
+        .collect::<HashSet<_>>();
     for object_write in &attempt.objects {
         let object = &object_write.object;
         if object.derivation_run_id != attempt.run.derivation_run_id {
@@ -202,6 +254,37 @@ pub fn validate_derivation_attempt(
         }
     }
 
+    for link in &attempt.archive_links {
+        if link.source_object_id == link.target_object_id {
+            return Err(StorageError::InvalidDerivationWrite {
+                detail: format!(
+                    "archive link {} must not reference the same object {}",
+                    link.archive_link_id, link.source_object_id
+                ),
+            });
+        }
+        if !valid_new_object_ids.contains(link.source_object_id.as_str())
+            && !derived_object_exists(conn, &link.source_object_id)?
+        {
+            return Err(StorageError::InvalidDerivationWrite {
+                detail: format!(
+                    "archive link {} references missing source object {}",
+                    link.archive_link_id, link.source_object_id
+                ),
+            });
+        }
+        if !valid_new_object_ids.contains(link.target_object_id.as_str())
+            && !derived_object_exists(conn, &link.target_object_id)?
+        {
+            return Err(StorageError::InvalidDerivationWrite {
+                detail: format!(
+                    "archive link {} references missing target object {}",
+                    link.archive_link_id, link.target_object_id
+                ),
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -248,6 +331,23 @@ fn artifact_exists(conn: &Connection, artifact_id: &str) -> StorageResult<bool> 
         _ => Err(StorageError::ValidateArtifactOwnership {
             artifact_id: artifact_id.to_string(),
             source: Box::new(source),
+        }),
+    })
+}
+
+fn derived_object_exists(conn: &Connection, derived_object_id: &str) -> StorageResult<bool> {
+    conn.query_row_as::<(String,)>(
+        "SELECT derived_object_id FROM oa_derived_object WHERE derived_object_id = :1",
+        &[&derived_object_id],
+    )
+    .map(|(found_derived_object_id,)| found_derived_object_id == derived_object_id)
+    .or_else(|source| match source.kind() {
+        oracle::ErrorKind::NoDataFound => Ok(false),
+        _ => Err(StorageError::InvalidDerivationWrite {
+            detail: format!(
+                "failed to validate derived object {} ownership: {}",
+                derived_object_id, source
+            ),
         }),
     })
 }

@@ -427,22 +427,19 @@ impl JobStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnrichmentTier {
-    Standard,
-    Quality,
+    Default,
 }
 
 impl EnrichmentTier {
     pub fn as_str(&self) -> &'static str {
         match self {
-            EnrichmentTier::Standard => "standard",
-            EnrichmentTier::Quality => "quality",
+            EnrichmentTier::Default => "default",
         }
     }
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
-            "standard" => Some(Self::Standard),
-            "quality" => Some(Self::Quality),
+            "default" => Some(Self::Default),
             _ => None,
         }
     }

@@ -75,6 +75,8 @@ pub(super) struct AnthropicMessagesResponse {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub(super) enum AnthropicContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
     #[serde(rename = "tool_use")]
     ToolUse {
         #[serde(rename = "id")]

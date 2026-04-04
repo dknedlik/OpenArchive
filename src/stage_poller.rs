@@ -1306,7 +1306,10 @@ impl StageBehavior for ReconcileStage {
                         continue;
                     }
                 };
-            if extraction_result.memories.is_empty() && extraction_result.relationships.is_empty() {
+            if extraction_result.memories.is_empty()
+                && extraction_result.entities.is_empty()
+                && extraction_result.relationships.is_empty()
+            {
                 if complete_reconcile_without_candidates(
                     &job,
                     &loaded,
@@ -1451,7 +1454,7 @@ impl StageBehavior for ReconcileStage {
                             target_key: extraction_result.artifact_id.clone(),
                             matched_object_id: None,
                             rationale:
-                                "No candidate memories or relationships were extracted for reconciliation."
+                                "No candidate memories, entities, or relationships were extracted for reconciliation."
                                     .to_string(),
                             evidence_segment_ids: extraction_result
                                 .summary_evidence_segment_ids
@@ -1860,8 +1863,9 @@ fn complete_reconcile_without_candidates(
         target_kind: "artifact".to_string(),
         target_key: extraction_result.artifact_id.clone(),
         matched_object_id: None,
-        rationale: "No candidate memories or relationships were extracted for reconciliation."
-            .to_string(),
+        rationale:
+            "No candidate memories, entities, or relationships were extracted for reconciliation."
+                .to_string(),
         evidence_segment_ids: extraction_result.summary_evidence_segment_ids.clone(),
         status: "completed".to_string(),
         error_message: None,
@@ -1934,7 +1938,7 @@ mod tests {
         }
 
         fn enrichment_tier(&self) -> EnrichmentTier {
-            EnrichmentTier::Standard
+            EnrichmentTier::Default
         }
 
         fn stage_name(&self) -> &'static str {
@@ -2016,7 +2020,7 @@ mod tests {
                     job_id: format!("job-{index}"),
                     artifact_id: format!("artifact-{index}"),
                     job_type: JobType::ArtifactReconcile,
-                    enrichment_tier: EnrichmentTier::Standard,
+                    enrichment_tier: EnrichmentTier::Default,
                     spawned_by_job_id: None,
                     attempt_count: 1,
                     max_attempts: 3,

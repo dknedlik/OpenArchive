@@ -89,7 +89,7 @@ The checked-in `.env.example` is set up for a local smoke-test path:
 
 - `OA_RELATIONAL_STORE=postgres`
 - `OA_OBJECT_STORE=local_fs`
-- `OA_INFERENCE_PROVIDER=stub`
+- `OA_MODEL_PROVIDER=stub`
 - `OA_INFERENCE_MODE=direct`
 - `OA_EMBEDDING_PROVIDER=disabled`
 
@@ -118,27 +118,111 @@ Supported inference providers today:
 - `gemini`
 - `anthropic`
 - `grok`
+- `oci`
 - `stub`
 
 Example:
 
 ```bash
-OA_INFERENCE_PROVIDER=openai
+OA_MODEL_PROVIDER=gemini
 OA_INFERENCE_MODE=direct
-OA_OPENAI_API_KEY=...
+OA_HEAVY_MODEL=gemini-3-flash-preview
+OA_FAST_MODEL=gemini-2.5-flash-lite
+OA_GEMINI_API_KEY=...
 ```
+
+Recommended starting point for real imports:
+
+- primary provider: `gemini`
+- heavy model: `gemini-3-flash-preview`
+- fast model: `gemini-2.5-flash-lite`
+- reconciliation defaults to the fast model unless explicitly overridden in code
+- embeddings: `gemini-embedding-001` at `3072` dimensions
+
+Current working guidance from import probes:
+
+- `gemini` is the current best extraction default after the redesign probes.
+  The strongest pair so far is a two-stage extraction flow:
+  `gemini-3-flash-preview` for Stage 1 judgment and `gemini-2.5-flash-lite`
+  for Stage 2 schema formatting.
+- `openai` remains supported, but it is no longer the recommended default for
+  extraction in this pipeline.
+- `grok` is the strongest low-cost alternative, but still trails `openai` on
+  final output shape.
+- `anthropic` is supported, but is not the current recommended default because
+  cost, verbosity, and rate limits were not justified by a clear quality win in
+  this pipeline.
+
+If you are importing a lot of data and do not care about interactive latency,
+prefer batch execution where the provider supports it. Batch mode is the right
+tradeoff for imports because throughput and cost matter more than immediate
+responses.
+
+OpenArchive now exposes one common inference model surface:
+
+- `OA_MODEL_PROVIDER`
+- `OA_HEAVY_MODEL`
+- `OA_FAST_MODEL`
+
+The code decides where to use the heavy or fast model internally. Today the
+heavy model is used for the judgment-heavy inference paths, while the fast
+model is used for formatting and similar latency-sensitive follow-up work.
 
 If you want embedding-backed object search, also configure embeddings:
 
 ```bash
-OA_EMBEDDING_PROVIDER=openai
-OA_OPENAI_API_KEY=...
-OA_OPENAI_EMBEDDING_MODEL=text-embedding-3-small
-OA_OPENAI_EMBEDDING_DIMENSIONS=1536
+OA_EMBEDDING_PROVIDER=gemini
+OA_EMBEDDING_MODEL=gemini-embedding-001
+OA_EMBEDDING_DIMENSIONS=3072
+OA_GEMINI_API_KEY=...
 ```
 
-The OpenAI-shaped provider can also target OpenAI-compatible endpoints through
-`OA_OPENAI_BASE_URL`.
+Gemini embeddings use the native Gemini API. OpenAI embeddings still support
+OpenAI-compatible endpoints through `OA_OPENAI_BASE_URL`.
+
+Embedding dimensions are effectively schema-level configuration. The first
+database setup fixes the vector column width. Changing
+`OA_EMBEDDING_DIMENSIONS` later requires a schema migration and re-embedding
+existing derived objects. Startup now fails fast if the configured dimensions
+do not match the Postgres schema.
+
+### Choosing extraction and reconcile models
+
+If you want to try other provider/model combinations, evaluate them against the
+final stored archive, not just one raw extraction response.
+
+For extraction models, favor:
+
+- strong artifact summaries that match the document or conversation's real
+  purpose
+- durable memories and entities with low metadata or scaffolding noise
+- reliable handling of long conversations and dense technical documents
+- compact structured output without splitting one conclusion into many adjacent
+  micro-facts
+
+For reconcile models, favor:
+
+- strict JSON/schema compliance
+- conservative merge behavior
+- correct target typing for memories, entities, and relationships
+- willingness to create new objects rather than forcing weak merges
+
+Use a representative evaluation set, not just one artifact type. A good sample
+should include:
+
+- long conversations
+- short practical conversations
+- technical reference documents
+- procedural/setup documents
+- dashboards or hub notes
+- short definition notes
+
+When comparing models, rank them by archive quality first:
+
+1. Did the final stored objects retain the source knowledge?
+2. Did the archive avoid noisy, duplicated, or weakly grounded objects?
+3. Did relationships and related-object retrieval become more useful?
+4. Only after that should you compare latency and cost.
 
 ## Import Data
 
@@ -223,7 +307,10 @@ The current MCP surface includes:
 - `search_archive`: ranked archive search across artifact titles, derived
   objects, and segment excerpts
 - `get_artifact`: artifact detail plus bounded segment windows
-- `get_context_pack`: compact artifact context pack for downstream agents
+- `get_context_pack`: compact artifact context pack for downstream agents,
+  including imported note metadata when present
+- `get_note_metadata`: imported note metadata and note-link retrieval for
+  Obsidian and markdown-style artifacts
 - `search_objects`: derived-object search with optional embedding-backed
   semantic ranking
 - `list_artifacts`: filtered artifact browsing

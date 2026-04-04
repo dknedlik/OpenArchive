@@ -108,6 +108,8 @@ pub struct ArtifactContextEvidenceLink {
 pub struct ArtifactContextPackMaterial {
     pub artifact: ArtifactDetailRecord,
     pub segments: Vec<ArtifactDetailSegment>,
+    pub imported_note_metadata: ImportedNoteMetadata,
+    pub inbound_note_links: Vec<ImportedNoteLinkRecord>,
     pub derived_objects: Vec<ArtifactContextDerivedObject>,
     pub evidence_links: Vec<ArtifactContextEvidenceLink>,
 }

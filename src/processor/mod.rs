@@ -1,9 +1,11 @@
 mod anthropic;
 mod artifact_classifier;
 mod artifact_policy;
+mod extraction_pipeline;
 mod gemini;
 mod grok;
 mod hosted;
+mod oci;
 mod openai;
 mod pipeline;
 mod stub;
@@ -21,6 +23,7 @@ pub use gemini::{
     GeminiBatchClient, GeminiBatchEnrichmentRequest, GeminiBatchJob, GeminiProcessorFactory,
 };
 pub use grok::GrokProcessorFactory;
+pub use oci::OciProcessorFactory;
 pub use openai::OpenAiProcessorFactory;
 pub use pipeline::{memory_candidate_key_from_fields, structured_output_schema, ProcessorError};
 pub use stub::{StubProcessor, StubProcessorFactory, StubReconciliationProcessor};
@@ -32,10 +35,10 @@ pub use types::{
     ReconciliationProcessorInput, RelationshipOutput, SummaryOutput,
 };
 
-pub(crate) use hosted::{
-    ConversationEnrichmentStrategy, HostedArtifactProcessor, HostedReconciliationProcessor,
-    InferenceClient, InferenceResult,
+pub(crate) use extraction_pipeline::{
+    ExtractionPipelineProcessor, SequentialArtifactBatchProcessor,
 };
+pub(crate) use hosted::{HostedReconciliationProcessor, InferenceClient, InferenceResult};
 pub(crate) use openai::{
     OpenRouterResponsesContentItem, OpenRouterResponsesInputItem, OpenRouterResponsesRequest,
     OpenRouterResponsesResponse, OpenRouterResponsesTextConfig, OpenRouterUsage,

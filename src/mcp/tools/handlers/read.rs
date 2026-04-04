@@ -142,6 +142,46 @@ pub(in crate::mcp::tools) fn handle_get_context_pack(
     }
 }
 
+pub(in crate::mcp::tools) fn handle_get_note_metadata(
+    app: &ArchiveApplication,
+    arguments: &Value,
+) -> Value {
+    let service = match app.artifact_detail.as_ref() {
+        Some(s) => s,
+        None => {
+            return tool_error(
+                "service_unavailable",
+                "get_note_metadata is unavailable for the configured provider",
+            )
+        }
+    };
+    let artifact_id = match arguments.get("artifact_id").and_then(Value::as_str) {
+        Some(id) => id,
+        None => return tool_error("invalid_params", "get_note_metadata requires artifact_id"),
+    };
+    match service.get(artifact_detail::ArtifactDetailRequest {
+        artifact_id: artifact_id.to_string(),
+        include_segments: false,
+        segment_offset: 0,
+        segment_limit: artifact_detail::DEFAULT_SEGMENT_LIMIT,
+    }) {
+        Ok(Some(response)) => tool_success(json!({
+            "found": true,
+            "note": {
+                "artifact_id": response.artifact_id,
+                "title": response.title,
+                "source_type": response.source_type,
+                "enrichment_status": response.enrichment_status,
+                "note_path": response.note_path,
+                "imported_note_metadata": response.imported_note_metadata,
+                "inbound_note_links": response.inbound_note_links
+            }
+        })),
+        Ok(None) => tool_success(json!({ "found": false })),
+        Err(err) => tool_error("internal_error", &err.to_string()),
+    }
+}
+
 pub(in crate::mcp::tools) fn handle_search_objects(
     app: &ArchiveApplication,
     arguments: &Value,

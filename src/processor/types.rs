@@ -152,14 +152,14 @@ pub(crate) const MEMORY_TYPE_VALUES: [&str; 5] = [
     "reference",
 ];
 
-pub trait ArtifactProcessor {
+pub trait ArtifactProcessor: Send + Sync {
     fn process(
         &self,
         input: &ArtifactProcessorInput,
     ) -> Result<ArtifactProcessorOutput, ProcessorError>;
 }
 
-pub trait ReconciliationProcessor {
+pub trait ReconciliationProcessor: Send + Sync {
     fn reconcile(
         &self,
         input: &ReconciliationProcessorInput,

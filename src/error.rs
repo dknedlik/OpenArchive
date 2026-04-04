@@ -648,6 +648,9 @@ pub enum WorkerError {
     #[error(transparent)]
     Processor(#[from] crate::processor::ProcessorError),
 
+    #[error("batch execution mode requires {stage} batch processor support")]
+    MissingBatchProcessor { stage: &'static str },
+
     #[error("batch execution mode requires {stage} batch submitter support")]
     MissingBatchSubmitter { stage: &'static str },
 

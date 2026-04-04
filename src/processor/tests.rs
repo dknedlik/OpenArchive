@@ -7,10 +7,23 @@ use crate::storage::types::{
 use super::*;
 
 struct FixedInferenceClient {
-    candidate_response: String,
+    text_response: String,
+    json_response: String,
 }
 
 impl InferenceClient for FixedInferenceClient {
+    fn complete_text(
+        &self,
+        _model: &str,
+        _system_prompt: &str,
+        _user_prompt: &str,
+    ) -> Result<InferenceResult, ProcessorError> {
+        Ok(InferenceResult {
+            output_text: self.text_response.clone(),
+            usage: None,
+        })
+    }
+
     fn complete_json(
         &self,
         _model: &str,
@@ -19,7 +32,7 @@ impl InferenceClient for FixedInferenceClient {
         _schema: &serde_json::Value,
     ) -> Result<InferenceResult, ProcessorError> {
         Ok(InferenceResult {
-            output_text: self.candidate_response.clone(),
+            output_text: self.json_response.clone(),
             usage: None,
         })
     }
@@ -30,6 +43,24 @@ struct SequenceInferenceClient {
 }
 
 impl InferenceClient for SequenceInferenceClient {
+    fn complete_text(
+        &self,
+        _model: &str,
+        _system_prompt: &str,
+        _user_prompt: &str,
+    ) -> Result<InferenceResult, ProcessorError> {
+        let mut responses = self.responses.lock().expect("sequence lock");
+        if responses.is_empty() {
+            return Err(ProcessorError::Message {
+                message: "no more inference responses".to_string(),
+            });
+        }
+        Ok(InferenceResult {
+            output_text: responses.remove(0),
+            usage: None,
+        })
+    }
+
     fn complete_json(
         &self,
         _model: &str,
@@ -199,38 +230,45 @@ fn sample_working_note_input() -> ArtifactProcessorInput {
     }
 }
 
-fn sample_candidate_response() -> String {
+fn sample_extraction_pipeline_stage1_notes() -> String {
+    "Summary
+Hardening worker failure behavior and the next milestone.
+
+Classifications
+- fix_failure_handling
+
+Memories
+- title: Task 12 uses hosted inference | body: The first real pipeline uses a hosted inference provider. | memory_type_hint: project_fact
+
+Entities
+
+Relationships"
+        .to_string()
+}
+
+fn sample_extraction_pipeline_stage2_response() -> String {
     serde_json::json!({
-        "summary_draft": {
+        "summary": {
             "title": "Candidate summary",
-            "body_text": "The artifact discusses hardening worker failure behavior and the next milestone for the real pipeline.",
-            "evidence_segment_ids": ["evidence_ref_1", "evidence_ref_2"]
+            "body_text": "The artifact discusses hardening worker failure behavior and the next milestone for the real pipeline."
         },
-        "classification_candidates": [
+        "classifications": [
             {
-                "classification_type": "intent",
-                "classification_value": "fix_failure_handling",
-                "title": "Fix failure handling",
-                "body_text": "The artifact is focused on hardening worker failure behavior.",
-                "evidence_segment_ids": ["evidence_ref_1"]
+                "label": "fix_failure_handling",
+                "classification_type": "intent"
             }
         ],
-        "memory_candidates": [
+        "memories": [
             {
                 "title": "Task 12 uses hosted inference",
                 "body_text": "The first real pipeline uses a hosted inference provider.",
-                "memory_role": "project_fact",
-                "evidence_segment_ids": ["evidence_ref_2"],
-                "durability_label": "high",
-                "retrieval_value_label": "high",
-                "consequentiality_label": "medium",
-                "temporal_scope": "enduring"
+                "memory_type": "project_fact",
+                "memory_scope": "artifact",
+                "memory_scope_value": "artifact-1"
             }
         ],
-        "entity_candidates": [],
-        "relationship_candidates": [],
-        "retrieval_candidates": [],
-        "importance_score": 8
+        "entities": [],
+        "relationships": []
     })
     .to_string()
 }
@@ -238,53 +276,57 @@ fn sample_candidate_response() -> String {
 #[test]
 fn openai_processor_parses_and_validates_output() {
     let client = Arc::new(FixedInferenceClient {
-        candidate_response: sample_candidate_response(),
+        text_response: sample_extraction_pipeline_stage1_notes(),
+        json_response: sample_extraction_pipeline_stage2_response(),
     });
     let factory = OpenAiProcessorFactory::with_client(client, "gpt-4.1-mini", "gpt-5.4");
     let processor = factory
-        .build(EnrichmentTier::Standard)
+        .build(EnrichmentTier::Default)
         .expect("processor should build");
 
     let output = processor
         .process(&sample_input())
         .expect("processor should succeed");
 
-    assert_eq!(output.pipeline_name, "openai_enrichment");
+    assert_eq!(output.pipeline_name, "openai_extraction_pipeline");
     assert_eq!(output.classifications.len(), 1);
     assert_eq!(output.memories.len(), 1);
     assert_eq!(output.summary.evidence_segment_ids, vec!["seg-1", "seg-2"]);
-    assert_eq!(output.importance_score, 8);
+    assert_eq!(output.importance_score, 5);
 }
 
 #[test]
-fn openai_processor_rejects_unknown_evidence_segment_ids() {
+fn openai_processor_rejects_invalid_extraction_pipeline_memory_scope() {
     let client = Arc::new(FixedInferenceClient {
-        candidate_response: serde_json::json!({
-            "summary_draft": {
-                "title": "Bad evidence",
-                "body_text": "The model referenced an unknown segment.",
-                "evidence_segment_ids": ["evidence_ref_99"]
+        text_response: sample_extraction_pipeline_stage1_notes(),
+        json_response: serde_json::json!({
+            "summary": {
+                "title": "Bad extraction pipeline output",
+                "body_text": "The model emitted an invalid memory scope."
             },
-            "classification_candidates": [
+            "classifications": [
                 {
-                    "classification_type": "topic",
-                    "classification_value": "worker_failure_handling",
-                    "title": "Worker hardening",
-                    "body_text": "Specific hardening work.",
-                    "evidence_segment_ids": ["evidence_ref_1"]
+                    "label": "worker_failure_handling",
+                    "classification_type": "topic"
                 }
             ],
-            "memory_candidates": [],
-            "entity_candidates": [],
-            "relationship_candidates": [],
-            "retrieval_candidates": [],
-            "importance_score": 5
+            "memories": [
+                {
+                    "title": "Bad memory scope",
+                    "body_text": "This should be rejected.",
+                    "memory_type": "project_fact",
+                    "memory_scope": "workspace",
+                    "memory_scope_value": "artifact-1"
+                }
+            ],
+            "entities": [],
+            "relationships": []
         })
         .to_string(),
     });
     let factory = OpenAiProcessorFactory::with_client(client, "gpt-4.1-mini", "gpt-5.4");
     let processor = factory
-        .build(EnrichmentTier::Standard)
+        .build(EnrichmentTier::Default)
         .expect("processor should build");
 
     let err = processor
@@ -297,58 +339,32 @@ fn openai_processor_rejects_unknown_evidence_segment_ids() {
 fn openai_processor_retries_once_on_invalid_output_and_accepts_repair() {
     let client = Arc::new(SequenceInferenceClient {
         responses: std::sync::Mutex::new(vec![
+            sample_extraction_pipeline_stage1_notes(),
             serde_json::json!({
-                "summary_draft": {
-                    "title": "Bad evidence",
-                    "body_text": "The model referenced an unknown segment.",
-                    "evidence_segment_ids": ["evidence_ref_99"]
+                "summary": {
+                    "title": "Bad extraction pipeline output",
+                    "body_text": "The model emitted an invalid memory scope."
                 },
-                "classification_candidates": [],
-                "memory_candidates": [],
-                "entity_candidates": [],
-                "relationship_candidates": [],
-                "retrieval_candidates": [],
-                "importance_score": 5
-            })
-            .to_string(),
-            serde_json::json!({
-                "summary_draft": {
-                    "title": "Hardening and next steps",
-                    "body_text": "The worker should fail invalid payloads and the next milestone is the real pipeline.",
-                    "evidence_segment_ids": ["evidence_ref_1", "evidence_ref_2"]
-                },
-                "classification_candidates": [
+                "classifications": [],
+                "memories": [
                     {
-                        "classification_type": "intent",
-                        "classification_value": "fix_failure_handling",
-                        "title": "Fix failure handling",
-                        "body_text": "The artifact is focused on hardening worker failure behavior.",
-                        "evidence_segment_ids": ["evidence_ref_1"]
+                        "title": "Bad memory scope",
+                        "body_text": "This should be rejected.",
+                        "memory_type": "project_fact",
+                        "memory_scope": "workspace",
+                        "memory_scope_value": "artifact-1"
                     }
                 ],
-                "memory_candidates": [
-                    {
-                        "title": "Task 12 uses hosted inference",
-                        "body_text": "The first real pipeline uses a hosted inference provider.",
-                        "memory_role": "project_fact",
-                        "evidence_segment_ids": ["evidence_ref_2"],
-                        "durability_label": "high",
-                        "retrieval_value_label": "high",
-                        "consequentiality_label": "medium",
-                        "temporal_scope": "enduring"
-                    }
-                ],
-                "entity_candidates": [],
-                "relationship_candidates": [],
-                "retrieval_candidates": [],
-                "importance_score": 7
+                "entities": [],
+                "relationships": []
             })
             .to_string(),
+            sample_extraction_pipeline_stage2_response(),
         ]),
     });
     let factory = OpenAiProcessorFactory::with_client(client, "gpt-4.1-mini", "gpt-5.4");
     let processor = factory
-        .build(EnrichmentTier::Standard)
+        .build(EnrichmentTier::Default)
         .expect("processor should build");
 
     let output = processor
@@ -357,51 +373,54 @@ fn openai_processor_retries_once_on_invalid_output_and_accepts_repair() {
 
     assert_eq!(output.classifications.len(), 1);
     assert_eq!(output.memories.len(), 1);
-    assert_eq!(output.importance_score, 7);
+    assert_eq!(output.importance_score, 5);
 }
 
 #[test]
 fn openai_processor_drops_invalid_objects_without_rejecting_artifact() {
     let client = Arc::new(FixedInferenceClient {
-        candidate_response: serde_json::json!({
-            "summary_draft": {
+        text_response: "Summary
+Logo symbol preferences.
+
+Classifications
+
+Memories
+- title: Preferred HashBooks Logo Symbol | body: The original hash-in-book symbol should remain the preferred logo mark. | memory_type_hint: preference
+
+Entities
+
+Relationships"
+            .to_string(),
+        json_response: serde_json::json!({
+            "summary": {
                 "title": "Logo symbol preferences",
-                "body_text": "The artifact prefers the original hash-in-book symbol.",
-                "evidence_segment_ids": ["evidence_ref_1"]
+                "body_text": "The artifact prefers the original hash-in-book symbol."
             },
-            "classification_candidates": [],
-            "memory_candidates": [
+            "classifications": [],
+            "memories": [
                 {
                     "title": "Preferred HashBooks Logo Symbol",
                     "body_text": "The original hash-in-book symbol should remain the preferred logo mark.",
-                    "memory_role": "preference",
-                    "evidence_segment_ids": ["evidence_ref_1"],
-                    "durability_label": "high",
-                    "retrieval_value_label": "high",
-                    "consequentiality_label": "medium",
-                    "temporal_scope": "enduring"
+                    "memory_type": "preference",
+                    "memory_scope": "artifact",
+                    "memory_scope_value": "artifact-1"
                 },
                 {
                     "title": "Prefer original logo symbol",
-                    "body_text": "The original hash-in-book symbol should remain the preferred logo mark.",
-                    "memory_role": "preference",
-                    "evidence_segment_ids": ["evidence_ref_1"],
-                    "durability_label": "high",
-                    "retrieval_value_label": "high",
-                    "consequentiality_label": "medium",
-                    "temporal_scope": "enduring"
+                    "body_text": "   ",
+                    "memory_type": "preference",
+                    "memory_scope": "artifact",
+                    "memory_scope_value": "artifact-1"
                 }
             ],
-            "entity_candidates": [],
-            "relationship_candidates": [],
-            "retrieval_candidates": [],
-            "importance_score": 6
+            "entities": [],
+            "relationships": []
         })
         .to_string(),
     });
     let factory = OpenAiProcessorFactory::with_client(client, "gpt-5-mini", "gpt-5.4");
     let processor = factory
-        .build(EnrichmentTier::Standard)
+        .build(EnrichmentTier::Default)
         .expect("processor should build");
 
     let output = processor

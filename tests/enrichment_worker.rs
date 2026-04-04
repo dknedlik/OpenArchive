@@ -8,11 +8,13 @@ use open_archive::enrichment_worker::{
 };
 use open_archive::error::StorageResult;
 use open_archive::processor::{ArtifactProcessor, ArtifactProcessorFactory, ProcessorError};
+use open_archive::processor::{ReconciliationDecisionOutput, ReconciliationProcessor};
 use open_archive::shutdown::ShutdownToken;
 use open_archive::storage::types::{
-    ArtifactExtractPayload, ArtifactExtractionResult, ClaimedJob, EnrichmentTier,
-    LoadedArtifactForEnrichment, LoadedArtifactRecord, LoadedParticipant, LoadedSegment,
-    NewEnrichmentBatch, NewEnrichmentJob, PersistedEnrichmentBatch, ReconciliationDecision,
+    ArtifactExtractPayload, ArtifactExtractionResult, ArtifactReconcilePayload, CandidateEntity,
+    ClaimedJob, EnrichmentTier, LoadedArtifactForEnrichment, LoadedArtifactRecord,
+    LoadedParticipant, LoadedSegment, NewEnrichmentBatch, NewEnrichmentJob,
+    PersistedEnrichmentBatch, ReconciliationDecision, ReconciliationDecisionKind,
     RetrievalResultSet, RetryOutcome, SourceType,
 };
 use open_archive::storage::{
@@ -327,6 +329,126 @@ fn test_worker_fails_job_when_payload_source_type_is_invalid() {
         .unwrap_or_default()
         .contains("Invalid artifact source_type in extract payload"));
     assert!(derived_store.attempts.lock().unwrap().is_empty());
+}
+
+#[test]
+fn test_entity_only_reconciliation_runs_processor() {
+    let config = test_config(1);
+    let extraction_result_id = "extract-entity-only";
+    let retrieval_result_set_id = "retrieval-entity-only";
+    let claimed_job = ClaimedJob {
+        job_id: "job-reconcile-1".to_string(),
+        artifact_id: "artifact-1".to_string(),
+        job_type: JobType::ArtifactReconcile,
+        enrichment_tier: EnrichmentTier::Standard,
+        spawned_by_job_id: Some("job-retrieve-1".to_string()),
+        attempt_count: 1,
+        max_attempts: 3,
+        required_capabilities: vec!["text".to_string(), "archive_retrieval".to_string()],
+        payload_json: ArtifactReconcilePayload::new_v1(
+            "artifact-1",
+            "import-1",
+            SourceType::ChatGptExport,
+            extraction_result_id,
+            retrieval_result_set_id,
+        )
+        .to_json(),
+    };
+
+    let job_store = Arc::new(SingleJobStore::new(claimed_job));
+    let read_store = Arc::new(FixedReadStore::with_sample_artifact());
+    let state_store = Arc::new(MockStateStore::default());
+    let derived_store = Arc::new(MockDerivedStore::default());
+    state_store
+        .save_extraction_result(&ArtifactExtractionResult {
+            extraction_result_id: extraction_result_id.to_string(),
+            artifact_id: "artifact-1".to_string(),
+            job_id: "job-extract-1".to_string(),
+            pipeline_name: "test".to_string(),
+            pipeline_version: "v1".to_string(),
+            summary_title: Some("Entity-only artifact".to_string()),
+            summary_body_text: "Entity-only artifact summary".to_string(),
+            summary_evidence_segment_ids: vec!["segment-1".to_string()],
+            classifications: Vec::new(),
+            memories: Vec::new(),
+            entities: vec![CandidateEntity {
+                entity_key: "enceladus".to_string(),
+                display_name: "Enceladus".to_string(),
+                entity_type: "astronomical_body".to_string(),
+                evidence_segment_ids: vec!["segment-1".to_string()],
+            }],
+            relationships: Vec::new(),
+            retrieval_intents: Vec::new(),
+            status: "completed".to_string(),
+            error_message: None,
+        })
+        .expect("save extraction result");
+    state_store
+        .save_retrieval_result_set(&RetrievalResultSet {
+            retrieval_result_set_id: retrieval_result_set_id.to_string(),
+            artifact_id: "artifact-1".to_string(),
+            job_id: "job-retrieve-1".to_string(),
+            extraction_result_id: extraction_result_id.to_string(),
+            pipeline_name: "archive_retrieval".to_string(),
+            pipeline_version: "v1".to_string(),
+            intents: Vec::new(),
+            results: Vec::new(),
+            status: "completed".to_string(),
+            error_message: None,
+        })
+        .expect("save retrieval result set");
+
+    let reconcile_calls = Arc::new(AtomicUsize::new(0));
+    let shutdown = ShutdownToken::new();
+
+    let workers = start_enrichment_workers_with_factory(
+        WorkerStartConfig {
+            http: &config,
+            shutdown: shutdown.clone(),
+            processor_factory: Arc::new(EntityOnlyReconciliationFactory {
+                reconcile_calls: reconcile_calls.clone(),
+            }),
+        },
+        EnrichmentPipelineResources {
+            job_store: job_store.clone(),
+            read_store,
+            retrieval_service: Arc::new(MockRetrievalStore),
+            state_store: state_store.clone(),
+            derived_store: derived_store.clone(),
+            embedding_store: None,
+            embedding_provider: None,
+        },
+    )
+    .expect("worker should start");
+
+    std::thread::sleep(Duration::from_millis(150));
+    shutdown.signal();
+    for worker in workers {
+        worker.join().expect("worker should join cleanly");
+    }
+
+    assert_eq!(reconcile_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(job_store.complete_count.load(Ordering::SeqCst), 1);
+    let saved = state_store
+        .load_reconciliation_decisions(extraction_result_id)
+        .expect("load reconciliation decisions");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].target_kind, "entity");
+    assert_eq!(saved[0].target_key, "enceladus");
+    assert_eq!(
+        saved[0].decision_kind,
+        ReconciliationDecisionKind::StrengthenExisting
+    );
+    let attempts = derived_store.attempts.lock().unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].objects.len(), 1);
+    assert_eq!(attempts[0].archive_links.len(), 1);
+    assert_eq!(attempts[0].archive_links[0].link_type, "refers_to");
+    assert_eq!(attempts[0].archive_links[0].target_object_id, "entity-1");
+    assert_eq!(
+        attempts[0].archive_links[0].contributed_by.as_deref(),
+        Some("artifact_reconciliation")
+    );
 }
 
 fn test_config(enrichment_worker_count: usize) -> HttpConfig {
@@ -928,5 +1050,54 @@ impl open_archive::processor::ReconciliationProcessor for RetryableReconciliatio
             body_preview: "rate limited".to_string(),
             retry_after_seconds: Some(123),
         })
+    }
+}
+
+struct EntityOnlyReconciliationFactory {
+    reconcile_calls: Arc<AtomicUsize>,
+}
+
+impl ArtifactProcessorFactory for EntityOnlyReconciliationFactory {
+    fn build(
+        &self,
+        _tier: EnrichmentTier,
+    ) -> std::result::Result<Box<dyn ArtifactProcessor>, ProcessorError> {
+        Err(ProcessorError::Message {
+            message: "extract not used".to_string(),
+        })
+    }
+
+    fn build_reconciliation_processor(
+        &self,
+        _tier: EnrichmentTier,
+    ) -> std::result::Result<Box<dyn ReconciliationProcessor>, ProcessorError> {
+        Ok(Box::new(EntityOnlyReconciliationProcessor {
+            reconcile_calls: self.reconcile_calls.clone(),
+        }))
+    }
+}
+
+struct EntityOnlyReconciliationProcessor {
+    reconcile_calls: Arc<AtomicUsize>,
+}
+
+impl ReconciliationProcessor for EntityOnlyReconciliationProcessor {
+    fn reconcile(
+        &self,
+        input: &open_archive::processor::ReconciliationProcessorInput,
+    ) -> std::result::Result<Vec<ReconciliationDecisionOutput>, ProcessorError> {
+        self.reconcile_calls.fetch_add(1, Ordering::SeqCst);
+        assert!(input.memories.is_empty());
+        assert!(input.relationships.is_empty());
+        assert_eq!(input.entities.len(), 1);
+        assert_eq!(input.entities[0].entity_key, "enceladus");
+        Ok(vec![ReconciliationDecisionOutput {
+            decision_kind: ReconciliationDecisionKind::StrengthenExisting,
+            target_kind: "entity".to_string(),
+            target_key: "enceladus".to_string(),
+            matched_object_id: Some("entity-1".to_string()),
+            rationale: "Existing entity found".to_string(),
+            evidence_segment_ids: vec!["segment-1".to_string()],
+        }])
     }
 }

@@ -742,6 +742,7 @@ pub fn contract_rejects_cross_artifact_evidence_links_without_writing_rows<
                     support_strength: SupportStrength::Strong,
                 }],
             }],
+            archive_links: Vec::new(),
         })
         .expect_err("cross-artifact evidence should be rejected");
 
@@ -821,6 +822,7 @@ pub fn contract_rolls_back_partial_writes_when_evidence_insert_fails<
                     },
                 ],
             }],
+            archive_links: Vec::new(),
         })
         .expect_err("duplicate evidence rank should fail");
 

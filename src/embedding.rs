@@ -2,12 +2,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{EmbeddingConfig, OpenAiEmbeddingConfig};
+use crate::config::{EmbeddingConfig, GeminiEmbeddingConfig, OpenAiEmbeddingConfig};
 use crate::error::{EmbeddingError, EmbeddingResult};
 
+pub const GEMINI_DEFAULT_EMBEDDING_MODEL: &str = "gemini-embedding-001";
+pub const GEMINI_DEFAULT_EMBEDDING_DIMENSIONS: usize = 3072;
 pub const OPENAI_DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
 pub const OPENAI_DEFAULT_EMBEDDING_DIMENSIONS: usize = 1536;
 
@@ -27,6 +29,9 @@ pub fn build_embedding_provider(
             stub.model.clone(),
             stub.dimensions,
         )))),
+        EmbeddingConfig::Gemini(gemini) => Ok(Some(Arc::new(GeminiEmbeddingProvider::new(
+            gemini.clone(),
+        )?))),
         EmbeddingConfig::OpenAi(openai) => Ok(Some(Arc::new(OpenAiEmbeddingProvider::new(
             openai.clone(),
         )?))),
@@ -85,6 +90,121 @@ fn stub_embedding_vector(text: &str, dimensions: usize) -> Vec<f32> {
         }
     }
     vector
+}
+
+#[derive(Debug)]
+pub struct GeminiEmbeddingProvider {
+    client: Client,
+    base_url: String,
+    model: String,
+    dimensions: usize,
+}
+
+impl GeminiEmbeddingProvider {
+    pub fn new(config: GeminiEmbeddingConfig) -> Result<Self, String> {
+        let mut default_headers = HeaderMap::new();
+        default_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let api_key_header = HeaderName::from_static("x-goog-api-key");
+        let api_key_value = HeaderValue::from_str(&config.api_key)
+            .map_err(|err| format!("invalid Gemini embedding API key header: {err}"))?;
+        default_headers.insert(api_key_header, api_key_value);
+
+        let client = Client::builder()
+            .default_headers(default_headers)
+            .timeout(Duration::from_secs(180))
+            .build()
+            .map_err(|err| err.to_string())?;
+
+        Ok(Self {
+            client,
+            base_url: config.base_url.trim_end_matches('/').to_string(),
+            model: config.embedding_model,
+            dimensions: config.embedding_dimensions,
+        })
+    }
+}
+
+impl EmbeddingProvider for GeminiEmbeddingProvider {
+    fn provider_name(&self) -> &'static str {
+        "gemini"
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+
+    fn embed_texts(&self, texts: &[String]) -> EmbeddingResult<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let body = GeminiBatchEmbeddingsRequest {
+            requests: texts
+                .iter()
+                .map(|text| GeminiEmbedContentRequest {
+                    model: normalize_gemini_model_resource(&self.model),
+                    content: GeminiEmbeddingContent {
+                        parts: vec![GeminiEmbeddingTextPart { text: text.clone() }],
+                    },
+                    output_dimensionality: Some(self.dimensions),
+                })
+                .collect(),
+        };
+        let request_body =
+            serde_json::to_vec(&body).map_err(|source| EmbeddingError::SerializeRequest {
+                source: Box::new(source),
+            })?;
+
+        let response = self
+            .client
+            .post(format!(
+                "{}/{}:batchEmbedContents",
+                self.base_url,
+                normalize_gemini_model_resource(&self.model)
+            ))
+            .body(request_body)
+            .send()
+            .map_err(|source| EmbeddingError::SendRequest {
+                source: Box::new(source),
+            })?;
+
+        let status = response.status();
+        let response_text = response
+            .text()
+            .map_err(|source| EmbeddingError::ReadResponse {
+                source: Box::new(source),
+            })?;
+        if !status.is_success() {
+            return Err(EmbeddingError::HttpStatus {
+                status: status.as_u16(),
+                body_preview: preview(&response_text),
+            });
+        }
+
+        let parsed: GeminiBatchEmbeddingsResponse =
+            serde_json::from_str(&response_text).map_err(|source| {
+                EmbeddingError::ParseResponse {
+                    source: Box::new(source),
+                    body_preview: preview(&response_text),
+                }
+            })?;
+
+        let mut vectors = Vec::with_capacity(parsed.embeddings.len());
+        for embedding in parsed.embeddings {
+            if embedding.values.len() != self.dimensions {
+                return Err(EmbeddingError::UnexpectedDimensions {
+                    expected: self.dimensions,
+                    actual: embedding.values.len(),
+                });
+            }
+            vectors.push(embedding.values);
+        }
+        Ok(vectors)
+    }
 }
 
 #[derive(Debug)]
@@ -199,6 +319,49 @@ fn preview(input: &str) -> String {
     } else {
         format!("{}...", &input[..MAX_LEN])
     }
+}
+
+fn normalize_gemini_model_resource(model: &str) -> String {
+    if model.starts_with("models/") {
+        model.to_string()
+    } else {
+        format!("models/{model}")
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiBatchEmbeddingsRequest {
+    requests: Vec<GeminiEmbedContentRequest>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiEmbedContentRequest {
+    model: String,
+    content: GeminiEmbeddingContent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_dimensionality: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiEmbeddingContent {
+    parts: Vec<GeminiEmbeddingTextPart>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiEmbeddingTextPart {
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiBatchEmbeddingsResponse {
+    embeddings: Vec<GeminiContentEmbedding>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiContentEmbedding {
+    values: Vec<f32>,
 }
 
 #[derive(Debug, Serialize)]

@@ -156,7 +156,7 @@ pub fn retry_artifact_enrichment(
             job_id: job_id.clone(),
             artifact_id: artifact_id_value.clone(),
             job_type: JobType::ArtifactExtract,
-            enrichment_tier: EnrichmentTier::Standard,
+            enrichment_tier: EnrichmentTier::Default,
             spawned_by_job_id: None,
             job_status: JobStatus::Pending,
             max_attempts: 3,

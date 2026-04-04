@@ -5,59 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 
-pub(super) struct OpenAiArtifactProcessor {
-    pub(super) client: Arc<OpenAiClient>,
-    pub(super) candidate_model: String,
-    pub(super) max_output_tokens: u32,
-    pub(super) repair_max_output_tokens: u32,
-}
-
-impl ArtifactProcessor for OpenAiArtifactProcessor {
-    fn process(
-        &self,
-        input: &ArtifactProcessorInput,
-    ) -> Result<ArtifactProcessorOutput, ProcessorError> {
-        validate_input(input)?;
-        let prompt =
-            build_two_phase_candidate_user_prompt_with_flavor(input, PromptFlavor::OpenAi)?;
-        match self.process_once(input, &prompt, self.max_output_tokens) {
-            Ok(output) => Ok(output),
-            Err(error) if should_retry_with_repair(&error) => {
-                let repair_prompt = build_repair_prompt(&prompt, &error);
-                self.process_once(input, &repair_prompt, self.repair_max_output_tokens)
-            }
-            Err(error) => Err(error),
-        }
-    }
-}
-
-impl OpenAiArtifactProcessor {
-    fn process_once(
-        &self,
-        input: &ArtifactProcessorInput,
-        user_prompt: &str,
-        max_output_tokens: u32,
-    ) -> Result<ArtifactProcessorOutput, ProcessorError> {
-        let candidate_result = self.client.complete_json_with_max_output_tokens(
-            &self.candidate_model,
-            candidate_system_prompt(input),
-            user_prompt,
-            &candidate_output_schema_wrapper(input),
-            max_output_tokens.max(TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS),
-        )?;
-        let candidate = parse_candidate_output(&candidate_result.output_text, input)
-            .map_err(|err| attach_output_preview(err, &candidate_result.output_text))?;
-        Ok(candidate.into_processor_output(
-            input,
-            self.candidate_model.clone(),
-            candidate_result.usage,
-            "openai_enrichment",
-            "openai",
-            OPENAI_PROMPT_VERSION,
-        ))
-    }
-}
-
 pub(super) struct OpenAiExtractionSubmitter {
     pub(super) client: Arc<OpenAiClient>,
     pub(super) candidate_model: String,

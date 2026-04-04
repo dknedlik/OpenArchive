@@ -72,8 +72,10 @@ pub(super) struct GeminiTextPart {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct GeminiGenerationConfig {
-    pub(super) response_mime_type: String,
-    pub(super) response_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) response_mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) response_schema: Option<serde_json::Value>,
     pub(super) max_output_tokens: u32,
 }
 

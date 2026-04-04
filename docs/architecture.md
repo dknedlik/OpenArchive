@@ -60,6 +60,7 @@ The current MCP surface includes:
 - archive search
 - artifact detail retrieval
 - artifact context packs
+- imported note metadata and note-link retrieval
 - derived-object search
 - artifact listing and timeline views
 - related-object traversal

@@ -57,7 +57,7 @@ fn main() -> Result<()> {
     let model = args
         .model
         .clone()
-        .unwrap_or_else(|| gemini.standard_model.clone());
+        .unwrap_or_else(|| gemini.fast_model.clone());
 
     println!("Reconcile probe");
     println!("Provider: gemini");

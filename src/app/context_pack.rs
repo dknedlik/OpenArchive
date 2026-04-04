@@ -4,7 +4,8 @@ use std::sync::Arc;
 use crate::error::{OpenArchiveError, Result};
 use crate::storage::{
     ArtifactContextPackReadStore, CrossArtifactReadStore, DerivedObjectType, EnrichmentStatus,
-    EvidenceRole, ScopeType, SourceType, SupportStrength,
+    EvidenceRole, ImportedNoteLinkRecord, ImportedNoteMetadata, ScopeType, SourceType,
+    SupportStrength,
 };
 
 /// Maximum characters to include in an evidence text excerpt.
@@ -93,7 +94,10 @@ pub struct RelatedObjectEntry {
 pub struct ContextPackResponse {
     pub artifact_id: String,
     pub title: Option<String>,
+    pub note_path: Option<String>,
     pub source_type: SourceType,
+    pub imported_note_metadata: ImportedNoteMetadata,
+    pub inbound_note_links: Vec<ImportedNoteLinkRecord>,
     pub readiness: ContextPackReadiness,
     pub summaries: Vec<ContextDerivedEntry>,
     pub classifications: Vec<ContextDerivedEntry>,
@@ -289,7 +293,10 @@ impl ContextPackService {
         Ok(Some(ContextPackResponse {
             artifact_id: material.artifact.artifact_id.clone(),
             title: material.artifact.title.clone(),
+            note_path: material.artifact.note_path.clone(),
             source_type: material.artifact.source_type,
+            imported_note_metadata: material.imported_note_metadata,
+            inbound_note_links: material.inbound_note_links,
             readiness,
             summaries,
             classifications,
@@ -534,6 +541,8 @@ mod tests {
         let svc = service_with(Some(ArtifactContextPackMaterial {
             artifact: make_artifact(EnrichmentStatus::Pending),
             segments: vec![make_segment("seg-1", "hello")],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
             derived_objects: vec![],
             evidence_links: vec![],
         }));
@@ -555,6 +564,8 @@ mod tests {
                 make_segment("seg-2", "second"),
                 make_segment("seg-3", "third"),
             ],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
             derived_objects: vec![],
             evidence_links: vec![],
         }));
@@ -573,6 +584,8 @@ mod tests {
         let svc = service_with(Some(ArtifactContextPackMaterial {
             artifact: make_artifact(EnrichmentStatus::Completed),
             segments: vec![make_segment("seg-1", "hello")],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
             derived_objects: vec![],
             evidence_links: vec![],
         }));
@@ -587,6 +600,8 @@ mod tests {
         let svc = service_with(Some(ArtifactContextPackMaterial {
             artifact: make_artifact(EnrichmentStatus::Completed),
             segments: vec![make_segment("seg-1", "hello")],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
             derived_objects: vec![make_derived_object(
                 "cls-1",
                 DerivedObjectType::Classification,
@@ -605,6 +620,8 @@ mod tests {
         let svc = service_with(Some(ArtifactContextPackMaterial {
             artifact: make_artifact(EnrichmentStatus::Partial),
             segments: vec![make_segment("seg-1", "hello")],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
             derived_objects: vec![make_derived_object("sum-1", DerivedObjectType::Summary)],
             evidence_links: vec![make_evidence_link("el-1", "sum-1", "seg-1", 1)],
         }));
@@ -622,6 +639,8 @@ mod tests {
                 make_segment("seg-1", "first segment text"),
                 make_segment("seg-2", "second segment text"),
             ],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
             derived_objects: vec![
                 make_derived_object("sum-1", DerivedObjectType::Summary),
                 make_derived_object("mem-1", DerivedObjectType::Memory),
@@ -650,6 +669,8 @@ mod tests {
         let svc = service_with(Some(ArtifactContextPackMaterial {
             artifact: make_artifact(EnrichmentStatus::Completed),
             segments: vec![make_segment("seg-1", &long_text)],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
             derived_objects: vec![make_derived_object("sum-1", DerivedObjectType::Summary)],
             evidence_links: vec![make_evidence_link("el-1", "sum-1", "seg-1", 1)],
         }));
@@ -671,6 +692,8 @@ mod tests {
                 make_segment("seg-3", "unreferenced"),
                 make_segment("seg-4", "also unreferenced"),
             ],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
             derived_objects: vec![make_derived_object("sum-1", DerivedObjectType::Summary)],
             evidence_links: vec![
                 make_evidence_link("el-1", "sum-1", "seg-1", 1),
@@ -694,6 +717,8 @@ mod tests {
         let svc = service_with(Some(ArtifactContextPackMaterial {
             artifact: make_artifact(EnrichmentStatus::Completed),
             segments: vec![make_segment("seg-1", "text")],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
             derived_objects: vec![
                 make_derived_object("sum-1", DerivedObjectType::Summary),
                 make_derived_object("cls-1", DerivedObjectType::Classification),
@@ -719,6 +744,8 @@ mod tests {
         let svc = service_with(Some(ArtifactContextPackMaterial {
             artifact: make_artifact(EnrichmentStatus::Failed),
             segments: vec![make_segment("seg-1", "text")],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
             derived_objects: vec![make_derived_object("mem-1", DerivedObjectType::Memory)],
             evidence_links: vec![],
         }));
@@ -732,6 +759,8 @@ mod tests {
         let svc = service_with(Some(ArtifactContextPackMaterial {
             artifact: make_artifact(EnrichmentStatus::Failed),
             segments: vec![make_segment("seg-1", "text")],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
             derived_objects: vec![],
             evidence_links: vec![],
         }));
@@ -748,6 +777,8 @@ mod tests {
                 make_segment("seg-1", "first"),
                 make_segment("seg-2", "second"),
             ],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
             derived_objects: vec![make_derived_object("sum-1", DerivedObjectType::Summary)],
             evidence_links: vec![
                 make_evidence_link("el-2", "sum-1", "seg-2", 2),
@@ -762,5 +793,74 @@ mod tests {
         assert_eq!(evidence[0].segment_id, "seg-1");
         assert_eq!(evidence[1].rank, 2);
         assert_eq!(evidence[1].segment_id, "seg-2");
+    }
+
+    #[test]
+    fn carries_imported_note_metadata_and_links() {
+        let svc = service_with(Some(ArtifactContextPackMaterial {
+            artifact: ArtifactDetailRecord {
+                artifact_id: "art-1".to_string(),
+                title: Some("Inbox".to_string()),
+                source_type: SourceType::ObsidianVault,
+                enrichment_status: EnrichmentStatus::Completed,
+                note_path: Some("Inbox.md".to_string()),
+            },
+            segments: vec![make_segment("seg-1", "hello")],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata {
+                note_path: Some("Inbox.md".to_string()),
+                properties: vec![],
+                tags: vec![crate::storage::ImportedNoteTagRecord {
+                    raw_tag: "#inbox".to_string(),
+                    normalized_tag: "inbox".to_string(),
+                    tag_path: "inbox".to_string(),
+                    source_kind: crate::storage::ImportedNoteTagSourceKind::Inline,
+                }],
+                aliases: vec![crate::storage::ImportedNoteAliasRecord {
+                    alias_text: "OA Inbox".to_string(),
+                    normalized_alias: "oa inbox".to_string(),
+                }],
+                outbound_links: vec![crate::storage::ImportedNoteLinkRecord {
+                    imported_note_link_id: "out-1".to_string(),
+                    source_segment_id: Some("seg-1".to_string()),
+                    link_kind: crate::storage::ImportedNoteLinkKind::Link,
+                    target_kind: crate::storage::ImportedNoteLinkTargetKind::Note,
+                    raw_target: "Projects/Acme".to_string(),
+                    normalized_target: Some("projects/acme".to_string()),
+                    display_text: Some("Acme".to_string()),
+                    target_path: Some("Projects/Acme.md".to_string()),
+                    target_heading: None,
+                    target_block: None,
+                    external_url: None,
+                    resolved_artifact_id: Some("art-2".to_string()),
+                    resolution_status: crate::storage::ImportedNoteLinkResolutionStatus::Resolved,
+                    locator_json: None,
+                }],
+            },
+            inbound_note_links: vec![crate::storage::ImportedNoteLinkRecord {
+                imported_note_link_id: "in-1".to_string(),
+                source_segment_id: None,
+                link_kind: crate::storage::ImportedNoteLinkKind::Link,
+                target_kind: crate::storage::ImportedNoteLinkTargetKind::Note,
+                raw_target: "Inbox".to_string(),
+                normalized_target: Some("inbox".to_string()),
+                display_text: Some("Inbox".to_string()),
+                target_path: Some("Inbox.md".to_string()),
+                target_heading: None,
+                target_block: None,
+                external_url: None,
+                resolved_artifact_id: Some("art-1".to_string()),
+                resolution_status: crate::storage::ImportedNoteLinkResolutionStatus::Resolved,
+                locator_json: None,
+            }],
+            derived_objects: vec![],
+            evidence_links: vec![],
+        }));
+
+        let pack = svc.assemble(request()).unwrap().unwrap();
+        assert_eq!(pack.note_path.as_deref(), Some("Inbox.md"));
+        assert_eq!(pack.imported_note_metadata.tags.len(), 1);
+        assert_eq!(pack.imported_note_metadata.aliases.len(), 1);
+        assert_eq!(pack.imported_note_metadata.outbound_links.len(), 1);
+        assert_eq!(pack.inbound_note_links.len(), 1);
     }
 }

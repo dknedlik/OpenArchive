@@ -13,8 +13,8 @@ mod batch;
 mod types;
 
 use batch::{
-    OpenAiArtifactProcessor, OpenAiBatchJob, OpenAiBatchRequest, OpenAiExtractionSubmitter,
-    OpenAiFileObject, OpenAiReconciliationSubmitter,
+    OpenAiBatchJob, OpenAiBatchRequest, OpenAiExtractionSubmitter, OpenAiFileObject,
+    OpenAiReconciliationSubmitter,
 };
 use types::OpenRouterResponsesReasoningConfig;
 
@@ -26,124 +26,119 @@ pub(crate) use types::{
 pub struct OpenAiProcessorFactory {
     client: Arc<OpenAiClient>,
     batch_client: Option<Arc<OpenAiClient>>,
-    extract_max_output_tokens: u32,
-    extract_repair_max_output_tokens: u32,
-    standard_model: String,
-    quality_model: String,
-    reconcile_standard_model: String,
-    reconcile_quality_model: String,
+    stage1_max_output_tokens: u32,
+    stage2_max_output_tokens: u32,
+    repair_max_output_tokens: u32,
+    heavy_model: String,
+    fast_model: String,
 }
 
 impl OpenAiProcessorFactory {
     pub fn new(config: OpenAiConfig) -> Result<Self, String> {
         let client = Arc::new(OpenAiClient::new(&config).map_err(|err| err.to_string())?);
-        let quality_model = config
-            .quality_model
-            .clone()
-            .unwrap_or_else(|| config.standard_model.clone());
-        let reconcile_quality_model = config
-            .reconcile_quality_model
-            .clone()
-            .or_else(|| config.quality_model.clone())
-            .unwrap_or_else(|| config.reconcile_standard_model.clone());
-
         Ok(Self {
             client: client.clone(),
             batch_client: Some(client),
-            extract_max_output_tokens: config.max_output_tokens,
-            extract_repair_max_output_tokens: config
+            stage1_max_output_tokens: config
                 .repair_max_output_tokens
                 .max(config.max_output_tokens),
-            standard_model: config.standard_model,
-            quality_model,
-            reconcile_standard_model: config.reconcile_standard_model,
-            reconcile_quality_model,
+            stage2_max_output_tokens: config.max_output_tokens,
+            repair_max_output_tokens: config
+                .repair_max_output_tokens
+                .max(config.max_output_tokens),
+            heavy_model: config.heavy_model,
+            fast_model: config.fast_model,
         })
     }
 
     #[cfg(test)]
     pub(crate) fn with_client(
         client: Arc<dyn InferenceClient>,
-        standard_model: impl Into<String>,
-        quality_model: impl Into<String>,
+        heavy_model: impl Into<String>,
+        fast_model: impl Into<String>,
     ) -> Self {
-        let standard_model = standard_model.into();
-        let quality_model = quality_model.into();
+        let heavy_model = heavy_model.into();
+        let fast_model = fast_model.into();
         Self {
             client: Arc::new(OpenAiClient::for_tests(client)),
             batch_client: None,
-            extract_max_output_tokens: 4000,
-            extract_repair_max_output_tokens: 8000,
-            standard_model: standard_model.clone(),
-            quality_model: quality_model.clone(),
-            reconcile_standard_model: standard_model,
-            reconcile_quality_model: quality_model,
+            stage1_max_output_tokens: 4000,
+            stage2_max_output_tokens: 4000,
+            repair_max_output_tokens: 4000,
+            heavy_model,
+            fast_model,
         }
     }
 }
 
 impl ArtifactProcessorFactory for OpenAiProcessorFactory {
-    fn build(&self, tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError> {
-        let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
-        };
-
-        Ok(Box::new(OpenAiArtifactProcessor {
-            client: Arc::clone(&self.client),
-            candidate_model: model,
-            max_output_tokens: self.extract_max_output_tokens,
-            repair_max_output_tokens: self.extract_repair_max_output_tokens,
+    fn build(&self, _tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError> {
+        Ok(Box::new(ExtractionPipelineProcessor {
+            client: self.client.clone(),
+            extract_model: self.heavy_model.clone(),
+            format_model: self.fast_model.clone(),
+            stage1_max_output_tokens: Some(self.stage1_max_output_tokens),
+            stage2_max_output_tokens: Some(self.stage2_max_output_tokens),
+            repair_max_output_tokens: Some(self.repair_max_output_tokens),
+            pipeline_name: "openai_extraction_pipeline",
+            provider_name: "openai",
         }))
     }
 
     fn build_reconciliation_processor(
         &self,
-        tier: EnrichmentTier,
+        _tier: EnrichmentTier,
     ) -> Result<Box<dyn ReconciliationProcessor>, ProcessorError> {
-        let model = match tier {
-            EnrichmentTier::Standard => self.reconcile_standard_model.clone(),
-            EnrichmentTier::Quality => self.reconcile_quality_model.clone(),
-        };
         let client: Arc<dyn InferenceClient> = self.client.clone();
         Ok(Box::new(HostedReconciliationProcessor {
             client,
-            model,
+            model: self.fast_model.clone(),
             system_prompt: RECONCILIATION_SYSTEM_PROMPT,
         }))
     }
 
+    fn build_batch_processor(
+        &self,
+        _tier: EnrichmentTier,
+    ) -> Result<Option<Box<dyn ArtifactBatchProcessor>>, ProcessorError> {
+        let processor: Box<dyn ArtifactProcessor> = Box::new(ExtractionPipelineProcessor {
+            client: self.client.clone(),
+            extract_model: self.heavy_model.clone(),
+            format_model: self.fast_model.clone(),
+            stage1_max_output_tokens: Some(self.stage1_max_output_tokens),
+            stage2_max_output_tokens: Some(self.stage2_max_output_tokens),
+            repair_max_output_tokens: Some(self.repair_max_output_tokens),
+            pipeline_name: "openai_extraction_pipeline",
+            provider_name: "openai",
+        });
+        Ok(Some(Box::new(SequentialArtifactBatchProcessor::new(
+            processor, 16, 2_000_000,
+        ))))
+    }
+
     fn build_extraction_submitter(
         &self,
-        tier: EnrichmentTier,
+        _tier: EnrichmentTier,
     ) -> Result<Option<Box<dyn ExtractionBatchSubmitter>>, ProcessorError> {
         let Some(client) = &self.batch_client else {
             return Ok(None);
         };
-        let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
-        };
         Ok(Some(Box::new(OpenAiExtractionSubmitter {
             client: Arc::clone(client),
-            candidate_model: model,
+            candidate_model: self.heavy_model.clone(),
         })))
     }
 
     fn build_reconciliation_submitter(
         &self,
-        tier: EnrichmentTier,
+        _tier: EnrichmentTier,
     ) -> Result<Option<Box<dyn ReconciliationBatchSubmitter>>, ProcessorError> {
         let Some(client) = &self.batch_client else {
             return Ok(None);
         };
-        let model = match tier {
-            EnrichmentTier::Standard => self.reconcile_standard_model.clone(),
-            EnrichmentTier::Quality => self.reconcile_quality_model.clone(),
-        };
         Ok(Some(Box::new(OpenAiReconciliationSubmitter {
             client: Arc::clone(client),
-            model,
+            model: self.fast_model.clone(),
         })))
     }
 }
@@ -194,6 +189,23 @@ impl OpenAiClient {
 }
 
 impl InferenceClient for OpenAiClient {
+    fn complete_text(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<InferenceResult, ProcessorError> {
+        if let Some(delegate) = &self.delegate {
+            return delegate.complete_text(model, system_prompt, user_prompt);
+        }
+        self.complete_via_responses(
+            model,
+            system_prompt,
+            user_prompt,
+            &serde_json::json!({ "type": "text" }),
+        )
+    }
+
     fn complete_json(
         &self,
         model: &str,
@@ -206,10 +218,32 @@ impl InferenceClient for OpenAiClient {
         }
         self.complete_via_responses(model, system_prompt, user_prompt, schema)
     }
-}
 
-impl OpenAiClient {
-    fn complete_json_with_max_output_tokens(
+    fn complete_text_with_max_output_tokens_override(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_output_tokens: u32,
+    ) -> Result<InferenceResult, ProcessorError> {
+        if let Some(delegate) = &self.delegate {
+            return delegate.complete_text_with_max_output_tokens_override(
+                model,
+                system_prompt,
+                user_prompt,
+                max_output_tokens,
+            );
+        }
+        self.complete_via_responses_with_max_output_tokens(
+            model,
+            system_prompt,
+            user_prompt,
+            &serde_json::json!({ "type": "text" }),
+            max_output_tokens,
+        )
+    }
+
+    fn complete_json_with_max_output_tokens_override(
         &self,
         model: &str,
         system_prompt: &str,
@@ -218,7 +252,13 @@ impl OpenAiClient {
         max_output_tokens: u32,
     ) -> Result<InferenceResult, ProcessorError> {
         if let Some(delegate) = &self.delegate {
-            return delegate.complete_json(model, system_prompt, user_prompt, schema);
+            return delegate.complete_json_with_max_output_tokens_override(
+                model,
+                system_prompt,
+                user_prompt,
+                schema,
+                max_output_tokens,
+            );
         }
         self.complete_via_responses_with_max_output_tokens(
             model,
@@ -228,7 +268,9 @@ impl OpenAiClient {
             max_output_tokens,
         )
     }
+}
 
+impl OpenAiClient {
     fn responses_text_format(schema: &serde_json::Value) -> serde_json::Value {
         let format_type = schema
             .get("type")

@@ -202,7 +202,7 @@ pub fn search_candidates(
                     'artifact_title' AS match_kind,
                     NULL::text AS derived_object_type,
                     COALESCE(a.title, '') AS snippet,
-                    300 + LEAST(99, GREATEST(0, FLOOR(ts_rank_cd(a.title_tsv, {tsquery}) * 100)::int)) AS score_hint
+                    240 + GREATEST(0, FLOOR(ts_rank_cd(a.title_tsv, {tsquery}) * 100)::int) AS score_hint
                FROM oa_artifact a
               WHERE a.title_tsv @@ {tsquery}{artifact_filter}"
         ));
@@ -234,7 +234,7 @@ pub fn search_candidates(
                     'imported_note_path' AS match_kind,
                     NULL::text AS derived_object_type,
                     COALESCE(a.source_conversation_key, '') AS snippet,
-                    360 AS score_hint
+                    220 AS score_hint
                FROM oa_artifact a
               WHERE lower(coalesce(a.source_conversation_key, '')) LIKE ('%' || lower($1) || '%'){artifact_filter}"
         ));
@@ -247,8 +247,8 @@ pub fn search_candidates(
                     CASE
                         WHEN lower(coalesce(nl.external_url, '')) = lower($1) THEN 395
                         WHEN lower(coalesce(nl.external_url, '')) LIKE ('%' || lower($1) || '%') THEN 390
-                        WHEN lower(coalesce(nl.display_text, '')) LIKE ('%' || lower($1) || '%') THEN 380
-                        ELSE 370
+                        WHEN lower(coalesce(nl.display_text, '')) LIKE ('%' || lower($1) || '%') THEN 250
+                        ELSE 230
                     END AS score_hint
                FROM oa_artifact_note_link nl
                JOIN oa_artifact a ON a.artifact_id = nl.artifact_id
@@ -294,7 +294,7 @@ pub fn search_candidates(
                     'derived_object' AS match_kind,
                     d.derived_object_type AS derived_object_type,
                     COALESCE(d.title, d.body_text, '') AS snippet,
-                    200 + LEAST(99, GREATEST(0, FLOOR(ts_rank_cd(d.search_tsv, {tsquery}) * 100)::int)) AS score_hint
+                    360 + GREATEST(0, FLOOR(ts_rank_cd(d.search_tsv, {tsquery}) * 100)::int) AS score_hint
                FROM oa_derived_object d
               WHERE d.object_status = 'active'
                 AND d.search_tsv @@ {tsquery}{derived_extra}"
@@ -331,7 +331,7 @@ pub fn search_candidates(
                     'segment_excerpt' AS match_kind,
                     NULL::text AS derived_object_type,
                     COALESCE(s.text_content, '') AS snippet,
-                    100 + LEAST(99, GREATEST(0, FLOOR(ts_rank_cd(s.text_content_tsv, {tsquery}) * 100)::int)) AS score_hint
+                    300 + GREATEST(0, FLOOR(ts_rank_cd(s.text_content_tsv, {tsquery}) * 100)::int) AS score_hint
                FROM oa_segment s
               WHERE s.text_content_tsv @@ {tsquery}{source_join}"
         ));
@@ -512,10 +512,22 @@ pub fn load_artifact_context_pack_material(
     let Some(artifact) = load_artifact_record(client, connection_string, artifact_id)? else {
         return Ok(None);
     };
+    let note_path = artifact.note_path.clone();
 
     Ok(Some(ArtifactContextPackMaterial {
         artifact,
         segments: load_artifact_segments(client, connection_string, artifact_id)?,
+        imported_note_metadata: imported_note::load_imported_note_metadata(
+            client,
+            connection_string,
+            artifact_id,
+            note_path,
+        )?,
+        inbound_note_links: imported_note::load_inbound_note_links(
+            client,
+            connection_string,
+            artifact_id,
+        )?,
         derived_objects: load_artifact_context_derived_objects(
             client,
             connection_string,

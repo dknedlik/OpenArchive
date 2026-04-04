@@ -5,6 +5,7 @@ use postgres::Client;
 use crate::error::{DbError, StorageError, StorageResult};
 use crate::storage::derivation_store::WriteDerivationAttempt;
 use crate::storage::types::{NewDerivedObject, NewEvidenceLink, ObjectStatus, ScopeType};
+use crate::storage::writeback_store::NewArchiveLink;
 
 fn pg_error(connection_string: &str, source: postgres::Error) -> StorageError {
     StorageError::Db(DbError::ConnectPostgres {
@@ -132,6 +133,37 @@ pub fn insert_evidence_link(
     Ok(())
 }
 
+pub fn insert_archive_link(
+    client: &mut Client,
+    connection_string: &str,
+    link: &NewArchiveLink,
+) -> StorageResult<()> {
+    client
+        .execute(
+            "INSERT INTO oa_archive_link \
+             (archive_link_id, source_object_id, target_object_id, link_type, \
+              confidence_score, rationale, origin_kind, contributed_by) \
+             VALUES ($1, $2, $3, $4, $5::double precision, $6, 'inferred', $7) \
+             ON CONFLICT (source_object_id, target_object_id, link_type) DO UPDATE \
+             SET confidence_score = COALESCE(EXCLUDED.confidence_score, oa_archive_link.confidence_score), \
+                 rationale = COALESCE(EXCLUDED.rationale, oa_archive_link.rationale), \
+                 origin_kind = COALESCE(EXCLUDED.origin_kind, oa_archive_link.origin_kind), \
+                 contributed_by = COALESCE(EXCLUDED.contributed_by, oa_archive_link.contributed_by)",
+            &[
+                &link.archive_link_id,
+                &link.source_object_id,
+                &link.target_object_id,
+                &link.link_type,
+                &link.confidence_score,
+                &link.rationale,
+                &link.contributed_by,
+            ],
+        )
+        .map_err(|source| pg_error(connection_string, source))?;
+
+    Ok(())
+}
+
 pub fn validate_derivation_attempt(
     client: &mut Client,
     connection_string: &str,
@@ -145,6 +177,11 @@ pub fn validate_derivation_attempt(
     }
 
     let mut derived_object_ids = HashSet::with_capacity(attempt.objects.len());
+    let valid_new_object_ids = attempt
+        .objects
+        .iter()
+        .map(|object_write| object_write.object.derived_object_id.as_str())
+        .collect::<HashSet<_>>();
     for object_write in &attempt.objects {
         let object = &object_write.object;
         if object.derivation_run_id != attempt.run.derivation_run_id {
@@ -204,6 +241,37 @@ pub fn validate_derivation_attempt(
         }
     }
 
+    for link in &attempt.archive_links {
+        if link.source_object_id == link.target_object_id {
+            return Err(StorageError::InvalidDerivationWrite {
+                detail: format!(
+                    "archive link {} must not reference the same object {}",
+                    link.archive_link_id, link.source_object_id
+                ),
+            });
+        }
+        if !valid_new_object_ids.contains(link.source_object_id.as_str())
+            && !derived_object_exists(client, connection_string, &link.source_object_id)?
+        {
+            return Err(StorageError::InvalidDerivationWrite {
+                detail: format!(
+                    "archive link {} references missing source object {}",
+                    link.archive_link_id, link.source_object_id
+                ),
+            });
+        }
+        if !valid_new_object_ids.contains(link.target_object_id.as_str())
+            && !derived_object_exists(client, connection_string, &link.target_object_id)?
+        {
+            return Err(StorageError::InvalidDerivationWrite {
+                detail: format!(
+                    "archive link {} references missing target object {}",
+                    link.archive_link_id, link.target_object_id
+                ),
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -254,6 +322,21 @@ fn artifact_exists(
         .map_err(|source| pg_error(connection_string, source))?;
 
     Ok(row.map(|row| row.get::<_, String>(0)).as_deref() == Some(artifact_id))
+}
+
+fn derived_object_exists(
+    client: &mut Client,
+    connection_string: &str,
+    derived_object_id: &str,
+) -> StorageResult<bool> {
+    let row = client
+        .query_opt(
+            "SELECT derived_object_id FROM oa_derived_object WHERE derived_object_id = $1",
+            &[&derived_object_id],
+        )
+        .map_err(|source| pg_error(connection_string, source))?;
+
+    Ok(row.map(|row| row.get::<_, String>(0)).as_deref() == Some(derived_object_id))
 }
 
 fn load_segment_artifact_id(

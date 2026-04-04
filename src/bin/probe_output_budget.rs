@@ -8,13 +8,13 @@ use std::time::Instant;
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use open_archive::config::{
-    AnthropicConfig, GeminiConfig, GrokConfig, OpenAiConfig, PostgresConfig,
+    AnthropicConfig, GeminiConfig, GrokConfig, OciConfig, OpenAiConfig, PostgresConfig,
 };
 use open_archive::parser::document::{parse_document, DocumentFormat};
 use open_archive::parser::obsidian::parse_frontmatter;
 use open_archive::processor::{
     AnthropicProcessorFactory, ArtifactProcessorFactory, ArtifactProcessorInput,
-    GeminiProcessorFactory, GrokProcessorFactory, OpenAiProcessorFactory,
+    GeminiProcessorFactory, GrokProcessorFactory, OciProcessorFactory, OpenAiProcessorFactory,
 };
 use open_archive::storage::types::EnrichmentTier;
 use open_archive::storage::types::{
@@ -54,7 +54,7 @@ struct Args {
     #[arg(long = "budget", required = true)]
     budgets: Vec<u32>,
 
-    /// Override the model for the probe. Defaults to the selected provider's standard model.
+    /// Override the model for the probe. Defaults to the selected provider's heavy model.
     #[arg(long = "model")]
     model: Option<String>,
 
@@ -121,6 +121,12 @@ fn main() -> Result<()> {
             )?;
             args_model_grok(&config, &args)?
         }
+        ProbeProvider::Oci => {
+            let config = OciConfig::from_env().context(
+                "failed to load OCI config from env; set OA_OCI_REGION, OA_OCI_COMPARTMENT_ID, and related vars",
+            )?;
+            args_model_oci(&config, &args)?
+        }
     };
 
     println!("Output budget probe");
@@ -142,8 +148,8 @@ fn main() -> Result<()> {
                 ProbeProvider::OpenRouter => {
                     let mut config = OpenAiConfig::from_env()
                         .context("failed to reload OpenAI config from env")?;
-                    config.standard_model = model.clone();
-                    config.quality_model = Some(model.clone());
+                    config.heavy_model = model.clone();
+                    config.fast_model = model.clone();
                     config.max_output_tokens = *budget;
                     Box::new(
                         OpenAiProcessorFactory::new(config)
@@ -153,8 +159,8 @@ fn main() -> Result<()> {
                 ProbeProvider::Gemini => {
                     let mut config = GeminiConfig::from_env()
                         .context("failed to reload Gemini config from env")?;
-                    config.standard_model = model.clone();
-                    config.quality_model = Some(model.clone());
+                    config.heavy_model = model.clone();
+                    config.fast_model = model.clone();
                     config.max_output_tokens = *budget;
                     Box::new(
                         GeminiProcessorFactory::new(config)
@@ -164,8 +170,8 @@ fn main() -> Result<()> {
                 ProbeProvider::Anthropic => {
                     let mut config = AnthropicConfig::from_env()
                         .context("failed to reload Anthropic config from env")?;
-                    config.standard_model = model.clone();
-                    config.quality_model = Some(model.clone());
+                    config.heavy_model = model.clone();
+                    config.fast_model = model.clone();
                     config.max_output_tokens = *budget;
                     Box::new(
                         AnthropicProcessorFactory::new(config)
@@ -175,17 +181,28 @@ fn main() -> Result<()> {
                 ProbeProvider::Grok => {
                     let mut config =
                         GrokConfig::from_env().context("failed to reload Grok config from env")?;
-                    config.standard_model = model.clone();
-                    config.quality_model = Some(model.clone());
+                    config.heavy_model = model.clone();
+                    config.fast_model = model.clone();
                     config.max_output_tokens = *budget;
                     Box::new(
                         GrokProcessorFactory::new(config)
                             .map_err(|err| anyhow!("failed to build Grok factory: {err}"))?,
                     )
                 }
+                ProbeProvider::Oci => {
+                    let mut config =
+                        OciConfig::from_env().context("failed to reload OCI config from env")?;
+                    config.heavy_model = model.clone();
+                    config.fast_model = model.clone();
+                    config.max_output_tokens = *budget;
+                    Box::new(
+                        OciProcessorFactory::new(config)
+                            .map_err(|err| anyhow!("failed to build OCI factory: {err}"))?,
+                    )
+                }
             };
             let processor = factory
-                .build(EnrichmentTier::Standard)
+                .build(EnrichmentTier::Default)
                 .map_err(|err| anyhow!("failed to build processor: {err}"))?;
 
             let started = Instant::now();
@@ -416,6 +433,7 @@ enum ProbeProvider {
     Gemini,
     Anthropic,
     Grok,
+    Oci,
 }
 
 impl ProbeProvider {
@@ -425,8 +443,9 @@ impl ProbeProvider {
             "gemini" => Ok(Self::Gemini),
             "anthropic" => Ok(Self::Anthropic),
             "grok" => Ok(Self::Grok),
+            "oci" => Ok(Self::Oci),
             _ => Err(anyhow!(
-                "unsupported provider {value}; expected openai, gemini, anthropic, or grok"
+                "unsupported provider {value}; expected openai, gemini, anthropic, grok, or oci"
             )),
         }
     }
@@ -437,6 +456,7 @@ impl ProbeProvider {
             Self::Gemini => "gemini",
             Self::Anthropic => "anthropic",
             Self::Grok => "grok",
+            Self::Oci => "oci",
         }
     }
 }
@@ -445,28 +465,35 @@ fn args_model_openai(config: &OpenAiConfig, args: &Args) -> Result<String> {
     Ok(args
         .model
         .clone()
-        .unwrap_or_else(|| config.standard_model.clone()))
+        .unwrap_or_else(|| config.heavy_model.clone()))
 }
 
 fn args_model_gemini(config: &GeminiConfig, args: &Args) -> Result<String> {
     Ok(args
         .model
         .clone()
-        .unwrap_or_else(|| config.standard_model.clone()))
+        .unwrap_or_else(|| config.heavy_model.clone()))
 }
 
 fn args_model_anthropic(config: &AnthropicConfig, args: &Args) -> Result<String> {
     Ok(args
         .model
         .clone()
-        .unwrap_or_else(|| config.standard_model.clone()))
+        .unwrap_or_else(|| config.heavy_model.clone()))
 }
 
 fn args_model_grok(config: &GrokConfig, args: &Args) -> Result<String> {
     Ok(args
         .model
         .clone()
-        .unwrap_or_else(|| config.standard_model.clone()))
+        .unwrap_or_else(|| config.heavy_model.clone()))
+}
+
+fn args_model_oci(config: &OciConfig, args: &Args) -> Result<String> {
+    Ok(args
+        .model
+        .clone()
+        .unwrap_or_else(|| config.heavy_model.clone()))
 }
 
 fn format_usage(usage: &open_archive::processor::InferenceUsage) -> String {

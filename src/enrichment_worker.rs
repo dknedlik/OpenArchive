@@ -13,7 +13,6 @@ use crate::processor::{
     ReconciliationProcessorInput, RelationshipOutput, StubProcessorFactory, SummaryOutput,
 };
 use crate::shutdown::ShutdownToken;
-use crate::stage_poller::{stage_poller_loop, ExtractStage, ReconcileStage, StagePollerContext};
 use crate::storage::JobType;
 use crate::storage::{
     ArtifactExtractPayload, ArtifactExtractionResult, ArtifactReadStore, ArtifactReconcilePayload,
@@ -22,7 +21,7 @@ use crate::storage::{
     DerivedMetadataWriteStore, DerivedObjectEmbeddingItem, DerivedObjectEmbeddingPayload,
     DerivedObjectEmbeddingStore, DerivedObjectPayload, EnrichmentJobLifecycleStore,
     EnrichmentStateStore, EnrichmentTier, EntityObjectJson, EvidenceRole, ExtractedClassification,
-    ExtractedMemory, InputScopeType, JobStatus, MemoryObjectJson, NewDerivationRun,
+    ExtractedMemory, InputScopeType, JobStatus, MemoryObjectJson, NewArchiveLink, NewDerivationRun,
     NewDerivedObject, NewDerivedObjectEmbedding, NewEnrichmentJob, NewEvidenceLink, ObjectStatus,
     OriginKind, ReconciliationDecision, ReconciliationDecisionKind, RelationshipObjectJson,
     RetrievalIntent, RetrievalResultSet, ScopeType, SummaryObjectJson, SupportStrength,
@@ -38,6 +37,12 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RETRYABLE_INFERENCE_BACKOFF_SECONDS: i64 = 60;
+
+fn has_reconciliation_candidates(extraction_result: &ArtifactExtractionResult) -> bool {
+    !(extraction_result.memories.is_empty()
+        && extraction_result.entities.is_empty()
+        && extraction_result.relationships.is_empty())
+}
 
 #[derive(Clone)]
 struct ExtractCoveragePolicy {
@@ -580,9 +585,7 @@ fn process_reconcile_job_batch(
         {
             match result {
                 Ok(outputs) => {
-                    let decisions = if extraction_result.memories.is_empty()
-                        && extraction_result.relationships.is_empty()
-                    {
+                    let decisions = if !has_reconciliation_candidates(&extraction_result) {
                         vec![ReconciliationDecision {
                             reconciliation_decision_id: new_id("reconcile"),
                             artifact_id: extraction_result.artifact_id.clone(),
@@ -595,7 +598,7 @@ fn process_reconcile_job_batch(
                             target_kind: "artifact".to_string(),
                             target_key: extraction_result.artifact_id.clone(),
                             matched_object_id: None,
-                            rationale: "No candidate memories or relationships were extracted for reconciliation.".to_string(),
+                            rationale: "No candidate memories, entities, or relationships were extracted for reconciliation.".to_string(),
                             evidence_segment_ids: extraction_result.summary_evidence_segment_ids.clone(),
                             status: "completed".to_string(),
                             error_message: None,
@@ -624,6 +627,16 @@ fn process_reconcile_job_batch(
                         &extraction_result,
                         &decisions,
                     );
+                    let embedding_job = (ctx.embedding_store.is_some()
+                        && ctx.embedding_provider.is_some())
+                    .then(|| {
+                        build_embedding_job(
+                            &claimed_job,
+                            &loaded.artifact.artifact_id,
+                            &attempt.objects,
+                        )
+                    })
+                    .flatten();
                     if let Err(err) = derived_store.write_derivation_attempt(attempt) {
                         let _ = fail_job(
                             job_store,
@@ -633,6 +646,9 @@ fn process_reconcile_job_batch(
                             err,
                         );
                         continue;
+                    }
+                    if let Some(job) = embedding_job.as_ref() {
+                        try_enqueue_embedding_job(job_store, &claimed_job.job_id, job);
                     }
                     complete_job(job_store, worker_id, &claimed_job.job_id)?;
                 }
@@ -1024,9 +1040,7 @@ fn process_reconcile_job(
             )
         })?;
 
-    let decisions = if extraction_result.memories.is_empty()
-        && extraction_result.relationships.is_empty()
-    {
+    let decisions = if !has_reconciliation_candidates(&extraction_result) {
         vec![ReconciliationDecision {
             reconciliation_decision_id: new_id("reconcile"),
             artifact_id: extraction_result.artifact_id.clone(),
@@ -1039,7 +1053,7 @@ fn process_reconcile_job(
             target_kind: "artifact".to_string(),
             target_key: extraction_result.artifact_id.clone(),
             matched_object_id: None,
-            rationale: "No candidate memories or relationships were extracted for reconciliation."
+            rationale: "No candidate memories, entities, or relationships were extracted for reconciliation."
                 .to_string(),
             evidence_segment_ids: extraction_result.summary_evidence_segment_ids.clone(),
             status: "completed".to_string(),
@@ -1276,7 +1290,7 @@ pub(crate) fn build_embedding_job(
         job_id: new_id("job"),
         artifact_id: artifact_id.to_string(),
         job_type: JobType::DerivedObjectEmbed,
-        enrichment_tier: EnrichmentTier::Standard,
+        enrichment_tier: EnrichmentTier::Default,
         spawned_by_job_id: Some(claimed_job.job_id.clone()),
         job_status: JobStatus::Pending,
         max_attempts: 3,
@@ -2107,6 +2121,11 @@ pub(crate) fn build_derivation_attempt(
         "attached_existing_count": attached_existing.len()
     })
     .to_string();
+    let archive_links = build_reconciliation_archive_links(
+        &summary_object_id,
+        decisions,
+        "artifact_reconciliation",
+    );
 
     WriteDerivationAttempt {
         run: NewDerivationRun {
@@ -2127,7 +2146,52 @@ pub(crate) fn build_derivation_attempt(
             error_message: None,
         },
         objects,
+        archive_links,
     }
+}
+
+fn build_reconciliation_archive_links(
+    summary_object_id: &str,
+    decisions: &[ReconciliationDecision],
+    contributed_by: &str,
+) -> Vec<NewArchiveLink> {
+    let mut seen = HashSet::new();
+    let mut links = Vec::new();
+
+    for decision in decisions {
+        if !matches!(
+            decision.decision_kind,
+            ReconciliationDecisionKind::AttachToExisting
+                | ReconciliationDecisionKind::StrengthenExisting
+        ) {
+            continue;
+        }
+
+        let Some(target_object_id) = decision.matched_object_id.as_ref() else {
+            continue;
+        };
+
+        let edge = (
+            summary_object_id.to_string(),
+            target_object_id.clone(),
+            "refers_to".to_string(),
+        );
+        if !seen.insert(edge.clone()) {
+            continue;
+        }
+
+        links.push(NewArchiveLink {
+            archive_link_id: new_id("alink"),
+            source_object_id: edge.0,
+            target_object_id: edge.1,
+            link_type: edge.2,
+            confidence_score: None,
+            rationale: Some(decision.rationale.clone()),
+            contributed_by: Some(contributed_by.to_string()),
+        });
+    }
+
+    links
 }
 
 pub(crate) fn build_evidence_links(
@@ -2411,16 +2475,17 @@ pub fn start_enrichment_pipeline(
 
     match execution_mode {
         InferenceExecutionMode::Batch => {
+            let mode = &config.batch;
             handles.extend(spawn_extract_batch_workers(BatchWorkerConfig {
                 pid,
-                worker_count: config.extract_workers,
-                batch_size: config.extract.batch_size,
-                max_concurrent: config.extract.max_concurrent_batches,
+                worker_count: mode.extract_workers,
                 job_store: Arc::clone(&job_store),
                 read_store: Arc::clone(&read_store),
+                retrieval_service: Arc::clone(&retrieval_service),
                 state_store: Arc::clone(&state_store),
                 derived_store: Arc::clone(&derived_store),
-                enqueue_embedding_jobs: false,
+                embedding_store: embedding_store.clone(),
+                embedding_provider: embedding_provider.clone(),
                 processor_factory: Arc::clone(&processor_factory),
                 chunking: Some(Arc::clone(&chunking)),
                 poll_interval,
@@ -2428,26 +2493,28 @@ pub fn start_enrichment_pipeline(
             })?);
             handles.extend(spawn_reconcile_batch_workers(BatchWorkerConfig {
                 pid,
-                worker_count: config.reconcile_workers,
-                batch_size: config.reconcile.batch_size,
-                max_concurrent: config.reconcile.max_concurrent_batches,
+                worker_count: mode.reconcile_workers,
                 job_store: Arc::clone(&job_store),
                 read_store: Arc::clone(&read_store),
+                retrieval_service: Arc::clone(&retrieval_service),
                 state_store: Arc::clone(&state_store),
                 derived_store: Arc::clone(&derived_store),
-                enqueue_embedding_jobs: embedding_store.is_some() && embedding_provider.is_some(),
+                embedding_store: embedding_store.clone(),
+                embedding_provider: embedding_provider.clone(),
                 processor_factory: Arc::clone(&processor_factory),
-                chunking: None,
+                chunking: Some(Arc::clone(&chunking)),
                 poll_interval,
                 shutdown: shutdown.clone(),
             })?);
         }
         InferenceExecutionMode::Direct => {
+            let mode = &config.direct;
             handles.extend(spawn_direct_stage_workers(DirectStageWorkerConfig {
                 pid,
                 stage_name: "extract",
                 job_type: JobType::ArtifactExtract,
-                worker_count: config.extract_workers,
+                execution_mode: InferenceExecutionMode::Direct,
+                worker_count: mode.extract_workers,
                 resources: Arc::clone(&direct_resources),
                 chunking: Arc::clone(&chunking),
                 coverage_policy: Arc::clone(&coverage_policy),
@@ -2458,7 +2525,8 @@ pub fn start_enrichment_pipeline(
                 pid,
                 stage_name: "reconcile",
                 job_type: JobType::ArtifactReconcile,
-                worker_count: config.reconcile_workers,
+                execution_mode: InferenceExecutionMode::Direct,
+                worker_count: mode.reconcile_workers,
                 resources: Arc::clone(&direct_resources),
                 chunking: Arc::clone(&chunking),
                 coverage_policy: Arc::clone(&coverage_policy),
@@ -2468,8 +2536,24 @@ pub fn start_enrichment_pipeline(
         }
     }
 
+    let (retrieve_context_workers, embedding_workers, extract_workers, reconcile_workers) =
+        match execution_mode {
+            InferenceExecutionMode::Batch => (
+                config.batch.retrieve_context_workers,
+                config.batch.embedding_workers,
+                config.batch.extract_workers,
+                config.batch.reconcile_workers,
+            ),
+            InferenceExecutionMode::Direct => (
+                config.direct.retrieve_context_workers,
+                config.direct.embedding_workers,
+                config.direct.extract_workers,
+                config.direct.reconcile_workers,
+            ),
+        };
+
     // RetrieveContext workers (traditional blocking workers)
-    for i in 0..config.retrieve_context_workers {
+    for i in 0..retrieve_context_workers {
         let worker_id = format!("enrichment:{}:retrieve:{}", pid, i);
         let job_store = Arc::clone(&job_store);
         let retrieval_service = Arc::clone(&retrieval_service);
@@ -2495,13 +2579,13 @@ pub fn start_enrichment_pipeline(
         handles.push(h);
     }
 
-    if config.embedding_workers > 0 {
+    if embedding_workers > 0 {
         if let (Some(embedding_store), Some(embedding_provider)) =
             (embedding_store, embedding_provider)
         {
             handles.extend(spawn_embedding_workers(
                 pid,
-                config.embedding_workers,
+                embedding_workers,
                 Arc::clone(&job_store),
                 embedding_store,
                 embedding_provider,
@@ -2516,10 +2600,10 @@ pub fn start_enrichment_pipeline(
     info!(
         "Enrichment pipeline started: mode={:?}, extract_workers={}, reconcile_workers={}, retrieve_context_workers={}, embedding_workers={}, chunk_segments={}, chunk_overlap={}, chunk_max_chars={}",
         execution_mode,
-        config.extract_workers,
-        config.reconcile_workers,
-        config.retrieve_context_workers,
-        config.embedding_workers,
+        extract_workers,
+        reconcile_workers,
+        retrieve_context_workers,
+        embedding_workers,
         config.chunking.max_segments_per_chunk,
         config.chunking.chunk_overlap_segments,
         config.chunking.max_chars_per_chunk
@@ -2533,18 +2617,18 @@ fn validate_batch_execution_support(
     use crate::storage::EnrichmentTier;
 
     if processor_factory
-        .build_extraction_submitter(EnrichmentTier::Standard)?
+        .build_batch_processor(EnrichmentTier::Default)?
         .is_none()
     {
-        return Err(WorkerError::MissingBatchSubmitter {
+        return Err(WorkerError::MissingBatchProcessor {
             stage: "extraction",
         });
     }
     if processor_factory
-        .build_reconciliation_submitter(EnrichmentTier::Standard)?
+        .build_reconciliation_batch_processor(EnrichmentTier::Default)?
         .is_none()
     {
-        return Err(WorkerError::MissingBatchSubmitter {
+        return Err(WorkerError::MissingBatchProcessor {
             stage: "reconciliation",
         });
     }
@@ -2554,13 +2638,13 @@ fn validate_batch_execution_support(
 struct BatchWorkerConfig {
     pid: u32,
     worker_count: usize,
-    batch_size: usize,
-    max_concurrent: usize,
     job_store: Arc<dyn EnrichmentJobLifecycleStore>,
     read_store: Arc<dyn ArtifactReadStore>,
+    retrieval_service: Arc<dyn ArchiveRetrievalServiceApi>,
     state_store: Arc<dyn EnrichmentStateStore>,
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
-    enqueue_embedding_jobs: bool,
+    embedding_store: Option<Arc<dyn DerivedObjectEmbeddingStore>>,
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
     chunking: Option<Arc<ExtractionChunkingConfig>>,
     poll_interval: Duration,
@@ -2573,66 +2657,45 @@ fn spawn_reconcile_batch_workers(
     let BatchWorkerConfig {
         pid,
         worker_count,
-        batch_size,
-        max_concurrent,
         job_store,
         read_store,
+        retrieval_service,
         state_store,
         derived_store,
-        enqueue_embedding_jobs,
+        embedding_store,
+        embedding_provider,
         processor_factory,
-        chunking: _,
+        chunking,
         poll_interval,
         shutdown,
     } = config;
-    (0..worker_count)
-        .map(|i| {
-            let worker_id = format!("enrichment:{}:reconcile:{}", pid, i);
-            let job_store = Arc::clone(&job_store);
-            let read_store = Arc::clone(&read_store);
-            let state_store = Arc::clone(&state_store);
-            let derived_store = Arc::clone(&derived_store);
-            let processor_factory = Arc::clone(&processor_factory);
-            let shutdown = shutdown.clone();
-            thread::Builder::new()
-                .name(format!("reconcile-poller-{}", i))
-                .spawn(move || {
-                    let submitter = processor_factory
-                        .build_reconciliation_submitter(crate::storage::EnrichmentTier::Standard)
-                        .ok()
-                        .flatten();
-                    let Some(submitter) = submitter else {
-                        info!(
-                            "No reconciliation batch submitter available; reconcile poller exiting"
-                        );
-                        return;
-                    };
-                    let stage = ReconcileStage::new(
-                        submitter,
-                        crate::storage::EnrichmentTier::Standard,
-                        batch_size,
-                        max_concurrent,
-                        enqueue_embedding_jobs,
-                    );
-                    stage_poller_loop(
-                        &stage,
-                        worker_id,
-                        StagePollerContext {
-                            job_store: job_store.as_ref(),
-                            read_store: read_store.as_ref(),
-                            state_store: state_store.as_ref(),
-                            derived_store: derived_store.as_ref(),
-                        },
-                        poll_interval,
-                        shutdown,
-                    );
-                })
-                .map_err(|source| WorkerError::SpawnThread {
-                    worker_kind: format!("reconcile poller {}", i),
-                    source: Box::new(source),
-                })
-        })
-        .collect()
+    let chunking = chunking.expect("reconcile batch workers require chunking placeholder");
+    let coverage_policy = Arc::new(ExtractCoveragePolicy {
+        min_coverage_percent: 60,
+        max_gap_fill_passes: 1,
+    });
+    let resources = Arc::new(WorkerResources {
+        job_store,
+        read_store,
+        retrieval_service,
+        state_store,
+        derived_store,
+        embedding_store,
+        embedding_provider,
+        processor_factory,
+    });
+    spawn_direct_stage_workers(DirectStageWorkerConfig {
+        pid,
+        stage_name: "reconcile",
+        job_type: JobType::ArtifactReconcile,
+        execution_mode: InferenceExecutionMode::Batch,
+        worker_count,
+        resources,
+        chunking,
+        coverage_policy,
+        poll_interval,
+        shutdown,
+    })
 }
 
 fn spawn_extract_batch_workers(
@@ -2641,72 +2704,52 @@ fn spawn_extract_batch_workers(
     let BatchWorkerConfig {
         pid,
         worker_count,
-        batch_size,
-        max_concurrent,
         job_store,
         read_store,
+        retrieval_service,
         state_store,
         derived_store,
-        enqueue_embedding_jobs: _,
+        embedding_store: _,
+        embedding_provider: _,
         processor_factory,
         chunking,
         poll_interval,
         shutdown,
     } = config;
     let chunking = chunking.expect("extract batch workers require chunking");
-    (0..worker_count)
-        .map(|i| {
-            let worker_id = format!("enrichment:{}:extract:{}", pid, i);
-            let job_store = Arc::clone(&job_store);
-            let read_store = Arc::clone(&read_store);
-            let state_store = Arc::clone(&state_store);
-            let derived_store = Arc::clone(&derived_store);
-            let processor_factory = Arc::clone(&processor_factory);
-            let chunking = Arc::clone(&chunking);
-            let shutdown = shutdown.clone();
-            thread::Builder::new()
-                .name(format!("extract-poller-{}", i))
-                .spawn(move || {
-                    let submitter = processor_factory
-                        .build_extraction_submitter(crate::storage::EnrichmentTier::Standard)
-                        .ok()
-                        .flatten();
-                    let Some(submitter) = submitter else {
-                        info!("No extract batch submitter available; extract poller exiting");
-                        return;
-                    };
-                    let stage = ExtractStage::new(
-                        submitter,
-                        crate::storage::EnrichmentTier::Standard,
-                        batch_size,
-                        max_concurrent,
-                        chunking.as_ref().clone(),
-                    );
-                    stage_poller_loop(
-                        &stage,
-                        worker_id,
-                        StagePollerContext {
-                            job_store: job_store.as_ref(),
-                            read_store: read_store.as_ref(),
-                            state_store: state_store.as_ref(),
-                            derived_store: derived_store.as_ref(),
-                        },
-                        poll_interval,
-                        shutdown,
-                    );
-                })
-                .map_err(|source| WorkerError::SpawnThread {
-                    worker_kind: format!("extract poller {}", i),
-                    source: Box::new(source),
-                })
-        })
-        .collect()
+    let coverage_policy = Arc::new(ExtractCoveragePolicy {
+        min_coverage_percent: 60,
+        max_gap_fill_passes: 1,
+    });
+    let resources = Arc::new(WorkerResources {
+        job_store,
+        read_store,
+        retrieval_service,
+        state_store,
+        derived_store,
+        embedding_store: None,
+        embedding_provider: None,
+        processor_factory,
+    });
+    spawn_direct_stage_workers(DirectStageWorkerConfig {
+        pid,
+        stage_name: "extract",
+        job_type: JobType::ArtifactExtract,
+        execution_mode: InferenceExecutionMode::Batch,
+        worker_count,
+        resources,
+        chunking,
+        coverage_policy,
+        poll_interval,
+        shutdown,
+    })
 }
 
 struct DirectStageWorkerConfig {
     pid: u32,
     stage_name: &'static str,
     job_type: JobType,
+    execution_mode: InferenceExecutionMode,
     worker_count: usize,
     resources: Arc<WorkerResources>,
     chunking: Arc<ExtractionChunkingConfig>,
@@ -2736,6 +2779,7 @@ fn spawn_direct_stage_workers(
                     direct_stage_worker_loop(
                         worker_id,
                         cfg.job_type,
+                        cfg.execution_mode,
                         &ctx,
                         &policy,
                         cfg.poll_interval,
@@ -2758,6 +2802,7 @@ fn spawn_direct_stage_workers(
 fn direct_stage_worker_loop(
     worker_id: String,
     job_type: JobType,
+    execution_mode: InferenceExecutionMode,
     ctx: &WorkerContext<'_>,
     policy: &ExtractionPolicy<'_>,
     poll_interval: Duration,
@@ -2777,7 +2822,7 @@ fn direct_stage_worker_loop(
         match ctx.job_store.claim_jobs_by_type(
             &worker_id,
             job_type,
-            Some(EnrichmentTier::Standard),
+            Some(EnrichmentTier::Default),
             1,
         ) {
             Ok(jobs) if !jobs.is_empty() => {
@@ -2788,7 +2833,8 @@ fn direct_stage_worker_loop(
                     job.job_type.as_str(),
                     job.job_id
                 );
-                if let Err(err) = process_claimed_job(&worker_id, job, ctx, policy) {
+                if let Err(err) = process_claimed_jobs(&worker_id, job, ctx, execution_mode, policy)
+                {
                     error!(
                         "Direct stage worker {} failed to process stage job: {}",
                         worker_id, err
@@ -2863,7 +2909,7 @@ fn embedding_worker_loop(
         match job_store.claim_jobs_by_type(
             &worker_id,
             JobType::DerivedObjectEmbed,
-            Some(EnrichmentTier::Standard),
+            Some(EnrichmentTier::Default),
             1,
         ) {
             Ok(jobs) if !jobs.is_empty() => {

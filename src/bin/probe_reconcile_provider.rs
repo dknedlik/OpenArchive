@@ -5,16 +5,16 @@ use clap::{Parser, ValueEnum};
 use postgres::NoTls;
 
 use open_archive::config::{
-    AnthropicConfig, GeminiConfig, GrokConfig, OpenAiConfig, PostgresConfig,
+    AnthropicConfig, GeminiConfig, GrokConfig, OciConfig, OpenAiConfig, PostgresConfig,
 };
 use open_archive::processor::{
     memory_candidate_key_from_fields, AnthropicProcessorFactory, ArtifactProcessorFactory,
-    EntityOutput, GeminiProcessorFactory, GrokProcessorFactory, MemoryOutput,
+    EntityOutput, GeminiProcessorFactory, GrokProcessorFactory, MemoryOutput, OciProcessorFactory,
     OpenAiProcessorFactory, ReconciliationProcessorInput, RelationshipOutput, SummaryOutput,
 };
 use open_archive::storage::enrichment_state_store::EnrichmentStateStore;
 use open_archive::storage::types::{
-    ArtifactReconcilePayload, EnrichmentTier, ReconciliationDecisionKind, SourceType,
+    ArtifactReconcilePayload, ReconciliationDecisionKind, SourceType,
 };
 use open_archive::storage::{
     ArtifactReadStore, PostgresArtifactReadStore, PostgresDerivedMetadataStore,
@@ -30,9 +30,6 @@ struct Args {
     #[arg(long = "provider", value_enum, default_value_t = ProbeProvider::OpenAi)]
     provider: ProbeProvider,
 
-    #[arg(long = "tier", value_enum, default_value_t = ProbeTier::Standard)]
-    tier: ProbeTier,
-
     #[arg(long = "model")]
     model: Option<String>,
 }
@@ -44,6 +41,7 @@ enum ProbeProvider {
     Gemini,
     Anthropic,
     Grok,
+    Oci,
 }
 
 impl ProbeProvider {
@@ -53,28 +51,7 @@ impl ProbeProvider {
             Self::Gemini => "gemini",
             Self::Anthropic => "anthropic",
             Self::Grok => "grok",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum ProbeTier {
-    Standard,
-    Quality,
-}
-
-impl ProbeTier {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Standard => "standard",
-            Self::Quality => "quality",
-        }
-    }
-
-    fn as_enrichment_tier(self) -> EnrichmentTier {
-        match self {
-            Self::Standard => EnrichmentTier::Standard,
-            Self::Quality => EnrichmentTier::Quality,
+            Self::Oci => "oci",
         }
     }
 }
@@ -90,12 +67,11 @@ fn main() -> Result<()> {
     let probe = build_probe(&args)?;
     let processor = probe
         .factory
-        .build_reconciliation_processor(args.tier.as_enrichment_tier())
+        .build_reconciliation_processor(open_archive::storage::EnrichmentTier::Default)
         .map_err(|err| anyhow!("failed to build reconciliation processor: {err}"))?;
 
     println!("Reconcile provider probe");
     println!("Provider: {}", args.provider.as_str());
-    println!("Tier: {}", args.tier.as_str());
     println!("Model: {}", probe.model);
     println!();
 
@@ -213,9 +189,8 @@ fn build_probe(args: &Args) -> Result<ProbeFactory> {
             let model = args
                 .model
                 .clone()
-                .unwrap_or_else(|| select_openai_model(&config, args.tier));
-            config.reconcile_standard_model = model.clone();
-            config.reconcile_quality_model = Some(model.clone());
+                .unwrap_or_else(|| config.fast_model.clone());
+            config.fast_model = model.clone();
             let factory = OpenAiProcessorFactory::new(config)
                 .map_err(|err| anyhow!("failed to build OpenAI factory: {err}"))?;
             Ok(ProbeFactory {
@@ -230,9 +205,8 @@ fn build_probe(args: &Args) -> Result<ProbeFactory> {
             let model = args
                 .model
                 .clone()
-                .unwrap_or_else(|| select_gemini_model(&config, args.tier));
-            config.reconcile_standard_model = model.clone();
-            config.reconcile_quality_model = Some(model.clone());
+                .unwrap_or_else(|| config.fast_model.clone());
+            config.fast_model = model.clone();
             let factory = GeminiProcessorFactory::new(config)
                 .map_err(|err| anyhow!("failed to build Gemini factory: {err}"))?;
             Ok(ProbeFactory {
@@ -247,9 +221,8 @@ fn build_probe(args: &Args) -> Result<ProbeFactory> {
             let model = args
                 .model
                 .clone()
-                .unwrap_or_else(|| select_anthropic_model(&config, args.tier));
-            config.reconcile_standard_model = model.clone();
-            config.reconcile_quality_model = Some(model.clone());
+                .unwrap_or_else(|| config.fast_model.clone());
+            config.fast_model = model.clone();
             let factory = AnthropicProcessorFactory::new(config)
                 .map_err(|err| anyhow!("failed to build Anthropic factory: {err}"))?;
             Ok(ProbeFactory {
@@ -264,9 +237,8 @@ fn build_probe(args: &Args) -> Result<ProbeFactory> {
             let model = args
                 .model
                 .clone()
-                .unwrap_or_else(|| select_grok_model(&config, args.tier));
-            config.reconcile_standard_model = model.clone();
-            config.reconcile_quality_model = Some(model.clone());
+                .unwrap_or_else(|| config.fast_model.clone());
+            config.fast_model = model.clone();
             let factory = GrokProcessorFactory::new(config)
                 .map_err(|err| anyhow!("failed to build Grok factory: {err}"))?;
             Ok(ProbeFactory {
@@ -274,46 +246,22 @@ fn build_probe(args: &Args) -> Result<ProbeFactory> {
                 factory: Box::new(factory),
             })
         }
-    }
-}
-
-fn select_openai_model(config: &OpenAiConfig, tier: ProbeTier) -> String {
-    match tier {
-        ProbeTier::Standard => config.reconcile_standard_model.clone(),
-        ProbeTier::Quality => config
-            .reconcile_quality_model
-            .clone()
-            .unwrap_or_else(|| config.reconcile_standard_model.clone()),
-    }
-}
-
-fn select_gemini_model(config: &GeminiConfig, tier: ProbeTier) -> String {
-    match tier {
-        ProbeTier::Standard => config.reconcile_standard_model.clone(),
-        ProbeTier::Quality => config
-            .reconcile_quality_model
-            .clone()
-            .unwrap_or_else(|| config.reconcile_standard_model.clone()),
-    }
-}
-
-fn select_anthropic_model(config: &AnthropicConfig, tier: ProbeTier) -> String {
-    match tier {
-        ProbeTier::Standard => config.reconcile_standard_model.clone(),
-        ProbeTier::Quality => config
-            .reconcile_quality_model
-            .clone()
-            .unwrap_or_else(|| config.reconcile_standard_model.clone()),
-    }
-}
-
-fn select_grok_model(config: &GrokConfig, tier: ProbeTier) -> String {
-    match tier {
-        ProbeTier::Standard => config.reconcile_standard_model.clone(),
-        ProbeTier::Quality => config
-            .reconcile_quality_model
-            .clone()
-            .unwrap_or_else(|| config.reconcile_standard_model.clone()),
+        ProbeProvider::Oci => {
+            let mut config = OciConfig::from_env().context(
+                "failed to load OCI config from env; set OA_OCI_REGION, OA_OCI_COMPARTMENT_ID, and related vars",
+            )?;
+            let model = args
+                .model
+                .clone()
+                .unwrap_or_else(|| config.fast_model.clone());
+            config.fast_model = model.clone();
+            let factory = OciProcessorFactory::new(config)
+                .map_err(|err| anyhow!("failed to build OCI factory: {err}"))?;
+            Ok(ProbeFactory {
+                model,
+                factory: Box::new(factory),
+            })
+        }
     }
 }
 

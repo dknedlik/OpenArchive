@@ -16,7 +16,8 @@ pub(in crate::mcp::tools) fn tool_error(code: &str, message: &str) -> Value {
 }
 
 pub(in crate::mcp) fn tool_success(value: Value) -> Value {
-    let text = summarize_tool_result(&value);
+    let summary = summarize_tool_result(&value);
+    let text = render_tool_result_text(&value, &summary);
     json!({
         "content": [
             {
@@ -27,6 +28,34 @@ pub(in crate::mcp) fn tool_success(value: Value) -> Value {
         "structuredContent": value,
         "isError": false
     })
+}
+
+fn render_tool_result_text(value: &Value, summary: &str) -> String {
+    if should_include_payload_text(value) {
+        match serde_json::to_string_pretty(value) {
+            Ok(payload) => format!("{summary}\n{payload}"),
+            Err(_) => summary.to_string(),
+        }
+    } else {
+        summary.to_string()
+    }
+}
+
+fn should_include_payload_text(value: &Value) -> bool {
+    [
+        "items",
+        "hits",
+        "results",
+        "artifacts",
+        "entries",
+        "related",
+        "artifact",
+        "context_pack",
+        "note",
+        "found",
+    ]
+    .iter()
+    .any(|key| value.get(key).is_some())
 }
 
 pub(in crate::mcp::tools) fn tool_storage_error(err: &crate::error::StorageError) -> Value {
@@ -109,6 +138,36 @@ fn summarize_tool_result(value: &Value) -> String {
 
     if let Some(related) = value.get("related").and_then(Value::as_array) {
         return format!("{} related objects", related.len());
+    }
+
+    if let Some(note) = value.get("note").and_then(Value::as_object) {
+        let metadata = note
+            .get("imported_note_metadata")
+            .and_then(Value::as_object);
+        let properties = metadata
+            .and_then(|value| value.get("properties"))
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let tags = metadata
+            .and_then(|value| value.get("tags"))
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let aliases = metadata
+            .and_then(|value| value.get("aliases"))
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let outbound_links = metadata
+            .and_then(|value| value.get("outbound_links"))
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let inbound_links = note
+            .get("inbound_note_links")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        return format!(
+            "note: {} properties, {} tags, {} aliases, {} outbound links, {} inbound links",
+            properties, tags, aliases, outbound_links, inbound_links
+        );
     }
 
     if let Some(context_pack) = value.get("context_pack").and_then(Value::as_object) {

@@ -197,15 +197,13 @@ fn run_model(
         max_output_tokens: base_config.max_output_tokens,
         repair_max_output_tokens: base_config.repair_max_output_tokens,
         reasoning_effort_override: base_config.reasoning_effort_override,
-        standard_model: model.to_string(),
-        quality_model: Some(model.to_string()),
-        reconcile_standard_model: model.to_string(),
-        reconcile_quality_model: Some(model.to_string()),
+        heavy_model: model.to_string(),
+        fast_model: model.to_string(),
     })
     .map_err(|err| anyhow!("failed to build OpenAI factory: {err}"))?;
 
     let processor = factory
-        .build(EnrichmentTier::Standard)
+        .build(EnrichmentTier::Default)
         .map_err(|err| anyhow!("failed to build processor for {model}: {err}"))?;
 
     let mut results = Vec::new();

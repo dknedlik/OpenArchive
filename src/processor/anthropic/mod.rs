@@ -23,98 +23,93 @@ use types::{
 pub struct AnthropicProcessorFactory {
     client: Arc<dyn InferenceClient>,
     batch_client: Option<Arc<AnthropicClient>>,
-    standard_model: String,
-    quality_model: String,
-    reconcile_standard_model: String,
-    reconcile_quality_model: String,
+    max_output_tokens: u32,
+    heavy_model: String,
+    fast_model: String,
 }
 
 impl AnthropicProcessorFactory {
     pub fn new(config: AnthropicConfig) -> Result<Self, String> {
         let client = Arc::new(AnthropicClient::new(&config).map_err(|err| err.to_string())?);
-        let quality_model = config
-            .quality_model
-            .clone()
-            .unwrap_or_else(|| config.standard_model.clone());
-        let reconcile_quality_model = config
-            .reconcile_quality_model
-            .clone()
-            .or_else(|| config.quality_model.clone())
-            .unwrap_or_else(|| config.reconcile_standard_model.clone());
-
         Ok(Self {
             client: client.clone(),
             batch_client: Some(client),
-            standard_model: config.standard_model,
-            quality_model,
-            reconcile_standard_model: config.reconcile_standard_model,
-            reconcile_quality_model,
+            max_output_tokens: config.max_output_tokens,
+            heavy_model: config.heavy_model,
+            fast_model: config.fast_model,
         })
     }
 }
 
 impl ArtifactProcessorFactory for AnthropicProcessorFactory {
-    fn build(&self, tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError> {
-        let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
-        };
-
-        Ok(Box::new(HostedArtifactProcessor {
-            client: Arc::clone(&self.client),
-            model,
-            pipeline_name: "anthropic_enrichment",
+    fn build(&self, _tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError> {
+        let client: Arc<dyn InferenceClient> = self.client.clone();
+        Ok(Box::new(ExtractionPipelineProcessor {
+            client,
+            extract_model: self.heavy_model.clone(),
+            format_model: self.fast_model.clone(),
+            stage1_max_output_tokens: Some(self.max_output_tokens),
+            stage2_max_output_tokens: Some(self.max_output_tokens),
+            repair_max_output_tokens: Some(self.max_output_tokens),
+            pipeline_name: "anthropic_extraction_pipeline",
             provider_name: "anthropic",
-            strategy: ConversationEnrichmentStrategy::anthropic_default(),
         }))
     }
 
     fn build_reconciliation_processor(
         &self,
-        tier: EnrichmentTier,
+        _tier: EnrichmentTier,
     ) -> Result<Box<dyn ReconciliationProcessor>, ProcessorError> {
-        let model = match tier {
-            EnrichmentTier::Standard => self.reconcile_standard_model.clone(),
-            EnrichmentTier::Quality => self.reconcile_quality_model.clone(),
-        };
         Ok(Box::new(HostedReconciliationProcessor {
             client: Arc::clone(&self.client),
-            model,
+            model: self.fast_model.clone(),
             system_prompt: RECONCILIATION_SYSTEM_PROMPT,
         }))
     }
 
+    fn build_batch_processor(
+        &self,
+        _tier: EnrichmentTier,
+    ) -> Result<Option<Box<dyn ArtifactBatchProcessor>>, ProcessorError> {
+        let client: Arc<dyn InferenceClient> = self.client.clone();
+        let processor: Box<dyn ArtifactProcessor> = Box::new(ExtractionPipelineProcessor {
+            client,
+            extract_model: self.heavy_model.clone(),
+            format_model: self.fast_model.clone(),
+            stage1_max_output_tokens: Some(self.max_output_tokens),
+            stage2_max_output_tokens: Some(self.max_output_tokens),
+            repair_max_output_tokens: Some(self.max_output_tokens),
+            pipeline_name: "anthropic_extraction_pipeline",
+            provider_name: "anthropic",
+        });
+        Ok(Some(Box::new(SequentialArtifactBatchProcessor::new(
+            processor, 16, 2_000_000,
+        ))))
+    }
+
     fn build_extraction_submitter(
         &self,
-        tier: EnrichmentTier,
+        _tier: EnrichmentTier,
     ) -> Result<Option<Box<dyn ExtractionBatchSubmitter>>, ProcessorError> {
         let Some(client) = &self.batch_client else {
             return Ok(None);
         };
-        let model = match tier {
-            EnrichmentTier::Standard => self.standard_model.clone(),
-            EnrichmentTier::Quality => self.quality_model.clone(),
-        };
         Ok(Some(Box::new(AnthropicExtractionSubmitter {
             client: Arc::clone(client),
-            candidate_model: model,
+            candidate_model: self.heavy_model.clone(),
         })))
     }
 
     fn build_reconciliation_submitter(
         &self,
-        tier: EnrichmentTier,
+        _tier: EnrichmentTier,
     ) -> Result<Option<Box<dyn ReconciliationBatchSubmitter>>, ProcessorError> {
         let Some(client) = &self.batch_client else {
             return Ok(None);
         };
-        let model = match tier {
-            EnrichmentTier::Standard => self.reconcile_standard_model.clone(),
-            EnrichmentTier::Quality => self.reconcile_quality_model.clone(),
-        };
         Ok(Some(Box::new(AnthropicReconciliationSubmitter {
             client: Arc::clone(client),
-            model,
+            model: self.fast_model.clone(),
         })))
     }
 }
@@ -155,6 +150,98 @@ impl AnthropicClient {
 }
 
 impl InferenceClient for AnthropicClient {
+    fn complete_text(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<InferenceResult, ProcessorError> {
+        self.complete_text_with_max_output_tokens_override(
+            model,
+            system_prompt,
+            user_prompt,
+            self.max_output_tokens,
+        )
+    }
+
+    fn complete_text_with_max_output_tokens_override(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_output_tokens: u32,
+    ) -> Result<InferenceResult, ProcessorError> {
+        let endpoint = format!("{}/messages", self.base_url);
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": max_output_tokens,
+            "system": system_prompt,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": user_prompt
+                }
+            ]
+        });
+        let request_body = serde_json::to_vec(&body)
+            .map_err(|source| ProcessorError::SerializePrompt { source })?;
+
+        let response = self
+            .client
+            .post(endpoint)
+            .body(request_body)
+            .send()
+            .map_err(|source| ProcessorError::SendInferenceRequest { source })?;
+
+        let status = response.status();
+        let response_text = response
+            .text()
+            .map_err(|source| ProcessorError::ReadInferenceResponse { source })?;
+
+        if !status.is_success() {
+            return Err(ProcessorError::InferenceHttpStatus {
+                status: status.as_u16(),
+                body_preview: preview(&response_text),
+                retry_after_seconds: None,
+            });
+        }
+
+        let parsed: types::AnthropicMessagesResponse = serde_json::from_str(&response_text)
+            .map_err(|source| ProcessorError::ParseInferenceResponse {
+                source,
+                body_preview: preview(&response_text),
+            })?;
+
+        let output_text = parsed
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                types::AnthropicContentBlock::Text { text } if !text.trim().is_empty() => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if output_text.trim().is_empty() {
+            return Err(ProcessorError::Message {
+                message: format!(
+                    "Anthropic messages returned no text content{}",
+                    parsed
+                        .stop_reason
+                        .as_deref()
+                        .map(|reason| format!(" (stop_reason={reason})"))
+                        .unwrap_or_default()
+                ),
+            });
+        }
+
+        Ok(InferenceResult {
+            output_text,
+            usage: parsed.usage.map(InferenceUsage::from_anthropic_usage),
+        })
+    }
+
     fn complete_json(
         &self,
         model: &str,
@@ -162,10 +249,27 @@ impl InferenceClient for AnthropicClient {
         user_prompt: &str,
         schema: &serde_json::Value,
     ) -> Result<InferenceResult, ProcessorError> {
+        self.complete_json_with_max_output_tokens_override(
+            model,
+            system_prompt,
+            user_prompt,
+            schema,
+            self.max_output_tokens,
+        )
+    }
+
+    fn complete_json_with_max_output_tokens_override(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        schema: &serde_json::Value,
+        max_output_tokens: u32,
+    ) -> Result<InferenceResult, ProcessorError> {
         let endpoint = format!("{}/messages", self.base_url);
         let body = AnthropicMessagesRequest {
             model,
-            max_tokens: self.max_output_tokens,
+            max_tokens: max_output_tokens,
             system: system_prompt,
             messages: vec![AnthropicMessageInput {
                 role: "user",

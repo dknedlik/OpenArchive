@@ -189,24 +189,14 @@ impl ReconciliationProcessor for StubReconciliationProcessor {
 pub struct StubProcessorFactory;
 
 impl ArtifactProcessorFactory for StubProcessorFactory {
-    fn build(&self, tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError> {
-        match tier {
-            EnrichmentTier::Standard => Ok(Box::new(StubProcessor)),
-            unsupported => Err(ProcessorError::UnsupportedTier {
-                tier: unsupported.as_str().to_string(),
-            }),
-        }
+    fn build(&self, _tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError> {
+        Ok(Box::new(StubProcessor))
     }
 
     fn build_reconciliation_processor(
         &self,
-        tier: EnrichmentTier,
+        _tier: EnrichmentTier,
     ) -> Result<Box<dyn ReconciliationProcessor>, ProcessorError> {
-        match tier {
-            EnrichmentTier::Standard => Ok(Box::new(StubReconciliationProcessor)),
-            unsupported => Err(ProcessorError::UnsupportedTier {
-                tier: unsupported.as_str().to_string(),
-            }),
-        }
+        Ok(Box::new(StubReconciliationProcessor))
     }
 }

@@ -75,6 +75,10 @@ impl DerivedMetadataWriteStore for OracleDerivedMetadataStore {
                 }
             }
 
+            for link in &attempt.archive_links {
+                derivation::insert_archive_link(&tx.conn, link)?;
+            }
+
             Ok(DerivationWriteResult {
                 derivation_run_id: attempt.run.derivation_run_id.clone(),
                 derived_object_ids,

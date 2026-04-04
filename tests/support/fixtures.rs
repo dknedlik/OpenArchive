@@ -287,7 +287,7 @@ pub fn seed_postgres_stub_derivations(
                         derived_object_id: summary_object_id,
                         segment_id: segment_ids[0].clone(),
                         evidence_role: EvidenceRole::PrimarySupport,
-                        evidence_rank: 0,
+                        evidence_rank: 1,
                         support_strength: SupportStrength::Strong,
                     }],
                 },
@@ -319,11 +319,12 @@ pub fn seed_postgres_stub_derivations(
                         derived_object_id: memory_object_id,
                         segment_id: segment_ids[1].clone(),
                         evidence_role: EvidenceRole::PrimarySupport,
-                        evidence_rank: 0,
+                        evidence_rank: 1,
                         support_strength: SupportStrength::Strong,
                     }],
                 },
             ],
+            archive_links: Vec::new(),
         })
         .expect("seed derivation attempt");
 }
@@ -475,6 +476,7 @@ pub(super) fn fixture_derivation_attempt(
                 }],
             },
         ],
+        archive_links: Vec::new(),
     }
 }
 

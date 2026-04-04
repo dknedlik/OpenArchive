@@ -41,7 +41,19 @@ pub(in crate::mcp) fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "get_context_pack",
-            "description": "Load the compact artifact context pack for one artifact id, including readiness and provenance.",
+            "description": "Load the compact artifact context pack for one artifact id, including readiness, provenance, and imported note metadata when present.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "artifact_id": { "type": "string", "description": "Artifact identifier." }
+                },
+                "required": ["artifact_id"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "get_note_metadata",
+            "description": "Load imported note metadata for one artifact id, including note path, properties, tags, aliases, outbound links, and inbound note links.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
