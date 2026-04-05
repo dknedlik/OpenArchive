@@ -1,4 +1,3 @@
-use crate::app::retrieval::ArchiveRetrievalServiceApi;
 use crate::config::{EnrichmentPipelineConfig, ExtractionChunkingConfig, InferenceExecutionMode};
 use crate::domain::SourceTimestamp;
 use crate::embedding::EmbeddingProvider;
@@ -16,16 +15,16 @@ use crate::shutdown::ShutdownToken;
 use crate::storage::JobType;
 use crate::storage::{
     ArtifactExtractPayload, ArtifactExtractionResult, ArtifactReadStore, ArtifactReconcilePayload,
-    ArtifactRetrieveContextPayload, CandidateEntity, CandidateRelationship, ClaimedJob,
-    ClassificationObjectJson, ConversationWindowRef, DerivationRunStatus, DerivationRunType,
+    CandidateEntity, CandidateRelationship, ClaimedJob, ClassificationObjectJson,
+    ConversationWindowRef, CrossArtifactReadStore, DerivationRunStatus, DerivationRunType,
     DerivedMetadataWriteStore, DerivedObjectEmbeddingItem, DerivedObjectEmbeddingPayload,
-    DerivedObjectEmbeddingStore, DerivedObjectPayload, EnrichmentJobLifecycleStore,
-    EnrichmentStateStore, EnrichmentTier, EntityObjectJson, EvidenceRole, ExtractedClassification,
-    ExtractedMemory, InputScopeType, JobStatus, MemoryObjectJson, NewArchiveLink, NewDerivationRun,
-    NewDerivedObject, NewDerivedObjectEmbedding, NewEnrichmentJob, NewEvidenceLink, ObjectStatus,
-    OriginKind, ReconciliationDecision, ReconciliationDecisionKind, RelationshipObjectJson,
-    RetrievalIntent, RetrievalResultSet, ScopeType, SummaryObjectJson, SupportStrength,
-    WriteDerivationAttempt, WriteDerivedObject,
+    DerivedObjectEmbeddingStore, DerivedObjectPayload, DerivedObjectType,
+    EnrichmentJobLifecycleStore, EnrichmentStateStore, EnrichmentTier, EntityObjectJson,
+    EvidenceRole, ExtractedClassification, ExtractedMemory, InputScopeType, JobStatus,
+    MemoryObjectJson, NewArchiveLink, NewDerivationRun, NewDerivedObject,
+    NewDerivedObjectEmbedding, NewEnrichmentJob, NewEvidenceLink, ObjectStatus, OriginKind,
+    ReconciliationDecision, ReconciliationDecisionKind, RelationshipObjectJson, RetrievalIntent,
+    ScopeType, SummaryObjectJson, SupportStrength, WriteDerivationAttempt, WriteDerivedObject,
 };
 use log::{debug, error, info, warn};
 use rand::random;
@@ -37,6 +36,9 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RETRYABLE_INFERENCE_BACKOFF_SECONDS: i64 = 60;
+const RECONCILE_EMBEDDING_DETERMINISTIC_THRESHOLD: f32 = 0.90;
+const RECONCILE_EMBEDDING_AMBIGUOUS_THRESHOLD: f32 = 0.70;
+const RECONCILE_EMBEDDING_LOOKUP_LIMIT: usize = 3;
 
 fn has_reconciliation_candidates(extraction_result: &ArtifactExtractionResult) -> bool {
     !(extraction_result.memories.is_empty()
@@ -54,9 +56,9 @@ struct ExtractCoveragePolicy {
 struct WorkerContext<'a> {
     job_store: &'a dyn EnrichmentJobLifecycleStore,
     read_store: &'a dyn ArtifactReadStore,
-    retrieval_service: &'a dyn ArchiveRetrievalServiceApi,
     state_store: &'a dyn EnrichmentStateStore,
     derived_store: &'a dyn DerivedMetadataWriteStore,
+    cross_artifact_store: Option<&'a (dyn CrossArtifactReadStore + Send + Sync)>,
     embedding_store: Option<&'a dyn DerivedObjectEmbeddingStore>,
     embedding_provider: Option<&'a dyn EmbeddingProvider>,
     processor_factory: &'a dyn ArtifactProcessorFactory,
@@ -72,9 +74,9 @@ struct ExtractionPolicy<'a> {
 struct WorkerResources {
     job_store: Arc<dyn EnrichmentJobLifecycleStore>,
     read_store: Arc<dyn ArtifactReadStore>,
-    retrieval_service: Arc<dyn ArchiveRetrievalServiceApi>,
     state_store: Arc<dyn EnrichmentStateStore>,
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
+    cross_artifact_store: Option<Arc<dyn CrossArtifactReadStore + Send + Sync>>,
     embedding_store: Option<Arc<dyn DerivedObjectEmbeddingStore>>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
@@ -85,9 +87,9 @@ impl WorkerResources {
         WorkerContext {
             job_store: self.job_store.as_ref(),
             read_store: self.read_store.as_ref(),
-            retrieval_service: self.retrieval_service.as_ref(),
             state_store: self.state_store.as_ref(),
             derived_store: self.derived_store.as_ref(),
+            cross_artifact_store: self.cross_artifact_store.as_deref(),
             embedding_store: self.embedding_store.as_deref(),
             embedding_provider: self.embedding_provider.as_deref(),
             processor_factory: self.processor_factory.as_ref(),
@@ -104,9 +106,9 @@ pub struct WorkerStartConfig<'a> {
 pub struct EnrichmentPipelineResources {
     pub job_store: Arc<dyn EnrichmentJobLifecycleStore>,
     pub read_store: Arc<dyn ArtifactReadStore>,
-    pub retrieval_service: Arc<dyn ArchiveRetrievalServiceApi>,
     pub state_store: Arc<dyn EnrichmentStateStore>,
     pub derived_store: Arc<dyn DerivedMetadataWriteStore>,
+    pub cross_artifact_store: Option<Arc<dyn CrossArtifactReadStore + Send + Sync>>,
     pub embedding_store: Option<Arc<dyn DerivedObjectEmbeddingStore>>,
     pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
 }
@@ -257,13 +259,6 @@ fn process_claimed_job(
         crate::storage::JobType::ArtifactExtract => {
             process_extract_job(worker_id, &claimed_job, ctx, policy)
         }
-        crate::storage::JobType::ArtifactRetrieveContext => process_retrieve_context_job(
-            worker_id,
-            &claimed_job,
-            ctx.job_store,
-            ctx.retrieval_service,
-            ctx.state_store,
-        ),
         crate::storage::JobType::ArtifactReconcile => process_reconcile_job(
             worker_id,
             &claimed_job,
@@ -391,17 +386,17 @@ fn process_extract_job_batch(
                         );
                         continue;
                     }
-                    let retrieve_job = NewEnrichmentJob {
+                    let reconcile_job = NewEnrichmentJob {
                         job_id: new_id("job"),
                         artifact_id: claimed_job.artifact_id.clone(),
-                        job_type: crate::storage::JobType::ArtifactRetrieveContext,
+                        job_type: crate::storage::JobType::ArtifactReconcile,
                         enrichment_tier: claimed_job.enrichment_tier,
                         spawned_by_job_id: Some(claimed_job.job_id.clone()),
                         job_status: crate::storage::JobStatus::Pending,
                         max_attempts: 3,
                         priority_no: 100,
-                        required_capabilities: vec!["archive_retrieval".to_string()],
-                        payload_json: ArtifactRetrieveContextPayload::new_v1(
+                        required_capabilities: vec!["text".to_string()],
+                        payload_json: ArtifactReconcilePayload::new_v1(
                             &claimed_job.artifact_id,
                             &payload.import_id,
                             input.source_type,
@@ -409,12 +404,12 @@ fn process_extract_job_batch(
                         )
                         .to_json(),
                     };
-                    if let Err(err) = job_store.enqueue_jobs(&[retrieve_job]) {
+                    if let Err(err) = job_store.enqueue_jobs(&[reconcile_job]) {
                         let _ = fail_job(
                             job_store,
                             worker_id,
                             &claimed_job.job_id,
-                            "Failed to enqueue retrieval-context job",
+                            "Failed to enqueue reconciliation job",
                             err,
                         );
                         continue;
@@ -513,37 +508,10 @@ fn process_reconcile_job_batch(
                     continue;
                 }
             };
-        let retrieval_result_set =
-            match state_store.load_retrieval_result_set(&payload.retrieval_result_set_id) {
-                Ok(Some(result)) => result,
-                Ok(None) => {
-                    fail_job_message(
-                        job_store,
-                        worker_id,
-                        &claimed_job.job_id,
-                        format!(
-                            "Retrieval result set {} not found",
-                            payload.retrieval_result_set_id
-                        ),
-                    );
-                    continue;
-                }
-                Err(err) => {
-                    fail_job(
-                        job_store,
-                        worker_id,
-                        &claimed_job.job_id,
-                        "Failed to load retrieval result set for reconciliation",
-                        err,
-                    );
-                    continue;
-                }
-            };
         let input = match build_reconciliation_input(
             &claimed_job.artifact_id,
             &payload.source_type,
             &extraction_result,
-            &retrieval_result_set,
         ) {
             Ok(input) => input,
             Err(err) => {
@@ -557,20 +525,83 @@ fn process_reconcile_job_batch(
                 continue;
             }
         };
-        if batch_processor
-            .estimate_size_bytes(&input)
-            .unwrap_or(usize::MAX)
-            <= batch_processor.max_batch_bytes()
-        {
-            batchable.push((
-                claimed_job,
-                loaded,
-                extraction_result,
-                retrieval_result_set,
-                input,
-            ));
+        let prepared = match prepare_reconciliation_work(
+            &input,
+            ctx.cross_artifact_store,
+            ctx.embedding_provider,
+        ) {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                fail_job_message(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    format!("Failed to prepare reconciliation candidates: {err}"),
+                );
+                continue;
+            }
+        };
+        if let Some(ambiguous_input) = prepared.ambiguous_input {
+            if batch_processor
+                .estimate_size_bytes(&ambiguous_input)
+                .unwrap_or(usize::MAX)
+                <= batch_processor.max_batch_bytes()
+            {
+                batchable.push((
+                    claimed_job,
+                    loaded,
+                    extraction_result,
+                    prepared.deterministic_outputs,
+                    ambiguous_input,
+                ));
+            } else {
+                fallbacks.push(claimed_job);
+            }
         } else {
-            fallbacks.push(claimed_job);
+            let decisions = build_reconciliation_decisions(
+                &claimed_job,
+                &extraction_result,
+                prepared.deterministic_outputs,
+            );
+            if let Err(err) = state_store.save_reconciliation_decisions(&decisions) {
+                let _ = fail_job(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    "Failed to persist reconciliation decisions",
+                    err,
+                );
+                continue;
+            }
+            let attempt = build_derivation_attempt(
+                &claimed_job,
+                &loaded.artifact.artifact_id,
+                &extraction_result,
+                &decisions,
+            );
+            let embedding_job = (ctx.embedding_store.is_some() && ctx.embedding_provider.is_some())
+                .then(|| {
+                    build_embedding_job(
+                        &claimed_job,
+                        &loaded.artifact.artifact_id,
+                        &attempt.objects,
+                    )
+                })
+                .flatten();
+            if let Err(err) = derived_store.write_derivation_attempt(attempt) {
+                let _ = fail_job(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    "Failed to persist derivation output",
+                    err,
+                );
+                continue;
+            }
+            if let Some(job) = embedding_job.as_ref() {
+                try_enqueue_embedding_job(job_store, &claimed_job.job_id, job);
+            }
+            complete_job(job_store, worker_id, &claimed_job.job_id)?;
         }
     }
 
@@ -580,7 +611,7 @@ fn process_reconcile_job_batch(
             .map(|(_, _, _, _, input)| input.clone())
             .collect();
         let results = batch_processor.process_batch(&inputs);
-        for ((claimed_job, loaded, extraction_result, retrieval_result_set, _), result) in
+        for ((claimed_job, loaded, extraction_result, deterministic_outputs, _), result) in
             batchable.into_iter().zip(results.into_iter())
         {
             match result {
@@ -591,7 +622,6 @@ fn process_reconcile_job_batch(
                             artifact_id: extraction_result.artifact_id.clone(),
                             job_id: claimed_job.job_id.clone(),
                             extraction_result_id: extraction_result.extraction_result_id.clone(),
-                            retrieval_result_set_id: retrieval_result_set.retrieval_result_set_id.clone(),
                             pipeline_name: "artifact_reconciliation".to_string(),
                             pipeline_version: "v1".to_string(),
                             decision_kind: ReconciliationDecisionKind::InsufficientEvidence,
@@ -604,11 +634,12 @@ fn process_reconcile_job_batch(
                             error_message: None,
                         }]
                     } else {
+                        let mut combined_outputs = deterministic_outputs;
+                        combined_outputs.extend(outputs);
                         build_reconciliation_decisions(
                             &claimed_job,
                             &extraction_result,
-                            &retrieval_result_set,
-                            outputs,
+                            combined_outputs,
                         )
                     };
                     if let Err(err) = state_store.save_reconciliation_decisions(&decisions) {
@@ -792,132 +823,6 @@ fn process_extract_job(
             )
         })?;
 
-    let retrieve_job = NewEnrichmentJob {
-        job_id: new_id("job"),
-        artifact_id: claimed_job.artifact_id.clone(),
-        job_type: crate::storage::JobType::ArtifactRetrieveContext,
-        enrichment_tier: claimed_job.enrichment_tier,
-        spawned_by_job_id: Some(claimed_job.job_id.clone()),
-        job_status: crate::storage::JobStatus::Pending,
-        max_attempts: 3,
-        priority_no: 100,
-        required_capabilities: vec!["archive_retrieval".to_string()],
-        payload_json: ArtifactRetrieveContextPayload::new_v1(
-            &claimed_job.artifact_id,
-            &payload.import_id,
-            source_type,
-            &extraction_result.extraction_result_id,
-        )
-        .to_json(),
-    };
-    job_store.enqueue_jobs(&[retrieve_job]).map_err(|err| {
-        fail_job(
-            job_store,
-            worker_id,
-            &claimed_job.job_id,
-            "Failed to enqueue retrieval-context job",
-            err,
-        )
-    })?;
-
-    complete_job(job_store, worker_id, &claimed_job.job_id)?;
-    Ok(())
-}
-
-fn process_retrieve_context_job(
-    worker_id: &str,
-    claimed_job: &ClaimedJob,
-    job_store: &dyn EnrichmentJobLifecycleStore,
-    retrieval_service: &dyn ArchiveRetrievalServiceApi,
-    state_store: &dyn EnrichmentStateStore,
-) -> std::result::Result<(), String> {
-    let payload =
-        ArtifactRetrieveContextPayload::from_json(&claimed_job.payload_json).map_err(|err| {
-            fail_job(
-                job_store,
-                worker_id,
-                &claimed_job.job_id,
-                "Failed to parse retrieve-context payload JSON",
-                err,
-            )
-        })?;
-
-    let extraction_result = state_store
-        .load_extraction_result(&payload.extraction_result_id)
-        .map_err(|err| {
-            fail_job(
-                job_store,
-                worker_id,
-                &claimed_job.job_id,
-                "Failed to load extraction result",
-                err,
-            )
-        })?
-        .ok_or_else(|| {
-            fail_job_message(
-                job_store,
-                worker_id,
-                &claimed_job.job_id,
-                format!(
-                    "Extraction result {} not found",
-                    payload.extraction_result_id
-                ),
-            )
-        })?;
-
-    let results = retrieval_service
-        .retrieve_for_intents(
-            &claimed_job.artifact_id,
-            &extraction_result.retrieval_intents,
-            8,
-        )
-        .map_err(|err| {
-            fail_job(
-                job_store,
-                worker_id,
-                &claimed_job.job_id,
-                "Failed to retrieve archive context",
-                err,
-            )
-        })?;
-
-    let result_set = RetrievalResultSet {
-        retrieval_result_set_id: new_id("retrieval"),
-        artifact_id: claimed_job.artifact_id.clone(),
-        job_id: claimed_job.job_id.clone(),
-        extraction_result_id: extraction_result.extraction_result_id.clone(),
-        pipeline_name: "archive_retrieval".to_string(),
-        pipeline_version: "v1".to_string(),
-        intents: extraction_result.retrieval_intents.clone(),
-        results,
-        status: "completed".to_string(),
-        error_message: None,
-    };
-
-    state_store
-        .save_retrieval_result_set(&result_set)
-        .map_err(|err| {
-            fail_job(
-                job_store,
-                worker_id,
-                &claimed_job.job_id,
-                "Failed to persist retrieval result set",
-                err,
-            )
-        })?;
-
-    let source_type = crate::storage::SourceType::parse(&payload.source_type).ok_or_else(|| {
-        fail_job_message(
-            job_store,
-            worker_id,
-            &claimed_job.job_id,
-            format!(
-                "Invalid artifact source_type in retrieve-context payload: {}",
-                payload.source_type
-            ),
-        )
-    })?;
-
     let reconcile_job = NewEnrichmentJob {
         job_id: new_id("job"),
         artifact_id: claimed_job.artifact_id.clone(),
@@ -927,13 +832,12 @@ fn process_retrieve_context_job(
         job_status: crate::storage::JobStatus::Pending,
         max_attempts: 3,
         priority_no: 100,
-        required_capabilities: vec!["text".to_string(), "archive_retrieval".to_string()],
+        required_capabilities: vec!["text".to_string()],
         payload_json: ArtifactReconcilePayload::new_v1(
             &claimed_job.artifact_id,
             &payload.import_id,
             source_type,
             &extraction_result.extraction_result_id,
-            &result_set.retrieval_result_set_id,
         )
         .to_json(),
     };
@@ -1017,36 +921,12 @@ fn process_reconcile_job(
                 ),
             )
         })?;
-    let retrieval_result_set = state_store
-        .load_retrieval_result_set(&payload.retrieval_result_set_id)
-        .map_err(|err| {
-            fail_job(
-                job_store,
-                worker_id,
-                &claimed_job.job_id,
-                "Failed to load retrieval result set",
-                err,
-            )
-        })?
-        .ok_or_else(|| {
-            fail_job_message(
-                job_store,
-                worker_id,
-                &claimed_job.job_id,
-                format!(
-                    "Retrieval result set {} not found",
-                    payload.retrieval_result_set_id
-                ),
-            )
-        })?;
-
     let decisions = if !has_reconciliation_candidates(&extraction_result) {
         vec![ReconciliationDecision {
             reconciliation_decision_id: new_id("reconcile"),
             artifact_id: extraction_result.artifact_id.clone(),
             job_id: claimed_job.job_id.clone(),
             extraction_result_id: extraction_result.extraction_result_id.clone(),
-            retrieval_result_set_id: retrieval_result_set.retrieval_result_set_id.clone(),
             pipeline_name: "artifact_reconciliation".to_string(),
             pipeline_version: "v1".to_string(),
             decision_kind: ReconciliationDecisionKind::InsufficientEvidence,
@@ -1060,22 +940,10 @@ fn process_reconcile_job(
             error_message: None,
         }]
     } else {
-        let processor = processor_factory
-            .build_reconciliation_processor(claimed_job.enrichment_tier)
-            .map_err(|err| {
-                fail_job(
-                    job_store,
-                    worker_id,
-                    &claimed_job.job_id,
-                    "Failed to build reconciliation processor",
-                    err,
-                )
-            })?;
         let input = build_reconciliation_input(
             &claimed_job.artifact_id,
             &payload.source_type,
             &extraction_result,
-            &retrieval_result_set,
         )
         .map_err(|err| {
             fail_job(
@@ -1086,15 +954,35 @@ fn process_reconcile_job(
                 err,
             )
         })?;
-        let outputs = processor.reconcile(&input).map_err(|err| {
-            handle_processor_error(job_store, worker_id, &claimed_job.job_id, err)
-        })?;
-        build_reconciliation_decisions(
-            claimed_job,
-            &extraction_result,
-            &retrieval_result_set,
-            outputs,
-        )
+        let prepared =
+            prepare_reconciliation_work(&input, ctx.cross_artifact_store, ctx.embedding_provider)
+                .map_err(|err| {
+                fail_job_message(
+                    job_store,
+                    worker_id,
+                    &claimed_job.job_id,
+                    format!("Failed to prepare reconciliation candidates: {err}"),
+                )
+            })?;
+        let mut outputs = prepared.deterministic_outputs;
+        if let Some(ambiguous_input) = prepared.ambiguous_input {
+            let processor = processor_factory
+                .build_reconciliation_processor(claimed_job.enrichment_tier)
+                .map_err(|err| {
+                    fail_job(
+                        job_store,
+                        worker_id,
+                        &claimed_job.job_id,
+                        "Failed to build reconciliation processor",
+                        err,
+                    )
+                })?;
+            let inferred_outputs = processor.reconcile(&ambiguous_input).map_err(|err| {
+                handle_processor_error(job_store, worker_id, &claimed_job.job_id, err)
+            })?;
+            outputs.extend(inferred_outputs);
+        }
+        build_reconciliation_decisions(claimed_job, &extraction_result, outputs)
     };
     state_store
         .save_reconciliation_decisions(&decisions)
@@ -1646,18 +1534,17 @@ pub(crate) fn build_reconciliation_input(
     artifact_id: &str,
     source_type: &str,
     extraction_result: &ArtifactExtractionResult,
-    retrieval_result_set: &RetrievalResultSet,
 ) -> std::result::Result<ReconciliationProcessorInput, serde_json::Error> {
-    Ok(ReconciliationProcessorInput {
-        artifact_id: artifact_id.to_string(),
-        source_type: crate::storage::SourceType::parse(source_type)
+    build_reconciliation_input_from_outputs(
+        artifact_id,
+        crate::storage::SourceType::parse(source_type)
             .expect("validated source_type during payload parsing"),
-        summary: SummaryOutput {
+        SummaryOutput {
             title: extraction_result.summary_title.clone(),
             body_text: extraction_result.summary_body_text.clone(),
             evidence_segment_ids: extraction_result.summary_evidence_segment_ids.clone(),
         },
-        memories: extraction_result
+        extraction_result
             .memories
             .iter()
             .map(|memory| MemoryOutput {
@@ -1680,7 +1567,7 @@ pub(crate) fn build_reconciliation_input(
                 evidence_segment_ids: memory.evidence_segment_ids.clone(),
             })
             .collect(),
-        entities: extraction_result
+        extraction_result
             .entities
             .iter()
             .map(|entity| EntityOutput {
@@ -1690,7 +1577,7 @@ pub(crate) fn build_reconciliation_input(
                 evidence_segment_ids: entity.evidence_segment_ids.clone(),
             })
             .collect(),
-        relationships: extraction_result
+        extraction_result
             .relationships
             .iter()
             .map(|relationship| RelationshipOutput {
@@ -1703,14 +1590,369 @@ pub(crate) fn build_reconciliation_input(
                 evidence_segment_ids: relationship.evidence_segment_ids.clone(),
             })
             .collect(),
-        retrieval_results_json: serde_json::to_string_pretty(retrieval_result_set)?,
+        "[]".to_string(),
+    )
+}
+
+fn build_reconciliation_input_from_outputs(
+    artifact_id: &str,
+    source_type: crate::storage::SourceType,
+    summary: SummaryOutput,
+    memories: Vec<MemoryOutput>,
+    entities: Vec<EntityOutput>,
+    relationships: Vec<RelationshipOutput>,
+    retrieval_results_json: String,
+) -> std::result::Result<ReconciliationProcessorInput, serde_json::Error> {
+    Ok(ReconciliationProcessorInput {
+        artifact_id: artifact_id.to_string(),
+        source_type,
+        summary,
+        memories,
+        entities,
+        relationships,
+        retrieval_results_json,
+    })
+}
+
+#[derive(Clone)]
+enum ReconcileCandidate {
+    Memory(MemoryOutput),
+    Entity(EntityOutput),
+    Relationship(RelationshipOutput),
+}
+
+impl ReconcileCandidate {
+    fn target_kind(&self) -> &'static str {
+        match self {
+            Self::Memory(_) => "memory",
+            Self::Entity(_) => "entity",
+            Self::Relationship(_) => "relationship",
+        }
+    }
+
+    fn target_key(&self) -> String {
+        match self {
+            Self::Memory(memory) => memory.candidate_key.clone(),
+            Self::Entity(entity) => entity.entity_key.clone(),
+            Self::Relationship(relationship) => relationship_target_key_from_output(relationship),
+        }
+    }
+
+    fn derived_object_type(&self) -> DerivedObjectType {
+        match self {
+            Self::Memory(_) => DerivedObjectType::Memory,
+            Self::Entity(_) => DerivedObjectType::Entity,
+            Self::Relationship(_) => DerivedObjectType::Relationship,
+        }
+    }
+
+    fn title(&self) -> Option<String> {
+        match self {
+            Self::Memory(memory) => memory.title.clone(),
+            Self::Entity(entity) => Some(entity.display_name.clone()),
+            Self::Relationship(relationship) => relationship.title.clone(),
+        }
+    }
+
+    fn body_text(&self) -> String {
+        match self {
+            Self::Memory(memory) => memory.body_text.clone(),
+            Self::Entity(entity) => format!(
+                "{} is a named {} mentioned in this artifact.",
+                entity.display_name, entity.entity_type
+            ),
+            Self::Relationship(relationship) => relationship.body_text.clone(),
+        }
+    }
+
+    fn evidence_segment_ids(&self) -> Vec<String> {
+        match self {
+            Self::Memory(memory) => memory.evidence_segment_ids.clone(),
+            Self::Entity(entity) => entity.evidence_segment_ids.clone(),
+            Self::Relationship(relationship) => relationship.evidence_segment_ids.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct PreparedReconciliationWork {
+    deterministic_outputs: Vec<crate::processor::ReconciliationDecisionOutput>,
+    ambiguous_input: Option<ReconciliationProcessorInput>,
+}
+
+#[derive(serde::Serialize)]
+struct AmbiguousReconcileMatch {
+    object_id: String,
+    artifact_id: String,
+    similarity_score: f32,
+    candidate_key: Option<String>,
+    title: Option<String>,
+    body_text: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct AmbiguousReconcileCase {
+    target_kind: String,
+    target_key: String,
+    embedding_matches: Vec<AmbiguousReconcileMatch>,
+}
+
+fn build_reconciliation_candidates(
+    input: &ReconciliationProcessorInput,
+) -> Vec<ReconcileCandidate> {
+    input
+        .memories
+        .iter()
+        .cloned()
+        .map(ReconcileCandidate::Memory)
+        .chain(
+            input
+                .entities
+                .iter()
+                .cloned()
+                .map(ReconcileCandidate::Entity),
+        )
+        .chain(
+            input
+                .relationships
+                .iter()
+                .cloned()
+                .map(ReconcileCandidate::Relationship),
+        )
+        .collect()
+}
+
+fn build_reconciliation_input_for_candidates(
+    input: &ReconciliationProcessorInput,
+    candidates: Vec<ReconcileCandidate>,
+    retrieval_results_json: String,
+) -> std::result::Result<ReconciliationProcessorInput, serde_json::Error> {
+    let mut memories = Vec::new();
+    let mut entities = Vec::new();
+    let mut relationships = Vec::new();
+
+    for candidate in candidates {
+        match candidate {
+            ReconcileCandidate::Memory(memory) => memories.push(memory),
+            ReconcileCandidate::Entity(entity) => entities.push(entity),
+            ReconcileCandidate::Relationship(relationship) => relationships.push(relationship),
+        }
+    }
+
+    build_reconciliation_input_from_outputs(
+        &input.artifact_id,
+        input.source_type,
+        input.summary.clone(),
+        memories,
+        entities,
+        relationships,
+        retrieval_results_json,
+    )
+}
+
+fn create_new_output(
+    candidate: &ReconcileCandidate,
+) -> crate::processor::ReconciliationDecisionOutput {
+    crate::processor::ReconciliationDecisionOutput {
+        decision_kind: ReconciliationDecisionKind::CreateNew,
+        target_kind: candidate.target_kind().to_string(),
+        target_key: candidate.target_key(),
+        matched_object_id: None,
+        rationale: "No high-confidence existing archive match was found.".to_string(),
+        evidence_segment_ids: candidate.evidence_segment_ids(),
+    }
+}
+
+fn attach_existing_output(
+    candidate: &ReconcileCandidate,
+    matched_object_id: &str,
+    rationale: String,
+) -> crate::processor::ReconciliationDecisionOutput {
+    crate::processor::ReconciliationDecisionOutput {
+        decision_kind: ReconciliationDecisionKind::AttachToExisting,
+        target_kind: candidate.target_kind().to_string(),
+        target_key: candidate.target_key(),
+        matched_object_id: Some(matched_object_id.to_string()),
+        rationale,
+        evidence_segment_ids: candidate.evidence_segment_ids(),
+    }
+}
+
+fn prepare_reconciliation_work(
+    input: &ReconciliationProcessorInput,
+    cross_artifact_store: Option<&(dyn CrossArtifactReadStore + Send + Sync)>,
+    embedding_provider: Option<&dyn EmbeddingProvider>,
+) -> std::result::Result<PreparedReconciliationWork, String> {
+    let candidates = build_reconciliation_candidates(input);
+    if candidates.is_empty() {
+        return Ok(PreparedReconciliationWork {
+            deterministic_outputs: Vec::new(),
+            ambiguous_input: None,
+        });
+    }
+
+    let mut deterministic_outputs = Vec::new();
+    let mut unresolved = candidates.clone();
+
+    if let Some(cross_artifact_store) = cross_artifact_store {
+        let candidate_keys: Vec<String> = unresolved
+            .iter()
+            .map(|candidate| candidate.target_key())
+            .collect();
+        let exact_matches = cross_artifact_store
+            .find_related_by_candidate_keys(
+                &input.artifact_id,
+                &candidate_keys,
+                candidate_keys.len().saturating_mul(4).max(8),
+            )
+            .map_err(|err| format!("failed to load exact cross-artifact matches: {err}"))?;
+        let mut still_unresolved = Vec::new();
+        for candidate in unresolved {
+            let maybe_exact = exact_matches.iter().find(|existing| {
+                existing.derived_object_type == candidate.derived_object_type()
+                    && existing
+                        .candidate_key
+                        .as_deref()
+                        .map(str::trim)
+                        .unwrap_or_default()
+                        == candidate.target_key()
+            });
+            if let Some(existing) = maybe_exact {
+                deterministic_outputs.push(attach_existing_output(
+                    &candidate,
+                    &existing.derived_object_id,
+                    "Deterministic exact candidate_key match against an existing active derived object."
+                        .to_string(),
+                ));
+            } else {
+                still_unresolved.push(candidate);
+            }
+        }
+        unresolved = still_unresolved;
+    }
+
+    if unresolved.is_empty() {
+        return Ok(PreparedReconciliationWork {
+            deterministic_outputs,
+            ambiguous_input: None,
+        });
+    }
+
+    let Some(embedding_provider) = embedding_provider else {
+        return Ok(PreparedReconciliationWork {
+            deterministic_outputs,
+            ambiguous_input: Some(
+                build_reconciliation_input_for_candidates(
+                    input,
+                    unresolved,
+                    input.retrieval_results_json.clone(),
+                )
+                .map_err(|err| format!("failed to build fallback reconciliation input: {err}"))?,
+            ),
+        });
+    };
+    let Some(cross_artifact_store) = cross_artifact_store else {
+        return Ok(PreparedReconciliationWork {
+            deterministic_outputs,
+            ambiguous_input: Some(
+                build_reconciliation_input_for_candidates(
+                    input,
+                    unresolved,
+                    input.retrieval_results_json.clone(),
+                )
+                .map_err(|err| format!("failed to build fallback reconciliation input: {err}"))?,
+            ),
+        });
+    };
+
+    let embedding_texts: Vec<String> = unresolved
+        .iter()
+        .map(|candidate| match candidate.title() {
+            Some(title) if !title.trim().is_empty() => {
+                format!("{title}\n\n{}", candidate.body_text())
+            }
+            _ => candidate.body_text(),
+        })
+        .collect();
+    let vectors = embedding_provider
+        .embed_texts(&embedding_texts)
+        .map_err(|err| format!("failed to embed reconciliation candidates: {err}"))?;
+
+    let mut ambiguous_candidates = Vec::new();
+    let mut ambiguous_cases = Vec::new();
+
+    for (candidate, vector) in unresolved.into_iter().zip(vectors.into_iter()) {
+        let matches = cross_artifact_store
+            .find_related_by_embedding(
+                &input.artifact_id,
+                candidate.derived_object_type(),
+                &vector,
+                RECONCILE_EMBEDDING_LOOKUP_LIMIT,
+            )
+            .map_err(|err| format!("failed to load embedding reconciliation matches: {err}"))?;
+        let Some(top_match) = matches.first() else {
+            deterministic_outputs.push(create_new_output(&candidate));
+            continue;
+        };
+        if top_match.similarity_score >= RECONCILE_EMBEDDING_DETERMINISTIC_THRESHOLD {
+            deterministic_outputs.push(attach_existing_output(
+                &candidate,
+                &top_match.derived_object_id,
+                format!(
+                    "Deterministic embedding match against an existing active derived object (similarity {:.3}).",
+                    top_match.similarity_score
+                ),
+            ));
+            continue;
+        }
+        if top_match.similarity_score < RECONCILE_EMBEDDING_AMBIGUOUS_THRESHOLD {
+            deterministic_outputs.push(create_new_output(&candidate));
+            continue;
+        }
+
+        ambiguous_cases.push(AmbiguousReconcileCase {
+            target_kind: candidate.target_kind().to_string(),
+            target_key: candidate.target_key(),
+            embedding_matches: matches
+                .iter()
+                .map(|matched| AmbiguousReconcileMatch {
+                    object_id: matched.derived_object_id.clone(),
+                    artifact_id: matched.artifact_id.clone(),
+                    similarity_score: matched.similarity_score,
+                    candidate_key: matched.candidate_key.clone(),
+                    title: matched.title.clone(),
+                    body_text: matched.body_text.clone(),
+                })
+                .collect(),
+        });
+
+        ambiguous_candidates.push(candidate);
+    }
+
+    let ambiguous_input = if ambiguous_candidates.is_empty() {
+        None
+    } else {
+        Some(
+            build_reconciliation_input_for_candidates(
+                input,
+                ambiguous_candidates,
+                serde_json::to_string_pretty(&ambiguous_cases).map_err(|err| {
+                    format!("failed to serialize ambiguous reconcile cases: {err}")
+                })?,
+            )
+            .map_err(|err| format!("failed to build ambiguous reconciliation input: {err}"))?,
+        )
+    };
+
+    Ok(PreparedReconciliationWork {
+        deterministic_outputs,
+        ambiguous_input,
     })
 }
 
 pub(crate) fn build_reconciliation_decisions(
     claimed_job: &ClaimedJob,
     extraction_result: &ArtifactExtractionResult,
-    retrieval_result_set: &RetrievalResultSet,
     outputs: Vec<crate::processor::ReconciliationDecisionOutput>,
 ) -> Vec<ReconciliationDecision> {
     outputs
@@ -1720,7 +1962,6 @@ pub(crate) fn build_reconciliation_decisions(
             artifact_id: extraction_result.artifact_id.clone(),
             job_id: claimed_job.job_id.clone(),
             extraction_result_id: extraction_result.extraction_result_id.clone(),
-            retrieval_result_set_id: retrieval_result_set.retrieval_result_set_id.clone(),
             pipeline_name: "artifact_reconciliation".to_string(),
             pipeline_version: "v1".to_string(),
             decision_kind: output.decision_kind,
@@ -2194,6 +2435,128 @@ fn build_reconciliation_archive_links(
     links
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embedding::StubEmbeddingProvider;
+    use crate::error::StorageResult;
+    use crate::storage::{RelatedDerivedObject, RelatedDerivedObjectEmbeddingMatch, SourceType};
+
+    struct MockCrossArtifactReadStore {
+        exact_matches: Vec<RelatedDerivedObject>,
+        embedding_matches: Vec<RelatedDerivedObjectEmbeddingMatch>,
+    }
+
+    impl CrossArtifactReadStore for MockCrossArtifactReadStore {
+        fn find_related_by_candidate_keys(
+            &self,
+            _artifact_id: &str,
+            _candidate_keys: &[String],
+            _limit: usize,
+        ) -> StorageResult<Vec<RelatedDerivedObject>> {
+            Ok(self.exact_matches.clone())
+        }
+
+        fn find_related_by_embedding(
+            &self,
+            _artifact_id: &str,
+            _derived_object_type: DerivedObjectType,
+            _query_embedding: &[f32],
+            _limit: usize,
+        ) -> StorageResult<Vec<RelatedDerivedObjectEmbeddingMatch>> {
+            Ok(self.embedding_matches.clone())
+        }
+    }
+
+    fn sample_reconciliation_input() -> ReconciliationProcessorInput {
+        ReconciliationProcessorInput {
+            artifact_id: "artifact-1".to_string(),
+            source_type: SourceType::TextFile,
+            summary: SummaryOutput {
+                title: Some("Summary".to_string()),
+                body_text: "Summary body".to_string(),
+                evidence_segment_ids: vec!["seg-1".to_string()],
+            },
+            memories: vec![MemoryOutput {
+                candidate_key: "memory-key".to_string(),
+                title: Some("Memory".to_string()),
+                body_text: "Memory body".to_string(),
+                memory_type: "project_fact".to_string(),
+                memory_scope: ScopeType::Artifact,
+                memory_scope_value: "artifact-1".to_string(),
+                evidence_segment_ids: vec!["seg-1".to_string()],
+            }],
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            retrieval_results_json: "[]".to_string(),
+        }
+    }
+
+    #[test]
+    fn prepare_reconciliation_work_attaches_exact_candidate_key_matches() {
+        let input = sample_reconciliation_input();
+        let cross_store = MockCrossArtifactReadStore {
+            exact_matches: vec![RelatedDerivedObject {
+                derived_object_id: "dobj-9".to_string(),
+                artifact_id: "artifact-2".to_string(),
+                derived_object_type: DerivedObjectType::Memory,
+                title: Some("Existing".to_string()),
+                body_text: Some("Existing body".to_string()),
+                candidate_key: Some("memory-key".to_string()),
+                confidence_score: None,
+            }],
+            embedding_matches: Vec::new(),
+        };
+
+        let prepared = prepare_reconciliation_work(&input, Some(&cross_store), None)
+            .expect("prepare work should succeed");
+
+        assert_eq!(prepared.deterministic_outputs.len(), 1);
+        assert!(prepared.ambiguous_input.is_none());
+        let output = &prepared.deterministic_outputs[0];
+        assert_eq!(
+            output.decision_kind,
+            ReconciliationDecisionKind::AttachToExisting
+        );
+        assert_eq!(output.target_key, "memory-key");
+        assert_eq!(output.matched_object_id.as_deref(), Some("dobj-9"));
+    }
+
+    #[test]
+    fn prepare_reconciliation_work_limits_model_fallback_to_ambiguous_embedding_matches() {
+        let input = sample_reconciliation_input();
+        let cross_store = MockCrossArtifactReadStore {
+            exact_matches: Vec::new(),
+            embedding_matches: vec![RelatedDerivedObjectEmbeddingMatch {
+                derived_object_id: "dobj-7".to_string(),
+                artifact_id: "artifact-2".to_string(),
+                derived_object_type: DerivedObjectType::Memory,
+                title: Some("Possible match".to_string()),
+                body_text: Some("Possible body".to_string()),
+                candidate_key: Some("other-key".to_string()),
+                confidence_score: None,
+                similarity_score: 0.82,
+            }],
+        };
+        let embedding_provider = StubEmbeddingProvider::new("stub".to_string(), 8);
+
+        let prepared =
+            prepare_reconciliation_work(&input, Some(&cross_store), Some(&embedding_provider))
+                .expect("prepare work should succeed");
+
+        assert!(prepared.deterministic_outputs.is_empty());
+        let ambiguous_input = prepared
+            .ambiguous_input
+            .expect("ambiguous candidate should remain for model fallback");
+        assert_eq!(ambiguous_input.memories.len(), 1);
+        assert!(ambiguous_input.entities.is_empty());
+        assert!(ambiguous_input.relationships.is_empty());
+        assert!(ambiguous_input
+            .retrieval_results_json
+            .contains("\"object_id\": \"dobj-7\""));
+    }
+}
+
 pub(crate) fn build_evidence_links(
     derived_object_id: &str,
     segment_ids: &[String],
@@ -2324,7 +2687,7 @@ pub fn start_enrichment_workers(
     config: &crate::config::HttpConfig,
     job_store: Arc<dyn EnrichmentJobLifecycleStore>,
     read_store: Arc<dyn ArtifactReadStore>,
-    retrieval_service: Arc<dyn ArchiveRetrievalServiceApi>,
+    _retrieval_service: Arc<dyn crate::app::retrieval::ArchiveRetrievalServiceApi>,
     state_store: Arc<dyn EnrichmentStateStore>,
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
     shutdown: ShutdownToken,
@@ -2338,9 +2701,9 @@ pub fn start_enrichment_workers(
         EnrichmentPipelineResources {
             job_store,
             read_store,
-            retrieval_service,
             state_store,
             derived_store,
+            cross_artifact_store: None,
             embedding_store: None,
             embedding_provider: None,
         },
@@ -2360,9 +2723,9 @@ pub fn start_enrichment_workers_with_factory(
     let EnrichmentPipelineResources {
         job_store,
         read_store,
-        retrieval_service,
         state_store,
         derived_store,
+        cross_artifact_store: _,
         embedding_store: _,
         embedding_provider: _,
     } = resources;
@@ -2374,7 +2737,6 @@ pub fn start_enrichment_workers_with_factory(
             let worker_id = format_worker_id(pid, worker_index);
             let job_store = Arc::clone(&job_store);
             let read_store = Arc::clone(&read_store);
-            let retrieval_service = Arc::clone(&retrieval_service);
             let state_store = Arc::clone(&state_store);
             let derived_store = Arc::clone(&derived_store);
             let shutdown = shutdown.clone();
@@ -2397,9 +2759,9 @@ pub fn start_enrichment_workers_with_factory(
                         WorkerResources {
                             job_store,
                             read_store,
-                            retrieval_service,
                             state_store,
                             derived_store,
+                            cross_artifact_store: None,
                             embedding_store: None,
                             embedding_provider: None,
                             processor_factory,
@@ -2424,8 +2786,7 @@ pub fn start_enrichment_workers_with_factory(
 // Per-stage pipeline startup (replaces uniform worker pool)
 // ---------------------------------------------------------------------------
 
-/// Start the enrichment pipeline with per-stage pollers and dedicated
-/// retrieve-context workers.
+/// Start the enrichment pipeline with per-stage workers.
 ///
 /// Spawns:
 /// - batch mode:
@@ -2433,8 +2794,6 @@ pub fn start_enrichment_workers_with_factory(
 ///   - reconcile poller threads
 /// - direct mode:
 ///   - direct extract/reconcile worker threads
-/// - both modes:
-///   - retrieve-context worker threads
 pub fn start_enrichment_pipeline(
     config: &EnrichmentPipelineConfig,
     execution_mode: InferenceExecutionMode,
@@ -2445,9 +2804,9 @@ pub fn start_enrichment_pipeline(
     let EnrichmentPipelineResources {
         job_store,
         read_store,
-        retrieval_service,
         state_store,
         derived_store,
+        cross_artifact_store,
         embedding_store,
         embedding_provider,
     } = resources;
@@ -2464,9 +2823,9 @@ pub fn start_enrichment_pipeline(
     let direct_resources = Arc::new(WorkerResources {
         job_store: Arc::clone(&job_store),
         read_store: Arc::clone(&read_store),
-        retrieval_service: Arc::clone(&retrieval_service),
         state_store: Arc::clone(&state_store),
         derived_store: Arc::clone(&derived_store),
+        cross_artifact_store: cross_artifact_store.clone(),
         embedding_store: embedding_store.clone(),
         embedding_provider: embedding_provider.clone(),
         processor_factory: Arc::clone(&processor_factory),
@@ -2481,9 +2840,9 @@ pub fn start_enrichment_pipeline(
                 worker_count: mode.extract_workers,
                 job_store: Arc::clone(&job_store),
                 read_store: Arc::clone(&read_store),
-                retrieval_service: Arc::clone(&retrieval_service),
                 state_store: Arc::clone(&state_store),
                 derived_store: Arc::clone(&derived_store),
+                cross_artifact_store: cross_artifact_store.clone(),
                 embedding_store: embedding_store.clone(),
                 embedding_provider: embedding_provider.clone(),
                 processor_factory: Arc::clone(&processor_factory),
@@ -2496,9 +2855,9 @@ pub fn start_enrichment_pipeline(
                 worker_count: mode.reconcile_workers,
                 job_store: Arc::clone(&job_store),
                 read_store: Arc::clone(&read_store),
-                retrieval_service: Arc::clone(&retrieval_service),
                 state_store: Arc::clone(&state_store),
                 derived_store: Arc::clone(&derived_store),
+                cross_artifact_store: cross_artifact_store.clone(),
                 embedding_store: embedding_store.clone(),
                 embedding_provider: embedding_provider.clone(),
                 processor_factory: Arc::clone(&processor_factory),
@@ -2536,48 +2895,18 @@ pub fn start_enrichment_pipeline(
         }
     }
 
-    let (retrieve_context_workers, embedding_workers, extract_workers, reconcile_workers) =
-        match execution_mode {
-            InferenceExecutionMode::Batch => (
-                config.batch.retrieve_context_workers,
-                config.batch.embedding_workers,
-                config.batch.extract_workers,
-                config.batch.reconcile_workers,
-            ),
-            InferenceExecutionMode::Direct => (
-                config.direct.retrieve_context_workers,
-                config.direct.embedding_workers,
-                config.direct.extract_workers,
-                config.direct.reconcile_workers,
-            ),
-        };
-
-    // RetrieveContext workers (traditional blocking workers)
-    for i in 0..retrieve_context_workers {
-        let worker_id = format!("enrichment:{}:retrieve:{}", pid, i);
-        let job_store = Arc::clone(&job_store);
-        let retrieval_service = Arc::clone(&retrieval_service);
-        let state_store = Arc::clone(&state_store);
-        let shutdown = shutdown.clone();
-
-        let h = thread::Builder::new()
-            .name(format!("retrieve-context-{}", i))
-            .spawn(move || {
-                retrieve_context_worker_loop(
-                    worker_id,
-                    job_store.as_ref(),
-                    retrieval_service.as_ref(),
-                    state_store.as_ref(),
-                    poll_interval,
-                    shutdown,
-                );
-            })
-            .map_err(|source| WorkerError::SpawnThread {
-                worker_kind: format!("retrieve-context worker {}", i),
-                source: Box::new(source),
-            })?;
-        handles.push(h);
-    }
+    let (embedding_workers, extract_workers, reconcile_workers) = match execution_mode {
+        InferenceExecutionMode::Batch => (
+            config.batch.embedding_workers,
+            config.batch.extract_workers,
+            config.batch.reconcile_workers,
+        ),
+        InferenceExecutionMode::Direct => (
+            config.direct.embedding_workers,
+            config.direct.extract_workers,
+            config.direct.reconcile_workers,
+        ),
+    };
 
     if embedding_workers > 0 {
         if let (Some(embedding_store), Some(embedding_provider)) =
@@ -2598,11 +2927,10 @@ pub fn start_enrichment_pipeline(
     }
 
     info!(
-        "Enrichment pipeline started: mode={:?}, extract_workers={}, reconcile_workers={}, retrieve_context_workers={}, embedding_workers={}, chunk_segments={}, chunk_overlap={}, chunk_max_chars={}",
+        "Enrichment pipeline started: mode={:?}, extract_workers={}, reconcile_workers={}, embedding_workers={}, chunk_segments={}, chunk_overlap={}, chunk_max_chars={}",
         execution_mode,
         extract_workers,
         reconcile_workers,
-        retrieve_context_workers,
         embedding_workers,
         config.chunking.max_segments_per_chunk,
         config.chunking.chunk_overlap_segments,
@@ -2640,9 +2968,9 @@ struct BatchWorkerConfig {
     worker_count: usize,
     job_store: Arc<dyn EnrichmentJobLifecycleStore>,
     read_store: Arc<dyn ArtifactReadStore>,
-    retrieval_service: Arc<dyn ArchiveRetrievalServiceApi>,
     state_store: Arc<dyn EnrichmentStateStore>,
     derived_store: Arc<dyn DerivedMetadataWriteStore>,
+    cross_artifact_store: Option<Arc<dyn CrossArtifactReadStore + Send + Sync>>,
     embedding_store: Option<Arc<dyn DerivedObjectEmbeddingStore>>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     processor_factory: Arc<dyn ArtifactProcessorFactory>,
@@ -2659,9 +2987,9 @@ fn spawn_reconcile_batch_workers(
         worker_count,
         job_store,
         read_store,
-        retrieval_service,
         state_store,
         derived_store,
+        cross_artifact_store,
         embedding_store,
         embedding_provider,
         processor_factory,
@@ -2677,9 +3005,9 @@ fn spawn_reconcile_batch_workers(
     let resources = Arc::new(WorkerResources {
         job_store,
         read_store,
-        retrieval_service,
         state_store,
         derived_store,
+        cross_artifact_store,
         embedding_store,
         embedding_provider,
         processor_factory,
@@ -2706,9 +3034,9 @@ fn spawn_extract_batch_workers(
         worker_count,
         job_store,
         read_store,
-        retrieval_service,
         state_store,
         derived_store,
+        cross_artifact_store: _,
         embedding_store: _,
         embedding_provider: _,
         processor_factory,
@@ -2724,9 +3052,9 @@ fn spawn_extract_batch_workers(
     let resources = Arc::new(WorkerResources {
         job_store,
         read_store,
-        retrieval_service,
         state_store,
         derived_store,
+        cross_artifact_store: None,
         embedding_store: None,
         embedding_provider: None,
         processor_factory,
@@ -2794,11 +3122,6 @@ fn spawn_direct_stage_workers(
         .collect()
 }
 
-/// Dedicated worker loop for RetrieveContext jobs.
-///
-/// Claims one job at a time, processes it synchronously, and sleeps when
-/// no jobs are available. This stage does local/DB retrieval, not provider
-/// API calls, so a traditional blocking worker is appropriate.
 fn direct_stage_worker_loop(
     worker_id: String,
     job_type: JobType,
@@ -2933,61 +3256,6 @@ fn embedding_worker_loop(
                     "Embedding worker {} failed to claim job: {}",
                     worker_id, err
                 );
-                thread::sleep(poll_interval);
-            }
-        }
-    }
-}
-
-/// Dedicated worker loop for RetrieveContext jobs.
-///
-/// Claims one job at a time, processes it synchronously, and sleeps when
-/// no jobs are available. This stage does local/DB retrieval, not provider
-/// API calls, so a traditional blocking worker is appropriate.
-fn retrieve_context_worker_loop(
-    worker_id: String,
-    job_store: &dyn EnrichmentJobLifecycleStore,
-    retrieval_service: &dyn ArchiveRetrievalServiceApi,
-    state_store: &dyn EnrichmentStateStore,
-    poll_interval: Duration,
-    shutdown: ShutdownToken,
-) {
-    info!("Retrieve-context worker {} starting", worker_id);
-
-    loop {
-        if shutdown.is_shutdown() {
-            info!("Retrieve-context worker {} shutting down", worker_id);
-            break;
-        }
-
-        match job_store.claim_jobs_by_type(
-            &worker_id,
-            JobType::ArtifactRetrieveContext,
-            None, // tier-agnostic: retrieve_context does DB lookups, not model calls
-            1,
-        ) {
-            Ok(jobs) if !jobs.is_empty() => {
-                let job = &jobs[0];
-                debug!(
-                    "Worker {} claimed retrieve-context job {}",
-                    worker_id, job.job_id
-                );
-                if let Err(err) = process_retrieve_context_job(
-                    &worker_id,
-                    job,
-                    job_store,
-                    retrieval_service,
-                    state_store,
-                ) {
-                    error!(
-                        "Worker {} failed to process retrieve-context job: {}",
-                        worker_id, err
-                    );
-                }
-            }
-            Ok(_) => thread::sleep(poll_interval),
-            Err(err) => {
-                error!("Worker {} failed to claim job: {}", worker_id, err);
                 thread::sleep(poll_interval);
             }
         }

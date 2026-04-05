@@ -663,7 +663,6 @@ struct ArtifactEnrichmentSnapshot {
     completed_jobs: i64,
     failed_jobs: i64,
     extraction_results: i64,
-    retrieval_result_sets: i64,
     reconciliation_decisions: i64,
     completed_derivation_runs: i64,
 }
@@ -686,7 +685,7 @@ fn load_artifact_enrichment_snapshot(
     artifact_id: &str,
 ) -> StorageResult<ArtifactEnrichmentSnapshot> {
     let row = conn
-        .query_row_as::<(i64, i64, i64, i64, i64, i64, i64, i64, i64)>(
+        .query_row_as::<(i64, i64, i64, i64, i64, i64, i64, i64)>(
             "SELECT
                 (SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = :1 AND job_status = 'pending'),
                 (SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = :1 AND job_status = 'running'),
@@ -694,7 +693,6 @@ fn load_artifact_enrichment_snapshot(
                 (SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = :1 AND job_status = 'completed'),
                 (SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = :1 AND job_status = 'failed'),
                 (SELECT COUNT(*) FROM oa_artifact_extraction_result WHERE artifact_id = :1),
-                (SELECT COUNT(*) FROM oa_retrieval_result_set WHERE artifact_id = :1),
                 (SELECT COUNT(*) FROM oa_reconciliation_decision WHERE artifact_id = :1),
                 (SELECT COUNT(*) FROM oa_derivation_run WHERE artifact_id = :1 AND run_status = 'completed')
              FROM dual",
@@ -708,9 +706,8 @@ fn load_artifact_enrichment_snapshot(
         completed_jobs: row.3,
         failed_jobs: row.4,
         extraction_results: row.5,
-        retrieval_result_sets: row.6,
-        reconciliation_decisions: row.7,
-        completed_derivation_runs: row.8,
+        reconciliation_decisions: row.6,
+        completed_derivation_runs: row.7,
     })
 }
 
@@ -720,7 +717,6 @@ fn derive_artifact_enrichment_status(snapshot: ArtifactEnrichmentSnapshot) -> En
     let has_failed = snapshot.failed_jobs > 0;
     let has_completed_jobs = snapshot.completed_jobs > 0;
     let has_durable_outputs = snapshot.extraction_results > 0
-        || snapshot.retrieval_result_sets > 0
         || snapshot.reconciliation_decisions > 0
         || snapshot.completed_derivation_runs > 0;
     let is_fully_derived = snapshot.completed_derivation_runs > 0;

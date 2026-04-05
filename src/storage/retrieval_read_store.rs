@@ -196,6 +196,18 @@ pub struct RelatedDerivedObject {
     pub confidence_score: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelatedDerivedObjectEmbeddingMatch {
+    pub derived_object_id: String,
+    pub artifact_id: String,
+    pub derived_object_type: DerivedObjectType,
+    pub title: Option<String>,
+    pub body_text: Option<String>,
+    pub candidate_key: Option<String>,
+    pub confidence_score: Option<f64>,
+    pub similarity_score: f32,
+}
+
 pub trait CrossArtifactReadStore: Send + Sync {
     /// Given a set of candidate_keys from one artifact, find active derived objects
     /// from OTHER artifacts that share any of those keys.
@@ -205,4 +217,14 @@ pub trait CrossArtifactReadStore: Send + Sync {
         candidate_keys: &[String],
         limit: usize,
     ) -> StorageResult<Vec<RelatedDerivedObject>>;
+
+    /// Given a freshly embedded candidate, find active derived objects from
+    /// OTHER artifacts of the same type ordered by embedding similarity.
+    fn find_related_by_embedding(
+        &self,
+        artifact_id: &str,
+        derived_object_type: DerivedObjectType,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> StorageResult<Vec<RelatedDerivedObjectEmbeddingMatch>>;
 }

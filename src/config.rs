@@ -713,7 +713,6 @@ pub struct StageConfig {
 pub struct DirectPipelineModeConfig {
     pub extract_workers: usize,
     pub reconcile_workers: usize,
-    pub retrieve_context_workers: usize,
     pub embedding_workers: usize,
 }
 
@@ -723,7 +722,6 @@ pub struct BatchPipelineModeConfig {
     pub extract: StageConfig,
     pub reconcile_workers: usize,
     pub reconcile: StageConfig,
-    pub retrieve_context_workers: usize,
     pub embedding_workers: usize,
 }
 
@@ -751,16 +749,12 @@ impl EnrichmentPipelineConfig {
             positive_usize_env("OA_DIRECT_EXTRACT_WORKERS")?.unwrap_or(shared_worker_default);
         let direct_reconcile_workers =
             positive_usize_env("OA_DIRECT_RECONCILE_WORKERS")?.unwrap_or(shared_worker_default);
-        let direct_retrieve_context_workers =
-            positive_usize_env("OA_DIRECT_RETRIEVE_CONTEXT_WORKERS")?.unwrap_or(2);
         let direct_embedding_workers =
             positive_usize_env("OA_DIRECT_EMBEDDING_WORKERS")?.unwrap_or(1);
         let batch_extract_workers =
             positive_usize_env("OA_BATCH_EXTRACT_WORKERS")?.unwrap_or(shared_worker_default);
         let batch_reconcile_workers =
             positive_usize_env("OA_BATCH_RECONCILE_WORKERS")?.unwrap_or(shared_worker_default);
-        let batch_retrieve_context_workers =
-            positive_usize_env("OA_BATCH_RETRIEVE_CONTEXT_WORKERS")?.unwrap_or(2);
         let batch_embedding_workers =
             positive_usize_env("OA_BATCH_EMBEDDING_WORKERS")?.unwrap_or(1);
         Ok(Self {
@@ -769,7 +763,6 @@ impl EnrichmentPipelineConfig {
             direct: DirectPipelineModeConfig {
                 extract_workers: direct_extract_workers,
                 reconcile_workers: direct_reconcile_workers,
-                retrieve_context_workers: direct_retrieve_context_workers,
                 embedding_workers: direct_embedding_workers,
             },
             batch: BatchPipelineModeConfig {
@@ -787,7 +780,6 @@ impl EnrichmentPipelineConfig {
                     )?
                     .unwrap_or(2),
                 },
-                retrieve_context_workers: batch_retrieve_context_workers,
                 embedding_workers: batch_embedding_workers,
             },
             chunking: ExtractionChunkingConfig {
@@ -877,11 +869,9 @@ mod tests {
             "OA_ENRICHMENT_WORKERS",
             "OA_DIRECT_EXTRACT_WORKERS",
             "OA_DIRECT_RECONCILE_WORKERS",
-            "OA_DIRECT_RETRIEVE_CONTEXT_WORKERS",
             "OA_DIRECT_EMBEDDING_WORKERS",
             "OA_BATCH_EXTRACT_WORKERS",
             "OA_BATCH_RECONCILE_WORKERS",
-            "OA_BATCH_RETRIEVE_CONTEXT_WORKERS",
             "OA_BATCH_EMBEDDING_WORKERS",
             "OA_BATCH_EXTRACT_BATCH_SIZE",
             "OA_BATCH_EXTRACT_MAX_CONCURRENT",
@@ -935,7 +925,6 @@ mod tests {
             "OA_RECONCILE_WORKERS",
             "OA_RECONCILE_BATCH_SIZE",
             "OA_RECONCILE_MAX_CONCURRENT",
-            "OA_RETRIEVE_CONTEXT_WORKERS",
             "OA_EMBEDDING_WORKERS",
         ] {
             std::env::remove_var(key);
@@ -1165,7 +1154,6 @@ mod tests {
         );
         std::env::set_var("OA_DIRECT_EXTRACT_WORKERS", "7");
         std::env::set_var("OA_DIRECT_RECONCILE_WORKERS", "6");
-        std::env::set_var("OA_DIRECT_RETRIEVE_CONTEXT_WORKERS", "5");
         std::env::set_var("OA_DIRECT_EMBEDDING_WORKERS", "4");
         std::env::set_var("OA_BATCH_EXTRACT_WORKERS", "1");
         std::env::set_var("OA_BATCH_EXTRACT_BATCH_SIZE", "1");
@@ -1173,7 +1161,6 @@ mod tests {
         std::env::set_var("OA_BATCH_RECONCILE_WORKERS", "1");
         std::env::set_var("OA_BATCH_RECONCILE_BATCH_SIZE", "1");
         std::env::set_var("OA_BATCH_RECONCILE_MAX_CONCURRENT", "60");
-        std::env::set_var("OA_BATCH_RETRIEVE_CONTEXT_WORKERS", "12");
         std::env::set_var("OA_BATCH_EMBEDDING_WORKERS", "9");
 
         let config =
@@ -1181,7 +1168,6 @@ mod tests {
 
         assert_eq!(config.direct.extract_workers, 7);
         assert_eq!(config.direct.reconcile_workers, 6);
-        assert_eq!(config.direct.retrieve_context_workers, 5);
         assert_eq!(config.direct.embedding_workers, 4);
         assert_eq!(config.batch.extract_workers, 1);
         assert_eq!(config.batch.extract.batch_size, 1);
@@ -1189,7 +1175,6 @@ mod tests {
         assert_eq!(config.batch.reconcile_workers, 1);
         assert_eq!(config.batch.reconcile.batch_size, 1);
         assert_eq!(config.batch.reconcile.max_concurrent_batches, 60);
-        assert_eq!(config.batch.retrieve_context_workers, 12);
         assert_eq!(config.batch.embedding_workers, 9);
     }
 
@@ -1352,7 +1337,6 @@ mod tests {
         std::env::set_var("OA_ENRICHMENT_WORKERS", "2");
         std::env::set_var("OA_EXTRACT_WORKERS", "9");
         std::env::set_var("OA_RECONCILE_WORKERS", "8");
-        std::env::set_var("OA_RETRIEVE_CONTEXT_WORKERS", "7");
         std::env::set_var("OA_EMBEDDING_WORKERS", "6");
         std::env::set_var("OA_EXTRACT_BATCH_SIZE", "5");
         std::env::set_var("OA_EXTRACT_MAX_CONCURRENT", "4");
@@ -1362,7 +1346,6 @@ mod tests {
 
         assert_eq!(config.direct.extract_workers, 2);
         assert_eq!(config.direct.reconcile_workers, 2);
-        assert_eq!(config.direct.retrieve_context_workers, 2);
         assert_eq!(config.direct.embedding_workers, 1);
         assert_eq!(config.batch.extract_workers, 2);
         assert_eq!(config.batch.extract.batch_size, 5);
@@ -1370,7 +1353,6 @@ mod tests {
         assert_eq!(config.batch.reconcile_workers, 2);
         assert_eq!(config.batch.reconcile.batch_size, 5);
         assert_eq!(config.batch.reconcile.max_concurrent_batches, 2);
-        assert_eq!(config.batch.retrieve_context_workers, 2);
         assert_eq!(config.batch.embedding_workers, 1);
     }
 

@@ -31,10 +31,9 @@ use crate::processor::{
 use crate::shutdown::ShutdownToken;
 use crate::storage::{
     ArtifactExtractPayload, ArtifactExtractionResult, ArtifactReadStore, ArtifactReconcilePayload,
-    ArtifactRetrieveContextPayload, ClaimedJob, DerivedMetadataWriteStore,
-    EnrichmentJobLifecycleStore, EnrichmentStateStore, EnrichmentTier, JobType,
-    LoadedArtifactForEnrichment, NewEnrichmentBatch, NewEnrichmentJob, PersistedEnrichmentBatch,
-    ReconciliationDecision, ReconciliationDecisionKind, RetrievalResultSet, SourceType,
+    ClaimedJob, DerivedMetadataWriteStore, EnrichmentJobLifecycleStore, EnrichmentStateStore,
+    EnrichmentTier, JobType, LoadedArtifactForEnrichment, NewEnrichmentBatch, NewEnrichmentJob,
+    PersistedEnrichmentBatch, ReconciliationDecision, ReconciliationDecisionKind, SourceType,
 };
 
 /// Sentinel error returned when a stage cannot submit any jobs.
@@ -87,7 +86,6 @@ enum InFlightContext {
         inputs: Vec<ReconciliationProcessorInput>,
         payloads: Vec<ArtifactReconcilePayload>,
         extraction_results: Vec<ArtifactExtractionResult>,
-        retrieval_result_sets: Vec<RetrievalResultSet>,
         loaded_artifacts: Vec<LoadedArtifactForEnrichment>,
     },
 }
@@ -992,17 +990,17 @@ impl StageBehavior for ExtractStage {
                 );
                 continue;
             }
-            let retrieve_job = NewEnrichmentJob {
+            let reconcile_job = NewEnrichmentJob {
                 job_id: worker_new_id("job"),
                 artifact_id: job.artifact_id.clone(),
-                job_type: JobType::ArtifactRetrieveContext,
+                job_type: JobType::ArtifactReconcile,
                 enrichment_tier: job.enrichment_tier,
                 spawned_by_job_id: Some(job.job_id.clone()),
                 job_status: crate::storage::JobStatus::Pending,
                 max_attempts: 3,
                 priority_no: 100,
-                required_capabilities: vec!["archive_retrieval".to_string()],
-                payload_json: ArtifactRetrieveContextPayload::new_v1(
+                required_capabilities: vec!["text".to_string()],
+                payload_json: ArtifactReconcilePayload::new_v1(
                     &job.artifact_id,
                     &group.payload.import_id,
                     group.parent_input.source_type,
@@ -1010,12 +1008,12 @@ impl StageBehavior for ExtractStage {
                 )
                 .to_json(),
             };
-            if let Err(err) = job_store.enqueue_jobs(&[retrieve_job]) {
+            if let Err(err) = job_store.enqueue_jobs(&[reconcile_job]) {
                 poller_fail_job(
                     job_store,
                     worker_id,
                     &job.job_id,
-                    "Failed to enqueue retrieval-context job",
+                    "Failed to enqueue reconciliation job",
                     err,
                 );
                 continue;
@@ -1215,7 +1213,6 @@ impl StageBehavior for ReconcileStage {
         let mut inputs = Vec::new();
         let mut payloads = Vec::new();
         let mut extraction_results = Vec::new();
-        let mut retrieval_result_sets = Vec::new();
         let mut loaded_artifacts = Vec::new();
 
         for job in jobs {
@@ -1280,32 +1277,6 @@ impl StageBehavior for ReconcileStage {
                         continue;
                     }
                 };
-            let retrieval_result_set =
-                match state_store.load_retrieval_result_set(&payload.retrieval_result_set_id) {
-                    Ok(Some(r)) => r,
-                    Ok(None) => {
-                        poller_fail_job_message(
-                            job_store,
-                            worker_id,
-                            &job.job_id,
-                            format!(
-                                "Retrieval result set {} not found",
-                                payload.retrieval_result_set_id
-                            ),
-                        );
-                        continue;
-                    }
-                    Err(err) => {
-                        poller_fail_job(
-                            job_store,
-                            worker_id,
-                            &job.job_id,
-                            "Failed to load retrieval result set for reconciliation",
-                            err,
-                        );
-                        continue;
-                    }
-                };
             if extraction_result.memories.is_empty()
                 && extraction_result.entities.is_empty()
                 && extraction_result.relationships.is_empty()
@@ -1314,7 +1285,6 @@ impl StageBehavior for ReconcileStage {
                     &job,
                     &loaded,
                     &extraction_result,
-                    &retrieval_result_set,
                     ReconcileCompletionContext {
                         job_store,
                         state_store,
@@ -1333,7 +1303,6 @@ impl StageBehavior for ReconcileStage {
                 &job.artifact_id,
                 &payload.source_type,
                 &extraction_result,
-                &retrieval_result_set,
             ) {
                 Ok(i) => i,
                 Err(err) => {
@@ -1350,7 +1319,6 @@ impl StageBehavior for ReconcileStage {
             inputs.push(input);
             payloads.push(payload);
             extraction_results.push(extraction_result);
-            retrieval_result_sets.push(retrieval_result_set);
             loaded_artifacts.push(loaded);
             valid_jobs.push(job);
         }
@@ -1368,7 +1336,6 @@ impl StageBehavior for ReconcileStage {
                     inputs,
                     payloads,
                     extraction_results,
-                    retrieval_result_sets,
                     loaded_artifacts,
                 },
             }),
@@ -1401,39 +1368,30 @@ impl StageBehavior for ReconcileStage {
         derived_store: &dyn DerivedMetadataWriteStore,
         worker_id: &str,
     ) -> Result<Option<InFlightBatch>, StageError> {
-        let (inputs, _payloads, extraction_results, retrieval_result_sets, loaded_artifacts) =
-            match batch.context {
-                InFlightContext::Reconcile {
-                    inputs,
-                    payloads,
-                    extraction_results,
-                    retrieval_result_sets,
-                    loaded_artifacts,
-                } => (
-                    inputs,
-                    payloads,
-                    extraction_results,
-                    retrieval_result_sets,
-                    loaded_artifacts,
-                ),
-                _ => {
-                    error!("[reconcile] process_completed called with wrong context variant");
-                    return Err(StageError::NoJobsSubmitted);
-                }
-            };
+        let (inputs, _payloads, extraction_results, loaded_artifacts) = match batch.context {
+            InFlightContext::Reconcile {
+                inputs,
+                payloads,
+                extraction_results,
+                loaded_artifacts,
+            } => (inputs, payloads, extraction_results, loaded_artifacts),
+            _ => {
+                error!("[reconcile] process_completed called with wrong context variant");
+                return Err(StageError::NoJobsSubmitted);
+            }
+        };
 
         let results = self.submitter.parse_results(data, &inputs);
 
-        // Zip everything together: (job, extraction_result, retrieval_result_set, loaded_artifact, result)
+        // Zip everything together: (job, extraction_result, loaded_artifact, result)
         let iter = batch
             .jobs
             .into_iter()
             .zip(extraction_results)
-            .zip(retrieval_result_sets)
             .zip(loaded_artifacts)
             .zip(results);
 
-        for ((((job, extraction_result), retrieval_result_set), loaded), result) in iter {
+        for (((job, extraction_result), loaded), result) in iter {
             match result {
                 Ok(outputs) => {
                     let decisions = if extraction_result.memories.is_empty()
@@ -1444,9 +1402,6 @@ impl StageBehavior for ReconcileStage {
                             artifact_id: extraction_result.artifact_id.clone(),
                             job_id: job.job_id.clone(),
                             extraction_result_id: extraction_result.extraction_result_id.clone(),
-                            retrieval_result_set_id: retrieval_result_set
-                                .retrieval_result_set_id
-                                .clone(),
                             pipeline_name: "artifact_reconciliation".to_string(),
                             pipeline_version: "v1".to_string(),
                             decision_kind: ReconciliationDecisionKind::InsufficientEvidence,
@@ -1463,12 +1418,7 @@ impl StageBehavior for ReconcileStage {
                             error_message: None,
                         }]
                     } else {
-                        worker_build_reconciliation_decisions(
-                            &job,
-                            &extraction_result,
-                            &retrieval_result_set,
-                            outputs,
-                        )
+                        worker_build_reconciliation_decisions(&job, &extraction_result, outputs)
                     };
                     if let Err(err) = state_store.save_reconciliation_decisions(&decisions) {
                         poller_fail_job(
@@ -1552,7 +1502,6 @@ impl StageBehavior for ReconcileStage {
         let mut inputs = Vec::new();
         let mut payloads = Vec::new();
         let mut extraction_results = Vec::new();
-        let mut retrieval_result_sets = Vec::new();
         let mut loaded_artifacts = Vec::new();
 
         for job in &persisted.jobs {
@@ -1620,37 +1569,10 @@ impl StageBehavior for ReconcileStage {
                         return Err(StageError::NoJobsSubmitted);
                     }
                 };
-            let retrieval_result_set =
-                match state_store.load_retrieval_result_set(&payload.retrieval_result_set_id) {
-                    Ok(Some(r)) => r,
-                    Ok(None) => {
-                        poller_fail_job_message(
-                            job_store,
-                            worker_id,
-                            &job.job_id,
-                            format!(
-                                "Retrieval result set {} not found during reconciliation recovery",
-                                payload.retrieval_result_set_id
-                            ),
-                        );
-                        return Err(StageError::NoJobsSubmitted);
-                    }
-                    Err(err) => {
-                        poller_fail_job(
-                            job_store,
-                            worker_id,
-                            &job.job_id,
-                            "Failed to load retrieval result set for reconciliation recovery",
-                            err,
-                        );
-                        return Err(StageError::NoJobsSubmitted);
-                    }
-                };
             let input = match worker_build_reconciliation_input(
                 &job.artifact_id,
                 &payload.source_type,
                 &extraction_result,
-                &retrieval_result_set,
             ) {
                 Ok(i) => i,
                 Err(err) => {
@@ -1667,7 +1589,6 @@ impl StageBehavior for ReconcileStage {
             inputs.push(input);
             payloads.push(payload);
             extraction_results.push(extraction_result);
-            retrieval_result_sets.push(retrieval_result_set);
             loaded_artifacts.push(loaded);
         }
 
@@ -1683,7 +1604,6 @@ impl StageBehavior for ReconcileStage {
                 inputs,
                 payloads,
                 extraction_results,
-                retrieval_result_sets,
                 loaded_artifacts,
             },
         })
@@ -1841,7 +1761,6 @@ fn complete_reconcile_without_candidates(
     job: &ClaimedJob,
     loaded: &LoadedArtifactForEnrichment,
     extraction_result: &ArtifactExtractionResult,
-    retrieval_result_set: &RetrievalResultSet,
     ctx: ReconcileCompletionContext<'_>,
 ) -> Result<(), ()> {
     let ReconcileCompletionContext {
@@ -1856,7 +1775,6 @@ fn complete_reconcile_without_candidates(
         artifact_id: extraction_result.artifact_id.clone(),
         job_id: job.job_id.clone(),
         extraction_result_id: extraction_result.extraction_result_id.clone(),
-        retrieval_result_set_id: retrieval_result_set.retrieval_result_set_id.clone(),
         pipeline_name: "artifact_reconciliation".to_string(),
         pipeline_version: "v1".to_string(),
         decision_kind: ReconciliationDecisionKind::InsufficientEvidence,
@@ -2188,17 +2106,6 @@ mod tests {
             &self,
             _extraction_result_id: &str,
         ) -> StorageResult<Option<ArtifactExtractionResult>> {
-            Ok(None)
-        }
-
-        fn save_retrieval_result_set(&self, _result_set: &RetrievalResultSet) -> StorageResult<()> {
-            Ok(())
-        }
-
-        fn load_retrieval_result_set(
-            &self,
-            _retrieval_result_set_id: &str,
-        ) -> StorageResult<Option<RetrievalResultSet>> {
             Ok(None)
         }
 

@@ -374,7 +374,6 @@ impl SegmentType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobType {
     ArtifactExtract,
-    ArtifactRetrieveContext,
     ArtifactReconcile,
     DerivedObjectEmbed,
 }
@@ -383,7 +382,6 @@ impl JobType {
     pub fn as_str(&self) -> &'static str {
         match self {
             JobType::ArtifactExtract => "artifact_extract",
-            JobType::ArtifactRetrieveContext => "artifact_retrieve_context",
             JobType::ArtifactReconcile => "artifact_reconcile",
             JobType::DerivedObjectEmbed => "derived_object_embed",
         }
@@ -394,7 +392,6 @@ impl JobType {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "artifact_extract" => Some(Self::ArtifactExtract),
-            "artifact_retrieve_context" => Some(Self::ArtifactRetrieveContext),
             "artifact_reconcile" => Some(Self::ArtifactReconcile),
             "derived_object_embed" => Some(Self::DerivedObjectEmbed),
             _ => None,
@@ -1172,47 +1169,12 @@ impl ArtifactExtractPayload {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct ArtifactRetrieveContextPayload {
-    pub schema_version: String,
-    pub artifact_id: String,
-    pub import_id: String,
-    pub source_type: String,
-    pub extraction_result_id: String,
-}
-
-impl ArtifactRetrieveContextPayload {
-    pub fn new_v1(
-        artifact_id: &str,
-        import_id: &str,
-        source_type: SourceType,
-        extraction_result_id: &str,
-    ) -> Self {
-        Self {
-            schema_version: "1".to_string(),
-            artifact_id: artifact_id.to_string(),
-            import_id: import_id.to_string(),
-            source_type: source_type.as_str().to_string(),
-            extraction_result_id: extraction_result_id.to_string(),
-        }
-    }
-
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).expect("ArtifactRetrieveContextPayload is always serializable")
-    }
-
-    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ArtifactReconcilePayload {
     pub schema_version: String,
     pub artifact_id: String,
     pub import_id: String,
     pub source_type: String,
     pub extraction_result_id: String,
-    pub retrieval_result_set_id: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1268,7 +1230,6 @@ impl ArtifactReconcilePayload {
         import_id: &str,
         source_type: SourceType,
         extraction_result_id: &str,
-        retrieval_result_set_id: &str,
     ) -> Self {
         Self {
             schema_version: "1".to_string(),
@@ -1276,7 +1237,6 @@ impl ArtifactReconcilePayload {
             import_id: import_id.to_string(),
             source_type: source_type.as_str().to_string(),
             extraction_result_id: extraction_result_id.to_string(),
-            retrieval_result_set_id: retrieval_result_set_id.to_string(),
         }
     }
 
@@ -1529,20 +1489,6 @@ pub struct RetrievedContextItem {
     pub rank_score: i32,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct RetrievalResultSet {
-    pub retrieval_result_set_id: String,
-    pub artifact_id: String,
-    pub job_id: String,
-    pub extraction_result_id: String,
-    pub pipeline_name: String,
-    pub pipeline_version: String,
-    pub intents: Vec<RetrievalIntent>,
-    pub results: Vec<RetrievedContextItem>,
-    pub status: String,
-    pub error_message: Option<String>,
-}
-
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReconciliationDecisionKind {
@@ -1560,7 +1506,6 @@ pub struct ReconciliationDecision {
     pub artifact_id: String,
     pub job_id: String,
     pub extraction_result_id: String,
-    pub retrieval_result_set_id: String,
     pub pipeline_name: String,
     pub pipeline_version: String,
     pub decision_kind: ReconciliationDecisionKind,

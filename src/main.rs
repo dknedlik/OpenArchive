@@ -120,9 +120,9 @@ fn serve() -> Result<(), anyhow::Error> {
                     open_archive::enrichment_worker::EnrichmentPipelineResources {
                         job_store: Arc::clone(&services.enrichment_store),
                         read_store: Arc::clone(&services.read_store),
-                        retrieval_service: Arc::clone(&services.app.retrieval),
                         state_store: Arc::clone(&services.state_store),
                         derived_store: Arc::clone(&services.derived_store),
+                        cross_artifact_store: services.cross_artifact_store.clone(),
                         embedding_store: services.embedding_store.clone(),
                         embedding_provider: services.embedding_provider.clone(),
                     },
@@ -140,9 +140,9 @@ fn serve() -> Result<(), anyhow::Error> {
                     open_archive::enrichment_worker::EnrichmentPipelineResources {
                         job_store: Arc::clone(&services.enrichment_store),
                         read_store: Arc::clone(&services.read_store),
-                        retrieval_service: Arc::clone(&services.app.retrieval),
                         state_store: Arc::clone(&services.state_store),
                         derived_store: Arc::clone(&services.derived_store),
+                        cross_artifact_store: services.cross_artifact_store.clone(),
                         embedding_store: services.embedding_store.clone(),
                         embedding_provider: services.embedding_provider.clone(),
                     },

@@ -1457,6 +1457,18 @@ fn sample_reconciliation_input() -> ReconciliationProcessorInput {
 }
 
 #[test]
+fn reconciliation_prompt_is_narrow_comparison_prompt() {
+    let input = sample_reconciliation_input();
+    let prompt = build_reconciliation_prompt(&input).expect("prompt should build");
+
+    assert!(prompt.contains("Compare ambiguous extracted candidates"));
+    assert!(prompt.contains("candidate_match_options:"));
+    assert!(prompt.contains("compare it only to the provided candidate_match_options"));
+    assert!(!prompt.contains("retrieval_results:"));
+    assert!(!prompt.contains("Reconcile extraction candidates against archive retrieval results."));
+}
+
+#[test]
 fn reconciliation_normalizes_ungrounded_existing_decision_to_create_new() {
     let input = sample_reconciliation_input();
     let output = ModelReconciliationOutput {

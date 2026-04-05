@@ -7,7 +7,7 @@ use crate::storage::derivation_store::{
     DerivationWriteResult, DerivedMetadataWriteStore, WriteDerivationAttempt,
 };
 use crate::storage::enrichment_state_store::EnrichmentStateStore;
-use crate::storage::types::{ArtifactExtractionResult, ReconciliationDecision, RetrievalResultSet};
+use crate::storage::types::{ArtifactExtractionResult, ReconciliationDecision};
 use crate::storage::StorageTx;
 
 use super::derivation;
@@ -156,58 +156,6 @@ impl EnrichmentStateStore for OracleDerivedMetadataStore {
         )
     }
 
-    fn save_retrieval_result_set(&self, result_set: &RetrievalResultSet) -> StorageResult<()> {
-        let conn = db::connect(&self.config)?;
-        conn.execute(
-            "MERGE INTO oa_retrieval_result_set t
-             USING (
-                SELECT :1 AS retrieval_result_set_id,
-                       :2 AS artifact_id,
-                       :3 AS job_id,
-                       :4 AS extraction_result_id,
-                       :5 AS pipeline_name,
-                       :6 AS pipeline_version,
-                       :7 AS result_json
-                  FROM dual
-             ) s
-             ON (t.retrieval_result_set_id = s.retrieval_result_set_id)
-             WHEN MATCHED THEN UPDATE SET
-                 t.pipeline_name = s.pipeline_name,
-                 t.pipeline_version = s.pipeline_version,
-                 t.result_json = s.result_json
-             WHEN NOT MATCHED THEN INSERT
-                 (retrieval_result_set_id, artifact_id, job_id, extraction_result_id, pipeline_name, pipeline_version, result_json)
-                 VALUES (s.retrieval_result_set_id, s.artifact_id, s.job_id, s.extraction_result_id, s.pipeline_name, s.pipeline_version, s.result_json)",
-            &[
-                &result_set.retrieval_result_set_id,
-                &result_set.artifact_id,
-                &result_set.job_id,
-                &result_set.extraction_result_id,
-                &result_set.pipeline_name,
-                &result_set.pipeline_version,
-                &serde_json::to_string(result_set).expect("retrieval result set serializable"),
-            ],
-        )
-        .map_err(|source| StorageError::ListArtifacts { source: Box::new(source) })?;
-        commit_connection(&conn, "save retrieval result set")?;
-        Ok(())
-    }
-
-    fn load_retrieval_result_set(
-        &self,
-        retrieval_result_set_id: &str,
-    ) -> StorageResult<Option<RetrievalResultSet>> {
-        let conn = db::connect(&self.config)?;
-        load_json_row(
-            &conn,
-            "SELECT result_json
-             FROM oa_retrieval_result_set
-             WHERE retrieval_result_set_id = :1",
-            retrieval_result_set_id,
-            "retrieval result set",
-        )
-    }
-
     fn save_reconciliation_decisions(
         &self,
         decisions: &[ReconciliationDecision],
@@ -221,16 +169,15 @@ impl EnrichmentStateStore for OracleDerivedMetadataStore {
                            :2 AS artifact_id,
                            :3 AS job_id,
                            :4 AS extraction_result_id,
-                           :5 AS retrieval_result_set_id,
-                           :6 AS pipeline_name,
-                           :7 AS pipeline_version,
-                           :8 AS decision_kind,
-                           :9 AS target_kind,
-                           :10 AS target_key,
-                           :11 AS matched_object_id,
-                           :12 AS rationale,
-                           :13 AS evidence_segment_ids_json,
-                           :14 AS decision_json
+                           :5 AS pipeline_name,
+                           :6 AS pipeline_version,
+                           :7 AS decision_kind,
+                           :8 AS target_kind,
+                           :9 AS target_key,
+                           :10 AS matched_object_id,
+                           :11 AS rationale,
+                           :12 AS evidence_segment_ids_json,
+                           :13 AS decision_json
                       FROM dual
                  ) s
                  ON (t.reconciliation_decision_id = s.reconciliation_decision_id)
@@ -238,11 +185,11 @@ impl EnrichmentStateStore for OracleDerivedMetadataStore {
                      t.rationale = s.rationale,
                      t.decision_json = s.decision_json
                  WHEN NOT MATCHED THEN INSERT
-                     (reconciliation_decision_id, artifact_id, job_id, extraction_result_id, retrieval_result_set_id,
+                     (reconciliation_decision_id, artifact_id, job_id, extraction_result_id,
                       pipeline_name, pipeline_version, decision_kind, target_kind, target_key, matched_object_id,
                       rationale, evidence_segment_ids_json, decision_json)
                      VALUES (s.reconciliation_decision_id, s.artifact_id, s.job_id, s.extraction_result_id,
-                             s.retrieval_result_set_id, s.pipeline_name, s.pipeline_version, s.decision_kind,
+                             s.pipeline_name, s.pipeline_version, s.decision_kind,
                              s.target_kind, s.target_key, s.matched_object_id, s.rationale,
                              s.evidence_segment_ids_json, s.decision_json)",
                 &[
@@ -250,7 +197,6 @@ impl EnrichmentStateStore for OracleDerivedMetadataStore {
                     &decision.artifact_id,
                     &decision.job_id,
                     &decision.extraction_result_id,
-                    &decision.retrieval_result_set_id,
                     &decision.pipeline_name,
                     &decision.pipeline_version,
                     &serde_json::to_string(&decision.decision_kind)

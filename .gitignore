@@ -4,6 +4,7 @@
 /.idea
 /.vscode
 /.fastembed_cache
+/tmp/
 /tmp/live-objects/
 /tmp/ObsidianStarterVault-source
 /tmp/classifier-corpus/

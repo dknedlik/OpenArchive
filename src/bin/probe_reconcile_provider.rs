@@ -110,26 +110,10 @@ fn main() -> Result<()> {
                     payload.extraction_result_id
                 )
             })?;
-        let retrieval_result_set = derived_store
-            .load_retrieval_result_set(&payload.retrieval_result_set_id)
-            .with_context(|| {
-                format!(
-                    "failed to load retrieval result set {}",
-                    payload.retrieval_result_set_id
-                )
-            })?
-            .ok_or_else(|| {
-                anyhow!(
-                    "retrieval result set {} not found",
-                    payload.retrieval_result_set_id
-                )
-            })?;
-
         let input = build_reconciliation_input(
             &loaded.artifact.artifact_id,
             loaded.artifact.source_type,
             &extraction_result,
-            &retrieval_result_set,
         )?;
 
         println!("Job: {job_id}");
@@ -269,7 +253,6 @@ fn build_reconciliation_input(
     artifact_id: &str,
     source_type: SourceType,
     extraction_result: &open_archive::storage::types::ArtifactExtractionResult,
-    retrieval_result_set: &open_archive::storage::types::RetrievalResultSet,
 ) -> Result<ReconciliationProcessorInput> {
     Ok(ReconciliationProcessorInput {
         artifact_id: artifact_id.to_string(),
@@ -325,8 +308,7 @@ fn build_reconciliation_input(
                 evidence_segment_ids: relationship.evidence_segment_ids.clone(),
             })
             .collect(),
-        retrieval_results_json: serde_json::to_string_pretty(retrieval_result_set)
-            .context("failed to serialize retrieval result set")?,
+        retrieval_results_json: "[]".to_string(),
     })
 }
 
