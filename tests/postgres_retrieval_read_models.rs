@@ -119,7 +119,6 @@ fn postgres_retrieval_read_models_load_search_detail_and_context_material() {
         .expect("context material should exist");
     assert_eq!(context.artifact.artifact_id, artifact_id);
     assert!(!context.derived_objects.is_empty());
-    assert!(!context.evidence_links.is_empty());
 }
 
 #[test]

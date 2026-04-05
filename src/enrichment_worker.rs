@@ -1926,7 +1926,6 @@ pub(crate) fn build_derivation_attempt(
                 }),
             },
         },
-        evidence_links: Vec::new(),
     });
 
     for classification in &extraction_result.classifications {
@@ -1952,7 +1951,6 @@ pub(crate) fn build_derivation_attempt(
                     },
                 },
             },
-            evidence_links: Vec::new(),
         });
     }
 
@@ -2006,7 +2004,6 @@ pub(crate) fn build_derivation_attempt(
                     },
                 },
             },
-            evidence_links: Vec::new(),
         });
     }
 
@@ -2061,7 +2058,6 @@ pub(crate) fn build_derivation_attempt(
                     },
                 },
             },
-            evidence_links: Vec::new(),
         });
     }
 
@@ -2123,7 +2119,6 @@ pub(crate) fn build_derivation_attempt(
                     },
                 },
             },
-            evidence_links: Vec::new(),
         });
     }
 

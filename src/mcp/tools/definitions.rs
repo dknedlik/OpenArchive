@@ -89,20 +89,7 @@ pub(in crate::mcp) fn tool_definitions() -> Vec<Value> {
                     "memory_type": { "type": "string", "description": "Broad retrieval-oriented type, for example: personal_fact, preference, project_fact, ongoing_state, or reference." },
                     "candidate_key": { "type": "string", "description": "Optional deduplication key for identifying related memories across artifacts." },
                     "artifact_id": { "type": "string", "description": "The artifact this memory relates to." },
-                    "contributed_by": { "type": "string", "description": "Optional identifier for the contributing agent." },
-                    "evidence": {
-                        "type": "array",
-                        "description": "Optional segment evidence supporting this memory.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "segment_id": { "type": "string" },
-                                "evidence_role": { "type": "string", "enum": ["primary_support", "secondary_support", "reduction_input"] },
-                                "support_strength": { "type": "string", "enum": ["strong", "medium", "weak"] }
-                            },
-                            "required": ["segment_id", "evidence_role", "support_strength"]
-                        }
-                    }
+                    "contributed_by": { "type": "string", "description": "Optional identifier for the contributing agent." }
                 },
                 "required": ["title", "body_text", "memory_type", "artifact_id"],
                 "additionalProperties": false
@@ -170,20 +157,7 @@ pub(in crate::mcp) fn tool_definitions() -> Vec<Value> {
                     "entity_type": { "type": "string", "description": "Entity category, for example: person, project, tool, concept, organization, location." },
                     "artifact_id": { "type": "string", "description": "The artifact this entity relates to." },
                     "candidate_key": { "type": "string", "description": "Optional deduplication key for identifying this entity across artifacts." },
-                    "contributed_by": { "type": "string", "description": "Optional identifier for the contributing agent." },
-                    "evidence": {
-                        "type": "array",
-                        "description": "Optional segment evidence supporting this entity.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "segment_id": { "type": "string" },
-                                "evidence_role": { "type": "string", "enum": ["primary_support", "secondary_support", "reduction_input"] },
-                                "support_strength": { "type": "string", "enum": ["strong", "medium", "weak"] }
-                            },
-                            "required": ["segment_id", "evidence_role", "support_strength"]
-                        }
-                    }
+                    "contributed_by": { "type": "string", "description": "Optional identifier for the contributing agent." }
                 },
                 "required": ["title", "body_text", "entity_type", "artifact_id"],
                 "additionalProperties": false
@@ -191,7 +165,7 @@ pub(in crate::mcp) fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "get_related",
-            "description": "Find derived objects connected to a given object via archive links or shared evidence. Returns 1-hop graph neighbors.",
+            "description": "Find derived objects connected to a given object via archive links or shared candidate keys. Returns 1-hop graph neighbors.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -59,11 +59,11 @@ pub use postgres::{
 };
 pub use retrieval_read_store::{
     ArchiveSearchCandidate, ArchiveSearchReadStore, ArtifactContextDerivedObject,
-    ArtifactContextEvidenceLink, ArtifactContextPackMaterial, ArtifactContextPackReadStore,
-    ArtifactDetailDerivedObject, ArtifactDetailReadStore, ArtifactDetailRecord,
-    ArtifactDetailSegment, ArtifactDetailView, CrossArtifactReadStore, DerivedObjectSearchResult,
-    DerivedObjectSearchStore, GraphRelatedEntry, MvpRetrievalReadStore, ObjectSearchFilters,
-    RelatedDerivedObject, RelatedDerivedObjectEmbeddingMatch, SearchCandidateKind, SearchFilters,
+    ArtifactContextPackMaterial, ArtifactContextPackReadStore, ArtifactDetailDerivedObject,
+    ArtifactDetailReadStore, ArtifactDetailRecord, ArtifactDetailSegment, ArtifactDetailView,
+    CrossArtifactReadStore, DerivedObjectSearchResult, DerivedObjectSearchStore, GraphRelatedEntry,
+    MvpRetrievalReadStore, ObjectSearchFilters, RelatedDerivedObject,
+    RelatedDerivedObjectEmbeddingMatch, SearchCandidateKind, SearchFilters,
 };
 pub use review_read_store::{
     NewReviewDecision, ReviewCandidate, ReviewDecisionStatus, ReviewItemKind, ReviewQueueFilters,
@@ -76,23 +76,22 @@ pub use types::{
     CandidateEntity, CandidateRelationship, ClaimedJob, ClassificationObjectJson,
     ConversationWindowRef, DerivationRunStatus, DerivationRunType, DerivedObjectEmbeddingItem,
     DerivedObjectEmbeddingPayload, DerivedObjectPayload, DerivedObjectType, EnrichmentStatus,
-    EnrichmentTier, EntityObjectJson, EvidenceRole, ExtractedClassification, ExtractedMemory,
-    ImportStatus, ImportedNoteAliasRecord, ImportedNoteLinkKind, ImportedNoteLinkRecord,
+    EnrichmentTier, EntityObjectJson, ExtractedClassification, ExtractedMemory, ImportStatus,
+    ImportedNoteAliasRecord, ImportedNoteLinkKind, ImportedNoteLinkRecord,
     ImportedNoteLinkResolutionStatus, ImportedNoteLinkTargetKind, ImportedNoteMetadata,
     ImportedNoteMetadataWriteSet, ImportedNotePropertyRecord, ImportedNotePropertyValueKind,
     ImportedNoteTagRecord, ImportedNoteTagSourceKind, InputScopeType, JobStatus, JobType,
     LoadedArtifactForEnrichment, LoadedArtifactRecord, LoadedParticipant, LoadedSegment,
     MemoryObjectJson, NewArtifact, NewDerivationRun, NewDerivedObject, NewDerivedObjectEmbedding,
-    NewEnrichmentBatch, NewEnrichmentJob, NewEvidenceLink, NewImport, NewImportObjectRef,
-    NewImportedNoteAlias, NewImportedNoteLink, NewImportedNoteProperty, NewImportedNoteTag,
-    NewParticipant, NewSegment, ObjectStatus, OriginKind, PayloadFormat, PersistedEnrichmentBatch,
-    ReconciliationDecision, ReconciliationDecisionKind, RelationshipObjectJson, RetrievalIntent,
-    RetrievedContextItem, RetryOutcome, ScopeType, SegmentSpanRef, SegmentType, SourceType,
-    SummaryObjectJson, SupportStrength, TimelineEntry, TimelineFilters, TopicThreadRef,
+    NewEnrichmentBatch, NewEnrichmentJob, NewImport, NewImportObjectRef, NewImportedNoteAlias,
+    NewImportedNoteLink, NewImportedNoteProperty, NewImportedNoteTag, NewParticipant, NewSegment,
+    ObjectStatus, OriginKind, PayloadFormat, PersistedEnrichmentBatch, ReconciliationDecision,
+    ReconciliationDecisionKind, RelationshipObjectJson, RetrievalIntent, RetrievedContextItem,
+    RetryOutcome, ScopeType, SegmentSpanRef, SegmentType, SourceType, SummaryObjectJson,
+    TimelineEntry, TimelineFilters, TopicThreadRef,
 };
 pub use writeback_store::{
-    NewAgentEntity, NewAgentEvidenceLink, NewAgentMemory, NewArchiveLink, UpdateObjectStatus,
-    WritebackStore,
+    NewAgentEntity, NewAgentMemory, NewArchiveLink, UpdateObjectStatus, WritebackStore,
 };
 
 use crate::error::StorageResult;

@@ -64,15 +64,9 @@ impl DerivedMetadataWriteStore for OracleDerivedMetadataStore {
             derivation::insert_derivation_run(&tx.conn, &attempt.run)?;
 
             let mut derived_object_ids = Vec::with_capacity(attempt.objects.len());
-            let mut evidence_links_written = 0usize;
             for object_write in &attempt.objects {
                 derivation::insert_derived_object(&tx.conn, &object_write.object)?;
                 derived_object_ids.push(object_write.object.derived_object_id.clone());
-
-                for link in &object_write.evidence_links {
-                    derivation::insert_evidence_link(&tx.conn, link)?;
-                    evidence_links_written += 1;
-                }
             }
 
             for link in &attempt.archive_links {
@@ -82,7 +76,6 @@ impl DerivedMetadataWriteStore for OracleDerivedMetadataStore {
             Ok(DerivationWriteResult {
                 derivation_run_id: attempt.run.derivation_run_id.clone(),
                 derived_object_ids,
-                evidence_links_written,
             })
         })();
 

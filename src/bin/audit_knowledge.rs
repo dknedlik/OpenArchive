@@ -344,12 +344,10 @@ fn load_objects(
                 o.title,
                 o.body_text,
                 o.object_json::text,
-                count(e.evidence_link_id)::bigint as evidence_count
+                1::bigint as evidence_count
            from oa_derived_object o
-           left join oa_evidence_link e on e.derived_object_id = o.derived_object_id
           where o.derivation_run_id = any($1)
             and o.object_status = 'active'
-          group by o.derived_object_id
           order by o.created_at",
         &[&run_ids],
     )?;

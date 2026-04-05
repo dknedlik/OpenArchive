@@ -14,8 +14,8 @@ use open_archive::storage::types::{
     ArtifactExtractPayload, ArtifactExtractionResult, ArtifactReconcilePayload, CandidateEntity,
     ClaimedJob, EnrichmentTier, LoadedArtifactForEnrichment, LoadedArtifactRecord,
     LoadedParticipant, LoadedSegment, NewEnrichmentBatch, NewEnrichmentJob,
-    PersistedEnrichmentBatch, ReconciliationDecision, ReconciliationDecisionKind,
-    RetrievalResultSet, RetryOutcome, SourceType,
+    PersistedEnrichmentBatch, ReconciliationDecision, ReconciliationDecisionKind, RetryOutcome,
+    SourceType,
 };
 use open_archive::storage::{
     ArchiveRetrievalStore, ArtifactListItem, ArtifactReadStore, DerivationWriteResult,
@@ -136,17 +136,15 @@ fn test_worker_persists_stub_outputs_and_completes_job() {
 fn test_worker_fails_job_when_factory_rejects_claimed_tier() {
     let config = test_config(1);
     let mut claimed_job = valid_claimed_job();
-    claimed_job.enrichment_tier = EnrichmentTier::Quality;
+    claimed_job.enrichment_tier = EnrichmentTier::Default;
 
     let job_store = Arc::new(SingleJobStore::new(claimed_job));
     let read_store = Arc::new(FixedReadStore::with_sample_artifact());
-    let retrieval_store = Arc::new(MockRetrievalStore);
     let state_store = Arc::new(MockStateStore::default());
     let derived_store = Arc::new(MockDerivedStore::default());
     let shutdown = ShutdownToken::new();
     let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
     let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
-    let retrieval_store_trait: Arc<dyn ArchiveRetrievalServiceApi> = retrieval_store;
     let state_store_trait: Arc<dyn EnrichmentStateStore> = state_store;
     let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store;
 
@@ -159,9 +157,9 @@ fn test_worker_fails_job_when_factory_rejects_claimed_tier() {
         EnrichmentPipelineResources {
             job_store: job_store_trait,
             read_store: read_store_trait,
-            retrieval_service: retrieval_store_trait,
             state_store: state_store_trait,
             derived_store: derived_store_trait,
+            cross_artifact_store: None,
             embedding_store: None,
             embedding_provider: None,
         },
@@ -183,13 +181,11 @@ fn test_worker_reschedules_quota_failures_without_consuming_attempts() {
     let config = test_config(1);
     let job_store = Arc::new(SingleJobStore::new(valid_claimed_job()));
     let read_store = Arc::new(FixedReadStore::with_sample_artifact());
-    let retrieval_store = Arc::new(MockRetrievalStore);
     let state_store = Arc::new(MockStateStore::default());
     let derived_store = Arc::new(MockDerivedStore::default());
     let shutdown = ShutdownToken::new();
     let job_store_trait: Arc<dyn EnrichmentJobLifecycleStore> = job_store.clone();
     let read_store_trait: Arc<dyn ArtifactReadStore> = read_store;
-    let retrieval_store_trait: Arc<dyn ArchiveRetrievalServiceApi> = retrieval_store;
     let state_store_trait: Arc<dyn EnrichmentStateStore> = state_store;
     let derived_store_trait: Arc<dyn DerivedMetadataWriteStore> = derived_store;
 
@@ -202,9 +198,9 @@ fn test_worker_reschedules_quota_failures_without_consuming_attempts() {
         EnrichmentPipelineResources {
             job_store: job_store_trait,
             read_store: read_store_trait,
-            retrieval_service: retrieval_store_trait,
             state_store: state_store_trait,
             derived_store: derived_store_trait,
+            cross_artifact_store: None,
             embedding_store: None,
             embedding_provider: None,
         },
@@ -335,22 +331,20 @@ fn test_worker_fails_job_when_payload_source_type_is_invalid() {
 fn test_entity_only_reconciliation_runs_processor() {
     let config = test_config(1);
     let extraction_result_id = "extract-entity-only";
-    let retrieval_result_set_id = "retrieval-entity-only";
     let claimed_job = ClaimedJob {
         job_id: "job-reconcile-1".to_string(),
         artifact_id: "artifact-1".to_string(),
         job_type: JobType::ArtifactReconcile,
-        enrichment_tier: EnrichmentTier::Standard,
+        enrichment_tier: EnrichmentTier::Default,
         spawned_by_job_id: Some("job-retrieve-1".to_string()),
         attempt_count: 1,
         max_attempts: 3,
-        required_capabilities: vec!["text".to_string(), "archive_retrieval".to_string()],
+        required_capabilities: vec!["text".to_string()],
         payload_json: ArtifactReconcilePayload::new_v1(
             "artifact-1",
             "import-1",
             SourceType::ChatGptExport,
             extraction_result_id,
-            retrieval_result_set_id,
         )
         .to_json(),
     };
@@ -368,35 +362,18 @@ fn test_entity_only_reconciliation_runs_processor() {
             pipeline_version: "v1".to_string(),
             summary_title: Some("Entity-only artifact".to_string()),
             summary_body_text: "Entity-only artifact summary".to_string(),
-            summary_evidence_segment_ids: vec!["segment-1".to_string()],
             classifications: Vec::new(),
             memories: Vec::new(),
             entities: vec![CandidateEntity {
                 entity_key: "enceladus".to_string(),
                 display_name: "Enceladus".to_string(),
                 entity_type: "astronomical_body".to_string(),
-                evidence_segment_ids: vec!["segment-1".to_string()],
             }],
             relationships: Vec::new(),
-            retrieval_intents: Vec::new(),
             status: "completed".to_string(),
             error_message: None,
         })
         .expect("save extraction result");
-    state_store
-        .save_retrieval_result_set(&RetrievalResultSet {
-            retrieval_result_set_id: retrieval_result_set_id.to_string(),
-            artifact_id: "artifact-1".to_string(),
-            job_id: "job-retrieve-1".to_string(),
-            extraction_result_id: extraction_result_id.to_string(),
-            pipeline_name: "archive_retrieval".to_string(),
-            pipeline_version: "v1".to_string(),
-            intents: Vec::new(),
-            results: Vec::new(),
-            status: "completed".to_string(),
-            error_message: None,
-        })
-        .expect("save retrieval result set");
 
     let reconcile_calls = Arc::new(AtomicUsize::new(0));
     let shutdown = ShutdownToken::new();
@@ -412,9 +389,9 @@ fn test_entity_only_reconciliation_runs_processor() {
         EnrichmentPipelineResources {
             job_store: job_store.clone(),
             read_store,
-            retrieval_service: Arc::new(MockRetrievalStore),
             state_store: state_store.clone(),
             derived_store: derived_store.clone(),
+            cross_artifact_store: None,
             embedding_store: None,
             embedding_provider: None,
         },
@@ -473,7 +450,7 @@ fn valid_claimed_job() -> ClaimedJob {
         job_id: "job-1".to_string(),
         artifact_id: "artifact-1".to_string(),
         job_type: JobType::ArtifactExtract,
-        enrichment_tier: EnrichmentTier::Standard,
+        enrichment_tier: EnrichmentTier::Default,
         spawned_by_job_id: None,
         attempt_count: 1,
         max_attempts: 3,
@@ -860,16 +837,10 @@ impl DerivedMetadataWriteStore for MockDerivedStore {
             .iter()
             .map(|object| object.object.derived_object_id.clone())
             .collect::<Vec<_>>();
-        let evidence_links_written = attempt
-            .objects
-            .iter()
-            .map(|object| object.evidence_links.len())
-            .sum();
         self.attempts.lock().unwrap().push(attempt);
         Ok(DerivationWriteResult {
             derivation_run_id,
             derived_object_ids,
-            evidence_links_written,
         })
     }
 }
@@ -902,7 +873,6 @@ impl ArchiveRetrievalServiceApi for MockRetrievalStore {
 #[derive(Default)]
 struct MockStateStore {
     extraction_results: Mutex<HashMap<String, ArtifactExtractionResult>>,
-    retrieval_result_sets: Mutex<HashMap<String, RetrievalResultSet>>,
     reconciliation_decisions: Mutex<HashMap<String, Vec<ReconciliationDecision>>>,
 }
 
@@ -924,26 +894,6 @@ impl EnrichmentStateStore for MockStateStore {
             .lock()
             .unwrap()
             .get(extraction_result_id)
-            .cloned())
-    }
-
-    fn save_retrieval_result_set(&self, result_set: &RetrievalResultSet) -> StorageResult<()> {
-        self.retrieval_result_sets.lock().unwrap().insert(
-            result_set.retrieval_result_set_id.clone(),
-            result_set.clone(),
-        );
-        Ok(())
-    }
-
-    fn load_retrieval_result_set(
-        &self,
-        retrieval_result_set_id: &str,
-    ) -> StorageResult<Option<RetrievalResultSet>> {
-        Ok(self
-            .retrieval_result_sets
-            .lock()
-            .unwrap()
-            .get(retrieval_result_set_id)
             .cloned())
     }
 
@@ -1097,7 +1047,6 @@ impl ReconciliationProcessor for EntityOnlyReconciliationProcessor {
             target_key: "enceladus".to_string(),
             matched_object_id: Some("entity-1".to_string()),
             rationale: "Existing entity found".to_string(),
-            evidence_segment_ids: vec!["segment-1".to_string()],
         }])
     }
 }

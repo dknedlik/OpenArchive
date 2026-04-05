@@ -54,11 +54,9 @@ pub trait DerivedMetadataHarness {
         derivation_run_id: &str,
         status: &str,
     ) -> i64;
-    fn count_evidence_links_for_objects(&self, derived_object_ids: &[String]) -> i64;
     fn fetch_object_json(&self, derived_object_id: &str) -> Value;
     fn count_derivation_run_by_id(&self, derivation_run_id: &str) -> i64;
     fn count_derived_object_by_id(&self, derived_object_id: &str) -> i64;
-    fn count_evidence_links_for_object(&self, derived_object_id: &str) -> i64;
     fn count_derived_objects_for_artifact_with_status(
         &self,
         artifact_id: &str,
@@ -116,11 +114,9 @@ fn _touch_derived_harness_api(
         let _ = (&run.artifact_id, &run.run_type, &run.run_status);
         let _ = harness.count_derived_objects_for_run(derivation_run_id);
         let _ = harness.count_derived_objects_for_run_with_status(derivation_run_id, "active");
-        let _ = harness.count_evidence_links_for_objects(&[derived_object_id.to_string()]);
         let _ = harness.fetch_object_json(derived_object_id);
         let _ = harness.count_derivation_run_by_id(derivation_run_id);
         let _ = harness.count_derived_object_by_id(derived_object_id);
-        let _ = harness.count_evidence_links_for_object(derived_object_id);
         let _ =
             harness.count_derived_objects_for_artifact_with_status(&fixture.artifact_id, "active");
     }

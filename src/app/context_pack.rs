@@ -1,15 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::error::{OpenArchiveError, Result};
 use crate::storage::{
     ArtifactContextPackReadStore, CrossArtifactReadStore, DerivedObjectType, EnrichmentStatus,
-    EvidenceRole, ImportedNoteLinkRecord, ImportedNoteMetadata, ScopeType, SourceType,
-    SupportStrength,
+    ImportedNoteLinkRecord, ImportedNoteMetadata, ScopeType, SourceType,
 };
-
-/// Maximum characters to include in an evidence text excerpt.
-const EXCERPT_MAX_CHARS: usize = 200;
 
 // ---------------------------------------------------------------------------
 // Request
@@ -36,15 +32,6 @@ pub enum ContextPackReadiness {
     Ready,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct EvidenceExcerpt {
-    pub segment_id: String,
-    pub evidence_role: EvidenceRole,
-    pub support_strength: SupportStrength,
-    pub rank: i32,
-    pub text_excerpt: String,
-}
-
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ContextDerivedEntry {
     pub derived_object_id: String,
@@ -52,32 +39,16 @@ pub struct ContextDerivedEntry {
     pub title: Option<String>,
     pub body_text: Option<String>,
     pub scope_type: ScopeType,
-    pub evidence: Vec<EvidenceExcerpt>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub suppressed_variant_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OmissionReason {
-    /// Segment exists but no derived object references it via evidence links.
-    NoEvidenceLinks,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct PackOmission {
-    pub reason: OmissionReason,
-    pub count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PackProvenance {
     pub total_segments: usize,
-    pub referenced_segments: usize,
     /// True when the artifact's enrichment has not yet started or is still
     /// running.  This is a pack-level signal — not derived from row counts.
     pub enrichment_incomplete: bool,
-    pub omissions: Vec<PackOmission>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -148,40 +119,6 @@ impl ContextPackService {
             None => return Ok(None),
         };
 
-        // Segment text lookup for evidence excerpts.
-        let segment_text: HashMap<&str, &str> = material
-            .segments
-            .iter()
-            .map(|s| (s.segment_id.as_str(), s.text_content.as_str()))
-            .collect();
-
-        // Group evidence links by derived_object_id.
-        let mut evidence_by_object: HashMap<&str, Vec<EvidenceExcerpt>> = HashMap::new();
-        let mut referenced_segment_ids: HashSet<&str> = HashSet::new();
-
-        for link in &material.evidence_links {
-            referenced_segment_ids.insert(link.segment_id.as_str());
-
-            let text = segment_text.get(link.segment_id.as_str()).unwrap_or(&"");
-            let text_excerpt = truncate_to_chars(text, EXCERPT_MAX_CHARS).to_string();
-
-            evidence_by_object
-                .entry(link.derived_object_id.as_str())
-                .or_default()
-                .push(EvidenceExcerpt {
-                    segment_id: link.segment_id.clone(),
-                    evidence_role: link.evidence_role,
-                    support_strength: link.support_strength,
-                    rank: link.evidence_rank,
-                    text_excerpt,
-                });
-        }
-
-        // Sort each evidence group by rank.
-        for excerpts in evidence_by_object.values_mut() {
-            excerpts.sort_by_key(|e| e.rank);
-        }
-
         // Bucket derived objects by type.
         let mut summaries = Vec::new();
         let mut classifications = Vec::new();
@@ -190,17 +127,12 @@ impl ContextPackService {
         let mut entities = Vec::new();
 
         for obj in &material.derived_objects {
-            let evidence = evidence_by_object
-                .remove(obj.derived_object_id.as_str())
-                .unwrap_or_default();
-
             let entry = ContextDerivedEntry {
                 derived_object_id: obj.derived_object_id.clone(),
                 derived_object_type: obj.derived_object_type,
                 title: obj.title.clone(),
                 body_text: obj.body_text.clone(),
                 scope_type: obj.scope_type,
-                evidence,
                 suppressed_variant_ids: Vec::new(),
             };
 
@@ -231,27 +163,14 @@ impl ContextPackService {
 
         // Provenance.
         let total_segments = material.segments.len();
-        let referenced_segments = referenced_segment_ids.len();
-        let unreferenced = total_segments.saturating_sub(referenced_segments);
-
         let enrichment_incomplete = matches!(
             material.artifact.enrichment_status,
             EnrichmentStatus::Pending | EnrichmentStatus::Running
         );
 
-        let mut omissions = Vec::new();
-        if unreferenced > 0 && !enrichment_incomplete {
-            omissions.push(PackOmission {
-                reason: OmissionReason::NoEvidenceLinks,
-                count: unreferenced,
-            });
-        }
-
         let provenance = PackProvenance {
             total_segments,
-            referenced_segments,
             enrichment_incomplete,
-            omissions,
         };
 
         // Cross-artifact related objects lookup.
@@ -347,14 +266,6 @@ fn compute_readiness(
     }
 }
 
-/// Truncate a string to at most `max` characters (not bytes).
-fn truncate_to_chars(s: &str, max: usize) -> &str {
-    match s.char_indices().nth(max) {
-        Some((byte_offset, _)) => &s[..byte_offset],
-        None => s,
-    }
-}
-
 impl ContextPackService {
     fn deduplicate_memories(&self, memories: Vec<ContextDerivedEntry>) -> Vec<ContextDerivedEntry> {
         cluster_exact_memory_duplicates(memories)
@@ -399,14 +310,6 @@ fn merge_context_memory(target: &mut ContextDerivedEntry, incoming: &ContextDeri
     {
         target.title = incoming.title.clone();
     }
-    for evidence in &incoming.evidence {
-        if !target.evidence.iter().any(|existing| {
-            existing.segment_id == evidence.segment_id && existing.rank == evidence.rank
-        }) {
-            target.evidence.push(evidence.clone());
-        }
-    }
-    target.evidence.sort_by_key(|e| e.rank);
     if incoming.derived_object_id != target.derived_object_id
         && !target
             .suppressed_variant_ids
@@ -454,8 +357,8 @@ mod tests {
     use super::*;
     use crate::error::StorageResult;
     use crate::storage::{
-        ArtifactContextDerivedObject, ArtifactContextEvidenceLink, ArtifactContextPackMaterial,
-        ArtifactContextPackReadStore, ArtifactDetailRecord, ArtifactDetailSegment,
+        ArtifactContextDerivedObject, ArtifactContextPackMaterial, ArtifactContextPackReadStore,
+        ArtifactDetailRecord, ArtifactDetailSegment,
     };
 
     struct MockPackReadStore {
@@ -503,22 +406,6 @@ mod tests {
         }
     }
 
-    fn make_evidence_link(
-        id: &str,
-        object_id: &str,
-        segment_id: &str,
-        rank: i32,
-    ) -> ArtifactContextEvidenceLink {
-        ArtifactContextEvidenceLink {
-            evidence_link_id: id.to_string(),
-            derived_object_id: object_id.to_string(),
-            segment_id: segment_id.to_string(),
-            evidence_role: EvidenceRole::PrimarySupport,
-            support_strength: SupportStrength::Strong,
-            evidence_rank: rank,
-        }
-    }
-
     fn service_with(material: Option<ArtifactContextPackMaterial>) -> ContextPackService {
         ContextPackService::new(Arc::new(MockPackReadStore { material }))
     }
@@ -544,19 +431,16 @@ mod tests {
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
             derived_objects: vec![],
-            evidence_links: vec![],
         }));
 
         let pack = svc.assemble(request()).unwrap().unwrap();
         assert_eq!(pack.readiness, ContextPackReadiness::NotReady);
         assert!(pack.provenance.enrichment_incomplete);
-        // P1: unreferenced segments should NOT be reported as NoEvidenceLinks
-        // when enrichment hasn't produced evidence yet.
-        assert!(pack.provenance.omissions.is_empty());
+        assert_eq!(pack.provenance.total_segments, 1);
     }
 
     #[test]
-    fn pending_enrichment_does_not_attribute_gaps_to_no_evidence_links() {
+    fn running_enrichment_reports_incomplete_provenance() {
         let svc = service_with(Some(ArtifactContextPackMaterial {
             artifact: make_artifact(EnrichmentStatus::Running),
             segments: vec![
@@ -567,16 +451,11 @@ mod tests {
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
             derived_objects: vec![],
-            evidence_links: vec![],
         }));
 
         let pack = svc.assemble(request()).unwrap().unwrap();
         assert!(pack.provenance.enrichment_incomplete);
         assert_eq!(pack.provenance.total_segments, 3);
-        assert_eq!(pack.provenance.referenced_segments, 0);
-        // All 3 segments are unreferenced, but omissions should be empty
-        // because the gap is due to enrichment not having run, not missing links.
-        assert!(pack.provenance.omissions.is_empty());
     }
 
     #[test]
@@ -587,7 +466,6 @@ mod tests {
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
             derived_objects: vec![],
-            evidence_links: vec![],
         }));
 
         let pack = svc.assemble(request()).unwrap().unwrap();
@@ -606,7 +484,6 @@ mod tests {
                 "cls-1",
                 DerivedObjectType::Classification,
             )],
-            evidence_links: vec![make_evidence_link("el-1", "cls-1", "seg-1", 1)],
         }));
 
         let pack = svc.assemble(request()).unwrap().unwrap();
@@ -623,7 +500,6 @@ mod tests {
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
             derived_objects: vec![make_derived_object("sum-1", DerivedObjectType::Summary)],
-            evidence_links: vec![make_evidence_link("el-1", "sum-1", "seg-1", 1)],
         }));
 
         let pack = svc.assemble(request()).unwrap().unwrap();
@@ -632,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn ready_when_completed_with_summary_and_evidence() {
+    fn ready_when_completed_with_summary() {
         let svc = service_with(Some(ArtifactContextPackMaterial {
             artifact: make_artifact(EnrichmentStatus::Completed),
             segments: vec![
@@ -645,71 +521,14 @@ mod tests {
                 make_derived_object("sum-1", DerivedObjectType::Summary),
                 make_derived_object("mem-1", DerivedObjectType::Memory),
             ],
-            evidence_links: vec![
-                make_evidence_link("el-1", "sum-1", "seg-1", 1),
-                make_evidence_link("el-2", "mem-1", "seg-2", 1),
-            ],
         }));
 
         let pack = svc.assemble(request()).unwrap().unwrap();
         assert_eq!(pack.readiness, ContextPackReadiness::Ready);
         assert_eq!(pack.summaries.len(), 1);
         assert_eq!(pack.memories.len(), 1);
-        assert_eq!(pack.summaries[0].evidence.len(), 1);
-        assert_eq!(
-            pack.summaries[0].evidence[0].text_excerpt,
-            "first segment text"
-        );
-    }
-
-    #[test]
-    fn evidence_excerpts_are_truncated_by_char_count() {
-        // Use multi-byte characters to verify we count chars, not bytes.
-        let long_text = "\u{00e9}".repeat(300); // 'é' is 2 bytes in UTF-8
-        let svc = service_with(Some(ArtifactContextPackMaterial {
-            artifact: make_artifact(EnrichmentStatus::Completed),
-            segments: vec![make_segment("seg-1", &long_text)],
-            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
-            inbound_note_links: Vec::new(),
-            derived_objects: vec![make_derived_object("sum-1", DerivedObjectType::Summary)],
-            evidence_links: vec![make_evidence_link("el-1", "sum-1", "seg-1", 1)],
-        }));
-
-        let pack = svc.assemble(request()).unwrap().unwrap();
-        let excerpt = &pack.summaries[0].evidence[0].text_excerpt;
-        assert_eq!(excerpt.chars().count(), EXCERPT_MAX_CHARS);
-        // Byte length should be 2x char count for 2-byte chars.
-        assert_eq!(excerpt.len(), EXCERPT_MAX_CHARS * 2);
-    }
-
-    #[test]
-    fn provenance_counts_unreferenced_segments() {
-        let svc = service_with(Some(ArtifactContextPackMaterial {
-            artifact: make_artifact(EnrichmentStatus::Completed),
-            segments: vec![
-                make_segment("seg-1", "referenced"),
-                make_segment("seg-2", "also referenced"),
-                make_segment("seg-3", "unreferenced"),
-                make_segment("seg-4", "also unreferenced"),
-            ],
-            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
-            inbound_note_links: Vec::new(),
-            derived_objects: vec![make_derived_object("sum-1", DerivedObjectType::Summary)],
-            evidence_links: vec![
-                make_evidence_link("el-1", "sum-1", "seg-1", 1),
-                make_evidence_link("el-2", "sum-1", "seg-2", 2),
-            ],
-        }));
-
-        let pack = svc.assemble(request()).unwrap().unwrap();
-        assert_eq!(pack.provenance.total_segments, 4);
-        assert_eq!(pack.provenance.referenced_segments, 2);
-        assert_eq!(pack.provenance.omissions.len(), 1);
-        assert_eq!(
-            pack.provenance.omissions[0].reason,
-            OmissionReason::NoEvidenceLinks
-        );
-        assert_eq!(pack.provenance.omissions[0].count, 2);
+        assert_eq!(pack.provenance.total_segments, 2);
+        assert!(!pack.provenance.enrichment_incomplete);
     }
 
     #[test]
@@ -725,7 +544,6 @@ mod tests {
                 make_derived_object("mem-1", DerivedObjectType::Memory),
                 make_derived_object("rel-1", DerivedObjectType::Relationship),
             ],
-            evidence_links: vec![],
         }));
 
         let pack = svc.assemble(request()).unwrap().unwrap();
@@ -747,7 +565,6 @@ mod tests {
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
             derived_objects: vec![make_derived_object("mem-1", DerivedObjectType::Memory)],
-            evidence_links: vec![],
         }));
 
         let pack = svc.assemble(request()).unwrap().unwrap();
@@ -762,7 +579,6 @@ mod tests {
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
             derived_objects: vec![],
-            evidence_links: vec![],
         }));
 
         let pack = svc.assemble(request()).unwrap().unwrap();
@@ -770,29 +586,38 @@ mod tests {
     }
 
     #[test]
-    fn evidence_sorted_by_rank() {
+    fn memory_dedup_suppresses_variants() {
         let svc = service_with(Some(ArtifactContextPackMaterial {
             artifact: make_artifact(EnrichmentStatus::Completed),
-            segments: vec![
-                make_segment("seg-1", "first"),
-                make_segment("seg-2", "second"),
-            ],
+            segments: vec![make_segment("seg-1", "text")],
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
-            derived_objects: vec![make_derived_object("sum-1", DerivedObjectType::Summary)],
-            evidence_links: vec![
-                make_evidence_link("el-2", "sum-1", "seg-2", 2),
-                make_evidence_link("el-1", "sum-1", "seg-1", 1),
+            derived_objects: vec![
+                ArtifactContextDerivedObject {
+                    derived_object_id: "mem-1".to_string(),
+                    derived_object_type: DerivedObjectType::Memory,
+                    title: Some("Alice prefers tea".to_string()),
+                    body_text: Some("Alice prefers tea over coffee.".to_string()),
+                    scope_id: "art-1".to_string(),
+                    scope_type: ScopeType::Artifact,
+                    candidate_key: None,
+                },
+                ArtifactContextDerivedObject {
+                    derived_object_id: "mem-2".to_string(),
+                    derived_object_type: DerivedObjectType::Memory,
+                    title: Some("alice prefers tea".to_string()),
+                    body_text: Some("Alice prefers tea over coffee".to_string()),
+                    scope_id: "art-1".to_string(),
+                    scope_type: ScopeType::Artifact,
+                    candidate_key: None,
+                },
             ],
         }));
 
         let pack = svc.assemble(request()).unwrap().unwrap();
-        let evidence = &pack.summaries[0].evidence;
-        assert_eq!(evidence.len(), 2);
-        assert_eq!(evidence[0].rank, 1);
-        assert_eq!(evidence[0].segment_id, "seg-1");
-        assert_eq!(evidence[1].rank, 2);
-        assert_eq!(evidence[1].segment_id, "seg-2");
+        assert_eq!(pack.memories.len(), 1);
+        assert_eq!(pack.memories[0].derived_object_id, "mem-1");
+        assert_eq!(pack.memories[0].suppressed_variant_ids, vec!["mem-2"]);
     }
 
     #[test]
@@ -853,7 +678,6 @@ mod tests {
                 locator_json: None,
             }],
             derived_objects: vec![],
-            evidence_links: vec![],
         }));
 
         let pack = svc.assemble(request()).unwrap().unwrap();

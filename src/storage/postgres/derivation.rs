@@ -4,7 +4,7 @@ use postgres::Client;
 
 use crate::error::{DbError, StorageError, StorageResult};
 use crate::storage::derivation_store::WriteDerivationAttempt;
-use crate::storage::types::{NewDerivedObject, NewEvidenceLink, ScopeType};
+use crate::storage::types::{NewDerivedObject, ScopeType};
 use crate::storage::writeback_store::NewArchiveLink;
 
 fn pg_error(connection_string: &str, source: postgres::Error) -> StorageError {
@@ -101,38 +101,6 @@ pub fn supersede_active_derived_objects(
     Ok(())
 }
 
-pub fn insert_evidence_link(
-    client: &mut Client,
-    connection_string: &str,
-    link: &NewEvidenceLink,
-) -> StorageResult<()> {
-    let evidence_rank =
-        i32::try_from(link.evidence_rank).map_err(|_| StorageError::InvalidDerivationWrite {
-            detail: format!(
-                "evidence link {} rank {} exceeds Postgres INTEGER range",
-                link.evidence_link_id, link.evidence_rank
-            ),
-        })?;
-
-    client
-        .execute(
-            "INSERT INTO oa_evidence_link \
-             (evidence_link_id, derived_object_id, segment_id, evidence_role, evidence_rank, support_strength) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
-            &[
-                &link.evidence_link_id,
-                &link.derived_object_id,
-                &link.segment_id,
-                &link.evidence_role.as_str(),
-                &evidence_rank,
-                &link.support_strength.as_str(),
-            ],
-        )
-        .map_err(|source| pg_error(connection_string, source))?;
-
-    Ok(())
-}
-
 pub fn insert_archive_link(
     client: &mut Client,
     connection_string: &str,
@@ -208,27 +176,6 @@ pub fn validate_derivation_attempt(
             });
         }
         validate_scope(client, connection_string, artifact_id, object)?;
-
-        for link in &object_write.evidence_links {
-            if link.derived_object_id != object.derived_object_id {
-                return Err(StorageError::InvalidDerivationWrite {
-                    detail: format!(
-                        "evidence link {} targets derived object {} but enclosing object is {}",
-                        link.evidence_link_id, link.derived_object_id, object.derived_object_id
-                    ),
-                });
-            }
-            let segment_artifact_id =
-                load_segment_artifact_id(client, connection_string, &link.segment_id)?;
-            if segment_artifact_id.as_deref() != Some(artifact_id.as_str()) {
-                return Err(StorageError::InvalidDerivationWrite {
-                    detail: format!(
-                        "evidence link {} references segment {} outside artifact {}",
-                        link.evidence_link_id, link.segment_id, artifact_id
-                    ),
-                });
-            }
-        }
     }
 
     for link in &attempt.archive_links {

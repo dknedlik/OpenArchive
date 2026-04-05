@@ -3,12 +3,11 @@ use open_archive::object_store::StoredObject;
 use open_archive::storage::{
     ArtifactClass, ArtifactExtractPayload, ArtifactStatus, ClassificationObjectJson,
     DerivationRunStatus, DerivationRunType, DerivedMetadataWriteStore, DerivedObjectPayload,
-    EnrichmentStatus, EvidenceRole, ImportStatus, InputScopeType, JobStatus, JobType,
-    MemoryObjectJson, NewArtifact, NewDerivationRun, NewDerivedObject, NewEnrichmentJob,
-    NewEvidenceLink, NewImport, NewImportObjectRef, NewParticipant, NewSegment, ObjectStatus,
-    OriginKind, ParticipantRole, PayloadFormat, ScopeType, SegmentType, SourceType,
-    SummaryObjectJson, SupportStrength, VisibilityStatus, WriteArtifactSet, WriteDerivationAttempt,
-    WriteDerivedObject, WriteImportSet,
+    EnrichmentStatus, ImportStatus, InputScopeType, JobStatus, JobType, MemoryObjectJson,
+    NewArtifact, NewDerivationRun, NewDerivedObject, NewEnrichmentJob, NewImport,
+    NewImportObjectRef, NewParticipant, NewSegment, ObjectStatus, OriginKind, ParticipantRole,
+    PayloadFormat, ScopeType, SegmentType, SourceType, SummaryObjectJson, VisibilityStatus,
+    WriteArtifactSet, WriteDerivationAttempt, WriteDerivedObject, WriteImportSet,
 };
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -205,7 +204,7 @@ pub fn make_test_import_fixture_with_max_attempts(
                 job_id: job_id.clone(),
                 artifact_id: artifact_id.clone(),
                 job_type: JobType::ArtifactExtract,
-                enrichment_tier: open_archive::storage::EnrichmentTier::Standard,
+                enrichment_tier: open_archive::storage::EnrichmentTier::Default,
                 spawned_by_job_id: None,
                 job_status: JobStatus::Pending,
                 max_attempts,
@@ -230,7 +229,7 @@ pub fn seed_postgres_stub_derivations(
     config: &PostgresConfig,
     artifact_id: &str,
     job_id: &str,
-    segment_ids: &[String],
+    _segment_ids: &[String],
 ) {
     let store = open_archive::storage::PostgresDerivedMetadataStore::new(config.clone());
     let derivation_run_id = format!("run-{artifact_id}");
@@ -282,14 +281,6 @@ pub fn seed_postgres_stub_derivations(
                             }),
                         },
                     },
-                    evidence_links: vec![NewEvidenceLink {
-                        evidence_link_id: format!("evidence-summary-{artifact_id}"),
-                        derived_object_id: summary_object_id,
-                        segment_id: segment_ids[0].clone(),
-                        evidence_role: EvidenceRole::PrimarySupport,
-                        evidence_rank: 1,
-                        support_strength: SupportStrength::Strong,
-                    }],
                 },
                 WriteDerivedObject {
                     object: NewDerivedObject {
@@ -314,14 +305,6 @@ pub fn seed_postgres_stub_derivations(
                             },
                         },
                     },
-                    evidence_links: vec![NewEvidenceLink {
-                        evidence_link_id: format!("evidence-memory-{artifact_id}"),
-                        derived_object_id: memory_object_id,
-                        segment_id: segment_ids[1].clone(),
-                        evidence_role: EvidenceRole::PrimarySupport,
-                        evidence_rank: 1,
-                        support_strength: SupportStrength::Strong,
-                    }],
                 },
             ],
             archive_links: Vec::new(),
@@ -394,24 +377,6 @@ pub(super) fn fixture_derivation_attempt(
                         }),
                     },
                 },
-                evidence_links: vec![
-                    NewEvidenceLink {
-                        evidence_link_id: format!("evidence-{}-1", summary_id),
-                        derived_object_id: summary_id.to_string(),
-                        segment_id: fixture.segment_ids[0].clone(),
-                        evidence_role: EvidenceRole::PrimarySupport,
-                        evidence_rank: 1,
-                        support_strength: SupportStrength::Strong,
-                    },
-                    NewEvidenceLink {
-                        evidence_link_id: format!("evidence-{}-2", summary_id),
-                        derived_object_id: summary_id.to_string(),
-                        segment_id: fixture.segment_ids[2].clone(),
-                        evidence_role: EvidenceRole::SecondarySupport,
-                        evidence_rank: 2,
-                        support_strength: SupportStrength::Medium,
-                    },
-                ],
             },
             WriteDerivedObject {
                 object: NewDerivedObject {
@@ -434,14 +399,6 @@ pub(super) fn fixture_derivation_attempt(
                         },
                     },
                 },
-                evidence_links: vec![NewEvidenceLink {
-                    evidence_link_id: format!("evidence-{}-1", classification_id),
-                    derived_object_id: classification_id.to_string(),
-                    segment_id: fixture.segment_ids[1].clone(),
-                    evidence_role: EvidenceRole::PrimarySupport,
-                    evidence_rank: 1,
-                    support_strength: SupportStrength::Strong,
-                }],
             },
             WriteDerivedObject {
                 object: NewDerivedObject {
@@ -466,14 +423,6 @@ pub(super) fn fixture_derivation_attempt(
                         },
                     },
                 },
-                evidence_links: vec![NewEvidenceLink {
-                    evidence_link_id: format!("evidence-{}-1", memory_id),
-                    derived_object_id: memory_id.to_string(),
-                    segment_id: fixture.segment_ids[2].clone(),
-                    evidence_role: EvidenceRole::PrimarySupport,
-                    evidence_rank: 1,
-                    support_strength: SupportStrength::Strong,
-                }],
             },
         ],
         archive_links: Vec::new(),

@@ -430,16 +430,6 @@ pub enum StorageError {
         source: Box<oracle::Error>,
     },
 
-    #[error(
-        "failed to insert evidence link {evidence_link_id} for derived object {derived_object_id}"
-    )]
-    InsertEvidenceLink {
-        evidence_link_id: String,
-        derived_object_id: String,
-        #[source]
-        source: Box<oracle::Error>,
-    },
-
     #[error("invalid derivation write: {detail}")]
     InvalidDerivationWrite { detail: String },
 
@@ -534,12 +524,6 @@ pub enum StorageError {
 
     #[error("invalid scope_type '{value}' while loading context for {artifact_id}")]
     InvalidScopeType { artifact_id: String, value: String },
-
-    #[error("invalid evidence_role '{value}' while loading context for {artifact_id}")]
-    InvalidEvidenceRole { artifact_id: String, value: String },
-
-    #[error("invalid support_strength '{value}' while loading context for {artifact_id}")]
-    InvalidSupportStrength { artifact_id: String, value: String },
 
     #[error(
         "failed to read confidence_score for derived object {derived_object_id} while loading artifact {artifact_id}"

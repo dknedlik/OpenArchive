@@ -254,17 +254,6 @@ impl DerivedMetadataHarness for PostgresHarness {
             .get(0)
     }
 
-    fn count_evidence_links_for_objects(&self, derived_object_ids: &[String]) -> i64 {
-        let mut client = open_archive::postgres_db::connect(&self.0).expect("connect");
-        client
-            .query_one(
-                "SELECT COUNT(*)::bigint FROM oa_evidence_link WHERE derived_object_id = ANY($1)",
-                &[&derived_object_ids],
-            )
-            .expect("evidence count")
-            .get(0)
-    }
-
     fn fetch_object_json(&self, derived_object_id: &str) -> Value {
         let mut client = open_archive::postgres_db::connect(&self.0).expect("connect");
         let payload: String = client
@@ -299,17 +288,6 @@ impl DerivedMetadataHarness for PostgresHarness {
             .get(0)
     }
 
-    fn count_evidence_links_for_object(&self, derived_object_id: &str) -> i64 {
-        let mut client = open_archive::postgres_db::connect(&self.0).expect("connect");
-        client
-            .query_one(
-                "SELECT COUNT(*)::bigint FROM oa_evidence_link WHERE derived_object_id = $1",
-                &[&derived_object_id],
-            )
-            .expect("evidence count")
-            .get(0)
-    }
-
     fn count_derived_objects_for_artifact_with_status(
         &self,
         artifact_id: &str,
@@ -328,23 +306,9 @@ impl DerivedMetadataHarness for PostgresHarness {
 
 #[test]
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
-fn writes_summary_classification_and_memory_with_evidence() {
+fn writes_summary_classification_and_memory() {
     let Some(harness) = harness() else { return };
-    contracts::contract_writes_summary_classification_and_memory_with_evidence(&harness);
-}
-
-#[test]
-#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
-fn rejects_cross_artifact_evidence_links_without_writing_rows() {
-    let Some(harness) = harness() else { return };
-    contracts::contract_rejects_cross_artifact_evidence_links_without_writing_rows(&harness);
-}
-
-#[test]
-#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
-fn rolls_back_partial_writes_when_evidence_insert_fails() {
-    let Some(harness) = harness() else { return };
-    contracts::contract_rolls_back_partial_writes_when_evidence_insert_fails(&harness);
+    contracts::contract_writes_summary_classification_and_memory(&harness);
 }
 
 #[test]

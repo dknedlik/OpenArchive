@@ -630,60 +630,6 @@ impl ScopeType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EvidenceRole {
-    PrimarySupport,
-    SecondarySupport,
-    ReductionInput,
-}
-
-impl EvidenceRole {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            EvidenceRole::PrimarySupport => "primary_support",
-            EvidenceRole::SecondarySupport => "secondary_support",
-            EvidenceRole::ReductionInput => "reduction_input",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "primary_support" => Some(Self::PrimarySupport),
-            "secondary_support" => Some(Self::SecondarySupport),
-            "reduction_input" => Some(Self::ReductionInput),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SupportStrength {
-    Strong,
-    Medium,
-    Weak,
-}
-
-impl SupportStrength {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            SupportStrength::Strong => "strong",
-            SupportStrength::Medium => "medium",
-            SupportStrength::Weak => "weak",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "strong" => Some(Self::Strong),
-            "medium" => Some(Self::Medium),
-            "weak" => Some(Self::Weak),
-            _ => None,
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // "New" structs — data needed to create one row, minus server-set fields
 // ---------------------------------------------------------------------------
@@ -1084,17 +1030,6 @@ pub struct NewDerivedObjectEmbedding {
     pub model_name: String,
     pub content_text_hash: String,
     pub embedding: Vec<f32>,
-}
-
-/// Data required to create one oa_evidence_link row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewEvidenceLink {
-    pub evidence_link_id: String,
-    pub derived_object_id: String,
-    pub segment_id: String,
-    pub evidence_role: EvidenceRole,
-    pub evidence_rank: i64,
-    pub support_strength: SupportStrength,
 }
 
 // ---------------------------------------------------------------------------

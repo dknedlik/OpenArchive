@@ -512,7 +512,6 @@ impl crate::storage::ArtifactContextPackReadStore for MockContextPackStore {
                 locator_json: None,
             }],
             derived_objects: vec![],
-            evidence_links: vec![],
         }))
     }
 }

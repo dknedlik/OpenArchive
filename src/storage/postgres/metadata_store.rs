@@ -178,7 +178,6 @@ impl DerivedMetadataWriteStore for PostgresDerivedMetadataStore {
             )?;
 
             let mut derived_object_ids = Vec::with_capacity(attempt.objects.len());
-            let mut evidence_links_written = 0usize;
             for object_write in &attempt.objects {
                 derivation::insert_derived_object(
                     &mut client,
@@ -186,15 +185,6 @@ impl DerivedMetadataWriteStore for PostgresDerivedMetadataStore {
                     &object_write.object,
                 )?;
                 derived_object_ids.push(object_write.object.derived_object_id.clone());
-
-                for link in &object_write.evidence_links {
-                    derivation::insert_evidence_link(
-                        &mut client,
-                        &self.config.connection_string,
-                        link,
-                    )?;
-                    evidence_links_written += 1;
-                }
             }
 
             for link in &attempt.archive_links {
@@ -204,7 +194,6 @@ impl DerivedMetadataWriteStore for PostgresDerivedMetadataStore {
             Ok(DerivationWriteResult {
                 derivation_run_id: attempt.run.derivation_run_id.clone(),
                 derived_object_ids,
-                evidence_links_written,
             })
         })();
 

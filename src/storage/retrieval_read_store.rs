@@ -1,7 +1,7 @@
 use crate::error::StorageResult;
 use crate::storage::types::{
-    DerivedObjectType, EnrichmentStatus, EvidenceRole, ImportedNoteLinkRecord,
-    ImportedNoteMetadata, ScopeType, SourceType, SupportStrength,
+    DerivedObjectType, EnrichmentStatus, ImportedNoteLinkRecord, ImportedNoteMetadata, ScopeType,
+    SourceType,
 };
 use crate::ParticipantRole;
 
@@ -94,16 +94,6 @@ pub struct ArtifactContextDerivedObject {
     pub candidate_key: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArtifactContextEvidenceLink {
-    pub evidence_link_id: String,
-    pub derived_object_id: String,
-    pub segment_id: String,
-    pub evidence_role: EvidenceRole,
-    pub support_strength: SupportStrength,
-    pub evidence_rank: i32,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArtifactContextPackMaterial {
     pub artifact: ArtifactDetailRecord,
@@ -111,7 +101,6 @@ pub struct ArtifactContextPackMaterial {
     pub imported_note_metadata: ImportedNoteMetadata,
     pub inbound_note_links: Vec<ImportedNoteLinkRecord>,
     pub derived_objects: Vec<ArtifactContextDerivedObject>,
-    pub evidence_links: Vec<ArtifactContextEvidenceLink>,
 }
 
 pub trait ArtifactContextPackReadStore: Send + Sync {

@@ -3,15 +3,14 @@ use postgres::Client;
 use crate::error::{StorageError, StorageResult};
 use crate::storage::postgres::{embedding::vector_literal, imported_note};
 use crate::storage::retrieval_read_store::{
-    ArchiveSearchCandidate, ArtifactContextDerivedObject, ArtifactContextEvidenceLink,
-    ArtifactContextPackMaterial, ArtifactDetailDerivedObject, ArtifactDetailRecord,
-    ArtifactDetailSegment, ArtifactDetailView, DerivedObjectSearchResult, GraphRelatedEntry,
-    ObjectSearchFilters, RelatedDerivedObject, RelatedDerivedObjectEmbeddingMatch,
-    SearchCandidateKind, SearchFilters,
+    ArchiveSearchCandidate, ArtifactContextDerivedObject, ArtifactContextPackMaterial,
+    ArtifactDetailDerivedObject, ArtifactDetailRecord, ArtifactDetailSegment, ArtifactDetailView,
+    DerivedObjectSearchResult, GraphRelatedEntry, ObjectSearchFilters, RelatedDerivedObject,
+    RelatedDerivedObjectEmbeddingMatch, SearchCandidateKind, SearchFilters,
 };
 use crate::storage::types::{
-    DerivedObjectType, EnrichmentStatus, EvidenceRole, RetrievalIntent, RetrievedContextItem,
-    ScopeType, SourceType, SupportStrength,
+    DerivedObjectType, EnrichmentStatus, RetrievalIntent, RetrievedContextItem, ScopeType,
+    SourceType,
 };
 use crate::ParticipantRole;
 
@@ -429,18 +428,15 @@ pub fn retrieve_for_intents(
                             d.artifact_id,
                             d.title,
                             d.body_text,
-                            COALESCE(array_agg(e.segment_id ORDER BY e.evidence_rank)
-                                FILTER (WHERE e.segment_id IS NOT NULL), ARRAY[]::text[]) AS segment_ids,
+                            ARRAY[]::text[] AS segment_ids,
                             (to_tsvector('english', COALESCE(d.title, '')) @@ {tsquery}) AS title_hit,
                             (to_tsvector('english', COALESCE(d.body_text, '')) @@ {tsquery}) AS body_hit,
                             ts_rank_cd(d.search_tsv, {tsquery}) AS rank_score
                      FROM oa_derived_object d
-                     LEFT JOIN oa_evidence_link e ON e.derived_object_id = d.derived_object_id
                      WHERE d.artifact_id <> $1
                        AND d.object_status = 'active'
                        {derived_type_filter}
                        AND d.search_tsv @@ {tsquery}
-                     GROUP BY d.derived_object_type, d.derived_object_id, d.artifact_id, d.title, d.body_text, d.search_tsv
                      ORDER BY rank_score DESC, d.derived_object_id ASC
                      LIMIT $3"
                 ),
@@ -530,11 +526,6 @@ pub fn load_artifact_context_pack_material(
             artifact_id,
         )?,
         derived_objects: load_artifact_context_derived_objects(
-            client,
-            connection_string,
-            artifact_id,
-        )?,
-        evidence_links: load_artifact_context_evidence_links(
             client,
             connection_string,
             artifact_id,
@@ -711,52 +702,6 @@ fn load_artifact_context_derived_objects(
     }
 
     Ok(objects)
-}
-
-fn load_artifact_context_evidence_links(
-    client: &mut Client,
-    connection_string: &str,
-    artifact_id: &str,
-) -> StorageResult<Vec<ArtifactContextEvidenceLink>> {
-    let rows = client
-        .query(
-            "SELECT e.evidence_link_id,
-                    e.derived_object_id,
-                    e.segment_id,
-                    e.evidence_role,
-                    e.support_strength,
-                    e.evidence_rank
-             FROM oa_evidence_link e
-             JOIN oa_derived_object d ON d.derived_object_id = e.derived_object_id
-             WHERE d.artifact_id = $1 AND d.object_status = 'active'
-             ORDER BY e.derived_object_id ASC, e.evidence_rank ASC, e.evidence_link_id ASC",
-            &[&artifact_id],
-        )
-        .map_err(|source| map_pg_err(connection_string, source))?;
-
-    let mut links = Vec::with_capacity(rows.len());
-    for row in rows {
-        links.push(ArtifactContextEvidenceLink {
-            evidence_link_id: row.get(0),
-            derived_object_id: row.get(1),
-            segment_id: row.get(2),
-            evidence_role: EvidenceRole::parse(&row.get::<_, String>(3)).ok_or_else(|| {
-                StorageError::InvalidEvidenceRole {
-                    artifact_id: artifact_id.to_string(),
-                    value: row.get(3),
-                }
-            })?,
-            support_strength: SupportStrength::parse(&row.get::<_, String>(4)).ok_or_else(
-                || StorageError::InvalidSupportStrength {
-                    artifact_id: artifact_id.to_string(),
-                    value: row.get(4),
-                },
-            )?,
-            evidence_rank: row.get(5),
-        });
-    }
-
-    Ok(links)
 }
 
 pub fn search_objects(
@@ -1147,18 +1092,6 @@ pub fn get_related_objects(
          AND d.derived_object_id != source.derived_object_id
         WHERE source.derived_object_id = $1
           AND COALESCE(source.candidate_key, '') <> ''
-          AND d.object_status = 'active'
-
-        UNION ALL
-
-        SELECT DISTINCT d.derived_object_id, d.artifact_id, d.derived_object_type,
-               d.title, d.body_text,
-               'shared_evidence'::text AS relation_kind,
-               NULL::text, NULL::float8, NULL::text
-        FROM oa_evidence_link el1
-        JOIN oa_evidence_link el2 ON el2.segment_id = el1.segment_id AND el2.derived_object_id != $1
-        JOIN oa_derived_object d ON d.derived_object_id = el2.derived_object_id
-        WHERE el1.derived_object_id = $1
           AND d.object_status = 'active'
 
         LIMIT $2
