@@ -8,7 +8,6 @@ pub enum ReviewItemKind {
     ArtifactMissingSummary,
     ObjectLowConfidence,
     CandidateKeyCollision,
-    ObjectMissingEvidence,
 }
 
 impl ReviewItemKind {
@@ -18,7 +17,6 @@ impl ReviewItemKind {
             Self::ArtifactMissingSummary => "artifact_missing_summary",
             Self::ObjectLowConfidence => "object_low_confidence",
             Self::CandidateKeyCollision => "candidate_key_collision",
-            Self::ObjectMissingEvidence => "object_missing_evidence",
         }
     }
 
@@ -28,7 +26,6 @@ impl ReviewItemKind {
             "artifact_missing_summary" => Some(Self::ArtifactMissingSummary),
             "object_low_confidence" => Some(Self::ObjectLowConfidence),
             "candidate_key_collision" => Some(Self::CandidateKeyCollision),
-            "object_missing_evidence" => Some(Self::ObjectMissingEvidence),
             _ => None,
         }
     }

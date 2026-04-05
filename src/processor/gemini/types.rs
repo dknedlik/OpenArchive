@@ -187,7 +187,6 @@ pub(super) struct GeminiBatchRequestMetadata {
 pub(crate) struct GeminiBatchResult {
     pub(super) key: String,
     pub(super) output_text: String,
-    pub(super) usage: Option<InferenceUsage>,
 }
 
 impl GeminiBatchJob {
@@ -233,14 +232,7 @@ impl GeminiBatchJob {
                         .ok_or_else(|| super::ProcessorError::Message {
                             message: format!("Gemini batch response {key} returned empty content"),
                         })?;
-                Ok(GeminiBatchResult {
-                    key,
-                    output_text,
-                    usage: response
-                        .usage_metadata
-                        .clone()
-                        .and_then(InferenceUsage::from_gemini_usage),
-                })
+                Ok(GeminiBatchResult { key, output_text })
             })
             .collect()
     }

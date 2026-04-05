@@ -78,7 +78,7 @@ Derived knowledge is expected to remain grounded in source material.
 Important provenance records include:
 
 - derivation runs
-- evidence links from derived objects to source segments
+- artifact-level provenance from derived objects back to their source artifact
 - origin metadata describing whether an object came from enrichment or
   writeback
 

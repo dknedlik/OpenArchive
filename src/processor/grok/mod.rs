@@ -8,13 +8,8 @@ use crate::storage::types::EnrichmentTier;
 
 use super::*;
 
-mod batch;
-
-use batch::{GrokExtractionSubmitter, GrokReconciliationSubmitter};
-
 pub struct GrokProcessorFactory {
     client: Arc<GrokClient>,
-    batch_client: Option<Arc<GrokClient>>,
     stage1_max_output_tokens: u32,
     stage2_max_output_tokens: u32,
     repair_max_output_tokens: u32,
@@ -26,8 +21,7 @@ impl GrokProcessorFactory {
     pub fn new(config: GrokConfig) -> Result<Self, String> {
         let client = Arc::new(GrokClient::new(&config).map_err(|err| err.to_string())?);
         Ok(Self {
-            client: client.clone(),
-            batch_client: Some(client),
+            client,
             stage1_max_output_tokens: config
                 .repair_max_output_tokens
                 .max(config.max_output_tokens),
@@ -86,32 +80,6 @@ impl ArtifactProcessorFactory for GrokProcessorFactory {
         Ok(Some(Box::new(SequentialArtifactBatchProcessor::new(
             processor, 16, 2_000_000,
         ))))
-    }
-
-    fn build_extraction_submitter(
-        &self,
-        _tier: EnrichmentTier,
-    ) -> Result<Option<Box<dyn ExtractionBatchSubmitter>>, ProcessorError> {
-        let Some(client) = &self.batch_client else {
-            return Ok(None);
-        };
-        Ok(Some(Box::new(GrokExtractionSubmitter {
-            client: Arc::clone(client),
-            candidate_model: self.heavy_model.clone(),
-        })))
-    }
-
-    fn build_reconciliation_submitter(
-        &self,
-        _tier: EnrichmentTier,
-    ) -> Result<Option<Box<dyn ReconciliationBatchSubmitter>>, ProcessorError> {
-        let Some(client) = &self.batch_client else {
-            return Ok(None);
-        };
-        Ok(Some(Box::new(GrokReconciliationSubmitter {
-            client: Arc::clone(client),
-            model: self.fast_model.clone(),
-        })))
     }
 }
 
@@ -286,100 +254,6 @@ impl GrokClient {
         Ok(InferenceResult {
             output_text: content,
             usage,
-        })
-    }
-
-    fn create_batch(&self, name: &str) -> Result<batch::GrokBatch, ProcessorError> {
-        let body = serde_json::json!({ "name": name });
-        let response = self
-            .client
-            .post(format!("{}/batches", self.base_url))
-            .body(
-                serde_json::to_vec(&body)
-                    .map_err(|source| ProcessorError::SerializePrompt { source })?,
-            )
-            .send()
-            .map_err(|source| ProcessorError::SendInferenceRequest { source })?;
-        batch::parse_grok_json_response(response)
-    }
-
-    fn add_batch_requests(
-        &self,
-        batch_id: &str,
-        requests: &[batch::GrokBatchRequestEnvelope],
-    ) -> Result<(), ProcessorError> {
-        let body = serde_json::json!({ "batch_requests": requests });
-        let response = self
-            .client
-            .post(format!("{}/batches/{}/requests", self.base_url, batch_id))
-            .body(
-                serde_json::to_vec(&body)
-                    .map_err(|source| ProcessorError::SerializePrompt { source })?,
-            )
-            .send()
-            .map_err(|source| ProcessorError::SendInferenceRequest { source })?;
-        let _: serde_json::Value = batch::parse_grok_json_response(response)?;
-        Ok(())
-    }
-
-    fn get_batch(&self, batch_id: &str) -> Result<batch::GrokBatch, ProcessorError> {
-        let response = self
-            .client
-            .get(format!("{}/batches/{}", self.base_url, batch_id))
-            .send()
-            .map_err(|source| ProcessorError::SendInferenceRequest { source })?;
-        batch::parse_grok_json_response(response)
-    }
-    fn list_results(
-        &self,
-        batch_id: &str,
-    ) -> Result<Vec<batch::GrokBatchResultItem>, ProcessorError> {
-        let mut all = Vec::new();
-        let mut page_token: Option<String> = None;
-        loop {
-            let mut request = self
-                .client
-                .get(format!("{}/batches/{}/results", self.base_url, batch_id));
-            if let Some(token) = &page_token {
-                request = request.query(&[("page_token", token)]);
-            }
-            let page: batch::GrokBatchResultsPage = batch::parse_grok_json_response(
-                request
-                    .send()
-                    .map_err(|source| ProcessorError::SendInferenceRequest { source })?,
-            )?;
-            all.extend(page.results);
-            match page.next_page_token {
-                Some(token) if !token.is_empty() => page_token = Some(token),
-                _ => break,
-            }
-        }
-        Ok(all)
-    }
-
-    fn build_chat_completion_body(
-        &self,
-        model: &str,
-        system_prompt: &str,
-        user_prompt: &str,
-        schema: &serde_json::Value,
-        max_output_tokens: u32,
-    ) -> serde_json::Value {
-        serde_json::json!({
-            "model": model,
-            "max_output_tokens": max_output_tokens,
-            "messages": [
-                { "role": "system", "content": system_prompt },
-                { "role": "user", "content": user_prompt }
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "openarchive_result",
-                    "schema": schema.get("schema").cloned().unwrap_or_else(|| schema.clone()),
-                    "strict": true
-                }
-            }
         })
     }
 }

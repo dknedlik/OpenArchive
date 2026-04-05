@@ -14,9 +14,7 @@ use super::*;
 mod batch;
 mod types;
 
-use batch::{
-    GeminiExtractionSubmitter, GeminiReconciliationBatchProcessor, GeminiReconciliationSubmitter,
-};
+use batch::GeminiReconciliationBatchProcessor;
 use types::{
     GeminiBatchCreateRequest, GeminiBatchDefinition, GeminiBatchInputConfig, GeminiBatchOperation,
     GeminiBatchRequestEntry, GeminiBatchRequestMetadata, GeminiGenerateContentRequest,
@@ -117,32 +115,6 @@ impl ArtifactProcessorFactory for GeminiProcessorFactory {
             return Ok(None);
         };
         Ok(Some(Box::new(GeminiReconciliationBatchProcessor {
-            client: Arc::clone(batch_client),
-            model: self.fast_model.clone(),
-        })))
-    }
-
-    fn build_extraction_submitter(
-        &self,
-        _tier: EnrichmentTier,
-    ) -> Result<Option<Box<dyn ExtractionBatchSubmitter>>, ProcessorError> {
-        let Some(batch_client) = &self.batch_client else {
-            return Ok(None);
-        };
-        Ok(Some(Box::new(GeminiExtractionSubmitter {
-            client: Arc::clone(batch_client),
-            candidate_model: self.heavy_model.clone(),
-        })))
-    }
-
-    fn build_reconciliation_submitter(
-        &self,
-        _tier: EnrichmentTier,
-    ) -> Result<Option<Box<dyn ReconciliationBatchSubmitter>>, ProcessorError> {
-        let Some(batch_client) = &self.batch_client else {
-            return Ok(None);
-        };
-        Ok(Some(Box::new(GeminiReconciliationSubmitter {
             client: Arc::clone(batch_client),
             model: self.fast_model.clone(),
         })))

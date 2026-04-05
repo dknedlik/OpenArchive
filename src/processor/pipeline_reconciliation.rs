@@ -19,7 +19,6 @@ pub(crate) struct ModelReconciliationDecision {
     pub(crate) target_key: String,
     pub(crate) matched_object_id: Option<String>,
     pub(crate) rationale: String,
-    pub(crate) evidence_segment_ids: Vec<String>,
 }
 
 impl ModelReconciliationOutput {
@@ -47,30 +46,6 @@ impl ModelReconciliationOutput {
         &self,
         input: &ReconciliationProcessorInput,
     ) -> Result<(), ProcessorError> {
-        let valid_evidence_ids: HashSet<&str> = input
-            .summary
-            .evidence_segment_ids
-            .iter()
-            .chain(
-                input
-                    .memories
-                    .iter()
-                    .flat_map(|memory| memory.evidence_segment_ids.iter()),
-            )
-            .chain(
-                input
-                    .entities
-                    .iter()
-                    .flat_map(|entity| entity.evidence_segment_ids.iter()),
-            )
-            .chain(
-                input
-                    .relationships
-                    .iter()
-                    .flat_map(|relationship| relationship.evidence_segment_ids.iter()),
-            )
-            .map(String::as_str)
-            .collect();
         let valid_targets: HashSet<String> = input
             .memories
             .iter()
@@ -176,11 +151,6 @@ impl ModelReconciliationOutput {
                     ),
                 });
             }
-            validate_evidence_ids(
-                &format!("decisions[{index}].evidence_segment_ids"),
-                &decision.evidence_segment_ids,
-                &valid_evidence_ids,
-            )?;
         }
 
         if seen_targets != valid_targets {
@@ -211,7 +181,6 @@ impl ModelReconciliationOutput {
                 target_key: decision.target_key,
                 matched_object_id: decision.matched_object_id,
                 rationale: decision.rationale,
-                evidence_segment_ids: decision.evidence_segment_ids,
             })
             .collect()
     }
@@ -237,7 +206,7 @@ pub(crate) fn validate_input(input: &ArtifactProcessorInput) -> Result<(), Proce
     Ok(())
 }
 
-pub(crate) fn validate_text_field(field: &str, value: &str) -> Result<(), ProcessorError> {
+fn validate_text_field(field: &str, value: &str) -> Result<(), ProcessorError> {
     if value.trim().is_empty() {
         return Err(ProcessorError::InvalidModelOutput {
             detail: format!("{field} must not be empty"),
@@ -245,39 +214,6 @@ pub(crate) fn validate_text_field(field: &str, value: &str) -> Result<(), Proces
     }
 
     Ok(())
-}
-
-pub(crate) fn validate_evidence_ids(
-    field: &str,
-    evidence_segment_ids: &[String],
-    valid_segment_ids: &HashSet<&str>,
-) -> Result<(), ProcessorError> {
-    if evidence_segment_ids.is_empty() {
-        return Err(ProcessorError::InvalidModelOutput {
-            detail: format!("{field} must contain at least one segment id"),
-        });
-    }
-
-    for segment_id in evidence_segment_ids {
-        if !valid_segment_ids.contains(segment_id.as_str()) {
-            return Err(ProcessorError::InvalidModelOutput {
-                detail: format!("{field} contains unknown segment id {segment_id:?}"),
-            });
-        }
-    }
-
-    Ok(())
-}
-
-pub(crate) fn retain_valid_items<T>(
-    items: Vec<T>,
-    mut validate: impl FnMut(usize, &T) -> Result<(), ProcessorError>,
-) -> Vec<T> {
-    items
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, item)| validate(index, &item).ok().map(|_| item))
-        .collect()
 }
 
 fn hex_prefix(bytes: &[u8]) -> String {

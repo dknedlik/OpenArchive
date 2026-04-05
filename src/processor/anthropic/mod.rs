@@ -7,14 +7,7 @@ use crate::config::AnthropicConfig;
 use crate::storage::types::EnrichmentTier;
 
 use super::*;
-
-mod batch;
 mod types;
-
-use batch::{
-    AnthropicBatchRequestOwned, AnthropicExtractionSubmitter, AnthropicMessageBatch,
-    AnthropicReconciliationSubmitter,
-};
 use types::{
     AnthropicContentBlock, AnthropicMessageInput, AnthropicMessagesRequest, AnthropicToolChoice,
     AnthropicToolDefinition,
@@ -22,7 +15,6 @@ use types::{
 
 pub struct AnthropicProcessorFactory {
     client: Arc<dyn InferenceClient>,
-    batch_client: Option<Arc<AnthropicClient>>,
     max_output_tokens: u32,
     heavy_model: String,
     fast_model: String,
@@ -32,8 +24,7 @@ impl AnthropicProcessorFactory {
     pub fn new(config: AnthropicConfig) -> Result<Self, String> {
         let client = Arc::new(AnthropicClient::new(&config).map_err(|err| err.to_string())?);
         Ok(Self {
-            client: client.clone(),
-            batch_client: Some(client),
+            client,
             max_output_tokens: config.max_output_tokens,
             heavy_model: config.heavy_model,
             fast_model: config.fast_model,
@@ -85,32 +76,6 @@ impl ArtifactProcessorFactory for AnthropicProcessorFactory {
         Ok(Some(Box::new(SequentialArtifactBatchProcessor::new(
             processor, 16, 2_000_000,
         ))))
-    }
-
-    fn build_extraction_submitter(
-        &self,
-        _tier: EnrichmentTier,
-    ) -> Result<Option<Box<dyn ExtractionBatchSubmitter>>, ProcessorError> {
-        let Some(client) = &self.batch_client else {
-            return Ok(None);
-        };
-        Ok(Some(Box::new(AnthropicExtractionSubmitter {
-            client: Arc::clone(client),
-            candidate_model: self.heavy_model.clone(),
-        })))
-    }
-
-    fn build_reconciliation_submitter(
-        &self,
-        _tier: EnrichmentTier,
-    ) -> Result<Option<Box<dyn ReconciliationBatchSubmitter>>, ProcessorError> {
-        let Some(client) = &self.batch_client else {
-            return Ok(None);
-        };
-        Ok(Some(Box::new(AnthropicReconciliationSubmitter {
-            client: Arc::clone(client),
-            model: self.fast_model.clone(),
-        })))
     }
 }
 
@@ -357,73 +322,4 @@ impl AnthropicClient {
             .cloned()
             .unwrap_or_else(|| schema.clone())
     }
-
-    fn create_message_batch(
-        &self,
-        requests: &[AnthropicBatchRequestOwned],
-    ) -> Result<AnthropicMessageBatch, ProcessorError> {
-        let body = serde_json::to_vec(&types::AnthropicBatchCreateRequest { requests })
-            .map_err(|source| ProcessorError::SerializePrompt { source })?;
-        let response = self
-            .client
-            .post(format!("{}/messages/batches", self.base_url))
-            .body(body)
-            .send()
-            .map_err(|source| ProcessorError::SendInferenceRequest { source })?;
-        parse_json_response(response)
-    }
-
-    fn get_message_batch(&self, batch_id: &str) -> Result<AnthropicMessageBatch, ProcessorError> {
-        let response = self
-            .client
-            .get(format!("{}/messages/batches/{}", self.base_url, batch_id))
-            .send()
-            .map_err(|source| ProcessorError::SendInferenceRequest { source })?;
-        parse_json_response(response)
-    }
-
-    fn read_results_text(&self, results_url: &str) -> Result<String, ProcessorError> {
-        let url = if results_url.starts_with("http://") || results_url.starts_with("https://") {
-            results_url.to_string()
-        } else {
-            format!("{}{}", self.base_url, results_url)
-        };
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .map_err(|source| ProcessorError::SendInferenceRequest { source })?;
-        let status = response.status();
-        let response_text = response
-            .text()
-            .map_err(|source| ProcessorError::ReadInferenceResponse { source })?;
-        if !status.is_success() {
-            return Err(ProcessorError::InferenceHttpStatus {
-                status: status.as_u16(),
-                body_preview: preview(&response_text),
-                retry_after_seconds: None,
-            });
-        }
-        Ok(response_text)
-    }
-}
-
-fn parse_json_response<T: serde::de::DeserializeOwned>(
-    response: reqwest::blocking::Response,
-) -> Result<T, ProcessorError> {
-    let status = response.status();
-    let response_text = response
-        .text()
-        .map_err(|source| ProcessorError::ReadInferenceResponse { source })?;
-    if !status.is_success() {
-        return Err(ProcessorError::InferenceHttpStatus {
-            status: status.as_u16(),
-            body_preview: preview(&response_text),
-            retry_after_seconds: None,
-        });
-    }
-    serde_json::from_str(&response_text).map_err(|source| ProcessorError::ParseInferenceResponse {
-        source,
-        body_preview: preview(&response_text),
-    })
 }

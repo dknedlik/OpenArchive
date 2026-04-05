@@ -4,7 +4,7 @@ use postgres::Client;
 
 use crate::error::{DbError, StorageError, StorageResult};
 use crate::storage::derivation_store::WriteDerivationAttempt;
-use crate::storage::types::{NewDerivedObject, NewEvidenceLink, ObjectStatus, ScopeType};
+use crate::storage::types::{NewDerivedObject, NewEvidenceLink, ScopeType};
 use crate::storage::writeback_store::NewArchiveLink;
 
 fn pg_error(connection_string: &str, source: postgres::Error) -> StorageError {
@@ -205,16 +205,6 @@ pub fn validate_derivation_attempt(
         if !derived_object_ids.insert(object.derived_object_id.clone()) {
             return Err(StorageError::InvalidDerivationWrite {
                 detail: format!("duplicate derived object id {}", object.derived_object_id),
-            });
-        }
-        if matches!(object.object_status, ObjectStatus::Active)
-            && object_write.evidence_links.is_empty()
-        {
-            return Err(StorageError::InvalidDerivationWrite {
-                detail: format!(
-                    "active derived object {} must have at least one evidence link",
-                    object.derived_object_id
-                ),
             });
         }
         validate_scope(client, connection_string, artifact_id, object)?;

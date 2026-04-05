@@ -2,14 +2,12 @@ use crate::config::{EnrichmentPipelineConfig, ExtractionChunkingConfig, Inferenc
 use crate::domain::SourceTimestamp;
 use crate::embedding::EmbeddingProvider;
 use crate::error::{WorkerError, WorkerResult};
-use crate::extraction_chunking::{
-    build_chunk_inputs, build_coverage_windows, build_topic_thread_inputs,
-};
+use crate::extraction_chunking::{build_chunk_inputs, build_topic_thread_inputs};
 use crate::processor::{
-    cleanup_artifact_processor_output, memory_candidate_key_from_fields,
-    should_shape_artifact_input, ArtifactProcessorFactory, ArtifactProcessorInput,
-    ArtifactProcessorOutput, ClassificationOutput, EntityOutput, MemoryOutput, ProcessorError,
-    ReconciliationProcessorInput, RelationshipOutput, StubProcessorFactory, SummaryOutput,
+    cleanup_artifact_processor_output, memory_candidate_key_from_fields, ArtifactProcessorFactory,
+    ArtifactProcessorInput, ArtifactProcessorOutput, ClassificationOutput, EntityOutput,
+    MemoryOutput, ProcessorError, ReconciliationProcessorInput, RelationshipOutput,
+    StubProcessorFactory, SummaryOutput,
 };
 use crate::shutdown::ShutdownToken;
 use crate::storage::JobType;
@@ -20,11 +18,11 @@ use crate::storage::{
     DerivedMetadataWriteStore, DerivedObjectEmbeddingItem, DerivedObjectEmbeddingPayload,
     DerivedObjectEmbeddingStore, DerivedObjectPayload, DerivedObjectType,
     EnrichmentJobLifecycleStore, EnrichmentStateStore, EnrichmentTier, EntityObjectJson,
-    EvidenceRole, ExtractedClassification, ExtractedMemory, InputScopeType, JobStatus,
-    MemoryObjectJson, NewArchiveLink, NewDerivationRun, NewDerivedObject,
-    NewDerivedObjectEmbedding, NewEnrichmentJob, NewEvidenceLink, ObjectStatus, OriginKind,
-    ReconciliationDecision, ReconciliationDecisionKind, RelationshipObjectJson, RetrievalIntent,
-    ScopeType, SummaryObjectJson, SupportStrength, WriteDerivationAttempt, WriteDerivedObject,
+    ExtractedClassification, ExtractedMemory, InputScopeType, JobStatus, MemoryObjectJson,
+    NewArchiveLink, NewDerivationRun, NewDerivedObject, NewDerivedObjectEmbedding,
+    NewEnrichmentJob, ObjectStatus, OriginKind, ReconciliationDecision, ReconciliationDecisionKind,
+    RelationshipObjectJson, ScopeType, SummaryObjectJson, WriteDerivationAttempt,
+    WriteDerivedObject,
 };
 use log::{debug, error, info, warn};
 use rand::random;
@@ -46,12 +44,6 @@ fn has_reconciliation_candidates(extraction_result: &ArtifactExtractionResult) -
         && extraction_result.relationships.is_empty())
 }
 
-#[derive(Clone)]
-struct ExtractCoveragePolicy {
-    min_coverage_percent: u8,
-    max_gap_fill_passes: usize,
-}
-
 /// Borrowed view of all store/service/factory dependencies used by worker functions.
 struct WorkerContext<'a> {
     job_store: &'a dyn EnrichmentJobLifecycleStore,
@@ -67,7 +59,6 @@ struct WorkerContext<'a> {
 /// Extraction chunking and coverage parameters.
 struct ExtractionPolicy<'a> {
     chunking: &'a ExtractionChunkingConfig,
-    coverage: &'a ExtractCoveragePolicy,
 }
 
 /// Owned Arc resources for long-running worker threads.
@@ -122,7 +113,6 @@ fn enrichment_worker(
     worker_id: String,
     res: WorkerResources,
     chunking: Arc<ExtractionChunkingConfig>,
-    coverage_policy: Arc<ExtractCoveragePolicy>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
 ) {
@@ -140,7 +130,6 @@ fn enrichment_worker(
                 let ctx = res.as_context();
                 let policy = ExtractionPolicy {
                     chunking: chunking.as_ref(),
-                    coverage: coverage_policy.as_ref(),
                 };
                 if let Err(err) = process_claimed_jobs(
                     &worker_id,
@@ -629,7 +618,6 @@ fn process_reconcile_job_batch(
                             target_key: extraction_result.artifact_id.clone(),
                             matched_object_id: None,
                             rationale: "No candidate memories, entities, or relationships were extracted for reconciliation.".to_string(),
-                            evidence_segment_ids: extraction_result.summary_evidence_segment_ids.clone(),
                             status: "completed".to_string(),
                             error_message: None,
                         }]
@@ -795,16 +783,6 @@ fn process_extract_job(
             .process(&chunk_input)
             .map_err(|err| handle_processor_error(job_store, worker_id, &claimed_job.job_id, err))?
     };
-    let output = maybe_gap_fill_extraction_output(
-        worker_id,
-        claimed_job,
-        job_store,
-        processor.as_ref(),
-        &processor_input,
-        output,
-        policy,
-    )?;
-
     let extraction_result = build_extraction_result(
         claimed_job,
         &processor_input,
@@ -935,7 +913,6 @@ fn process_reconcile_job(
             matched_object_id: None,
             rationale: "No candidate memories, entities, or relationships were extracted for reconciliation."
                 .to_string(),
-            evidence_segment_ids: extraction_result.summary_evidence_segment_ids.clone(),
             status: "completed".to_string(),
             error_message: None,
         }]
@@ -1230,7 +1207,6 @@ pub(crate) fn build_extraction_result(
         pipeline_version: output.pipeline_version.clone(),
         summary_title: output.summary.title.clone(),
         summary_body_text: output.summary.body_text.clone(),
-        summary_evidence_segment_ids: output.summary.evidence_segment_ids.clone(),
         classifications: output
             .classifications
             .iter()
@@ -1239,7 +1215,6 @@ pub(crate) fn build_extraction_result(
                 body_text: classification.body_text.clone(),
                 classification_type: classification.classification_type.clone(),
                 classification_value: classification.classification_value.clone(),
-                evidence_segment_ids: classification.evidence_segment_ids.clone(),
             })
             .collect(),
         memories: output
@@ -1252,7 +1227,6 @@ pub(crate) fn build_extraction_result(
                 memory_type: memory.memory_type.clone(),
                 memory_scope: memory.memory_scope,
                 memory_scope_value: memory.memory_scope_value.clone(),
-                evidence_segment_ids: memory.evidence_segment_ids.clone(),
             })
             .collect(),
         entities: output
@@ -1262,7 +1236,6 @@ pub(crate) fn build_extraction_result(
                 entity_key: entity.entity_key.clone(),
                 display_name: entity.display_name.clone(),
                 entity_type: entity.entity_type.clone(),
-                evidence_segment_ids: entity.evidence_segment_ids.clone(),
             })
             .collect(),
         relationships: output
@@ -1275,18 +1248,6 @@ pub(crate) fn build_extraction_result(
                 title: relationship.title.clone(),
                 body_text: relationship.body_text.clone(),
                 confidence_label: relationship.confidence_label.clone(),
-                evidence_segment_ids: relationship.evidence_segment_ids.clone(),
-            })
-            .collect(),
-        retrieval_intents: output
-            .retrieval_intents
-            .iter()
-            .map(|intent| RetrievalIntent {
-                intent_id: new_id("intent"),
-                question: intent.question.clone(),
-                query_text: intent.query_text.clone(),
-                intent_type: intent.intent_type.clone(),
-                evidence_segment_ids: intent.evidence_segment_ids.clone(),
             })
             .collect(),
         status: "completed".to_string(),
@@ -1308,12 +1269,10 @@ pub(crate) fn merge_chunk_outputs(
 
     let mut summary_bodies = Vec::new();
     let mut summary_titles = Vec::new();
-    let mut summary_evidence = Vec::new();
     let mut classifications = BTreeMap::<(String, String), ClassificationOutput>::new();
     let mut memories = BTreeMap::<String, MemoryOutput>::new();
     let mut entities = BTreeMap::<String, EntityOutput>::new();
     let mut relationships = BTreeMap::<String, RelationshipOutput>::new();
-    let mut retrieval_intents = BTreeMap::<(String, String), RetrievalIntent>::new();
     let mut importance_score = 1u8;
 
     for output in outputs {
@@ -1325,7 +1284,6 @@ pub(crate) fn merge_chunk_outputs(
         if !summary_bodies.contains(&output.summary.body_text) {
             summary_bodies.push(output.summary.body_text.clone());
         }
-        extend_unique(&mut summary_evidence, &output.summary.evidence_segment_ids);
         importance_score = importance_score.max(output.importance_score);
 
         for classification in &output.classifications {
@@ -1362,153 +1320,28 @@ pub(crate) fn merge_chunk_outputs(
                 relationships.insert(key, relationship.clone());
             }
         }
-        for intent in &output.retrieval_intents {
-            let key = (intent.intent_type.clone(), intent.query_text.clone());
-            if let Some(existing) = retrieval_intents.get_mut(&key) {
-                merge_retrieval_intent(existing, intent);
-            } else {
-                retrieval_intents.insert(key, intent.clone());
-            }
-        }
     }
 
-    cleanup_artifact_processor_output(
-        input,
-        ArtifactProcessorOutput {
-            pipeline_name: first.pipeline_name,
-            pipeline_version: first.pipeline_version,
-            provider_name: first.provider_name,
-            model_name: first.model_name,
-            prompt_version: first.prompt_version,
-            usage: None,
-            summary: SummaryOutput {
-                title: summary_titles
-                    .first()
-                    .cloned()
-                    .or_else(|| input.title.clone()),
-                body_text: summary_bodies.join(" "),
-                evidence_segment_ids: summary_evidence,
-            },
-            classifications: classifications.into_values().collect(),
-            memories: memories.into_values().collect(),
-            entities: entities.into_values().collect(),
-            relationships: relationships.into_values().collect(),
-            retrieval_intents: retrieval_intents.into_values().collect(),
-            importance_score,
+    cleanup_artifact_processor_output(ArtifactProcessorOutput {
+        pipeline_name: first.pipeline_name,
+        pipeline_version: first.pipeline_version,
+        provider_name: first.provider_name,
+        model_name: first.model_name,
+        prompt_version: first.prompt_version,
+        usage: None,
+        summary: SummaryOutput {
+            title: summary_titles
+                .first()
+                .cloned()
+                .or_else(|| input.title.clone()),
+            body_text: summary_bodies.join(" "),
         },
-    )
-}
-
-fn collected_output_evidence_segment_ids(output: &ArtifactProcessorOutput) -> HashSet<String> {
-    let mut cited = HashSet::new();
-    cited.extend(output.summary.evidence_segment_ids.iter().cloned());
-    for classification in &output.classifications {
-        cited.extend(classification.evidence_segment_ids.iter().cloned());
-    }
-    for memory in &output.memories {
-        cited.extend(memory.evidence_segment_ids.iter().cloned());
-    }
-    for entity in &output.entities {
-        cited.extend(entity.evidence_segment_ids.iter().cloned());
-    }
-    for relationship in &output.relationships {
-        cited.extend(relationship.evidence_segment_ids.iter().cloned());
-    }
-    for intent in &output.retrieval_intents {
-        cited.extend(intent.evidence_segment_ids.iter().cloned());
-    }
-    cited
-}
-
-fn compute_output_coverage_percent(
-    input: &ArtifactProcessorInput,
-    output: &ArtifactProcessorOutput,
-) -> u8 {
-    if input.segments.is_empty() {
-        return 100;
-    }
-    let cited = collected_output_evidence_segment_ids(output);
-    let total = input.segments.len();
-    let covered = input
-        .segments
-        .iter()
-        .filter(|segment| cited.contains(&segment.segment_id))
-        .count();
-    ((covered * 100) / total) as u8
-}
-
-fn uncovered_segments_for_output(
-    input: &ArtifactProcessorInput,
-    output: &ArtifactProcessorOutput,
-) -> Vec<crate::storage::LoadedSegment> {
-    let cited = collected_output_evidence_segment_ids(output);
-    input
-        .segments
-        .iter()
-        .filter(|segment| !cited.contains(&segment.segment_id))
-        .cloned()
-        .collect()
-}
-
-fn maybe_gap_fill_extraction_output(
-    worker_id: &str,
-    claimed_job: &ClaimedJob,
-    job_store: &dyn EnrichmentJobLifecycleStore,
-    processor: &dyn crate::processor::ArtifactProcessor,
-    input: &ArtifactProcessorInput,
-    output: ArtifactProcessorOutput,
-    policy: &ExtractionPolicy<'_>,
-) -> std::result::Result<ArtifactProcessorOutput, String> {
-    let chunking = policy.chunking;
-    let coverage_policy = policy.coverage;
-    if coverage_policy.max_gap_fill_passes == 0 || !should_shape_artifact_input(input) {
-        return Ok(output);
-    }
-
-    let mut merged_output = output;
-    for pass in 0..coverage_policy.max_gap_fill_passes {
-        let coverage = compute_output_coverage_percent(input, &merged_output);
-        if coverage >= coverage_policy.min_coverage_percent {
-            break;
-        }
-
-        let uncovered_segments = uncovered_segments_for_output(input, &merged_output);
-        if uncovered_segments.is_empty() {
-            break;
-        }
-
-        let uncovered_windows =
-            build_coverage_windows(&input.artifact_id, &uncovered_segments, &[], chunking);
-        if uncovered_windows.is_empty() {
-            break;
-        }
-
-        info!(
-            "Extraction gap-fill for artifact {} pass {}/{} coverage={} uncovered_segments={} windows={}",
-            input.artifact_id,
-            pass + 1,
-            coverage_policy.max_gap_fill_passes,
-            coverage,
-            uncovered_segments.len(),
-            uncovered_windows.len()
-        );
-
-        let mut gap_outputs = Vec::new();
-        for chunk_input in build_chunk_inputs(input, &uncovered_windows, chunking) {
-            let chunk_output = processor.process(&chunk_input).map_err(|err| {
-                handle_processor_error(job_store, worker_id, &claimed_job.job_id, err)
-            })?;
-            gap_outputs.push(chunk_output);
-        }
-        if gap_outputs.is_empty() {
-            break;
-        }
-
-        let gap_output = merge_chunk_outputs(input, &gap_outputs);
-        merged_output = merge_chunk_outputs(input, &[merged_output, gap_output]);
-    }
-
-    Ok(merged_output)
+        classifications: classifications.into_values().collect(),
+        memories: memories.into_values().collect(),
+        entities: entities.into_values().collect(),
+        relationships: relationships.into_values().collect(),
+        importance_score,
+    })
 }
 
 pub(crate) fn build_extract_chunk_inputs(
@@ -1542,7 +1375,6 @@ pub(crate) fn build_reconciliation_input(
         SummaryOutput {
             title: extraction_result.summary_title.clone(),
             body_text: extraction_result.summary_body_text.clone(),
-            evidence_segment_ids: extraction_result.summary_evidence_segment_ids.clone(),
         },
         extraction_result
             .memories
@@ -1564,7 +1396,6 @@ pub(crate) fn build_reconciliation_input(
                 memory_type: memory.memory_type.clone(),
                 memory_scope: memory.memory_scope,
                 memory_scope_value: memory.memory_scope_value.clone(),
-                evidence_segment_ids: memory.evidence_segment_ids.clone(),
             })
             .collect(),
         extraction_result
@@ -1574,7 +1405,6 @@ pub(crate) fn build_reconciliation_input(
                 entity_key: entity.entity_key.clone(),
                 display_name: entity.display_name.clone(),
                 entity_type: entity.entity_type.clone(),
-                evidence_segment_ids: entity.evidence_segment_ids.clone(),
             })
             .collect(),
         extraction_result
@@ -1587,7 +1417,6 @@ pub(crate) fn build_reconciliation_input(
                 title: relationship.title.clone(),
                 body_text: relationship.body_text.clone(),
                 confidence_label: relationship.confidence_label.clone(),
-                evidence_segment_ids: relationship.evidence_segment_ids.clone(),
             })
             .collect(),
         "[]".to_string(),
@@ -1662,14 +1491,6 @@ impl ReconcileCandidate {
                 entity.display_name, entity.entity_type
             ),
             Self::Relationship(relationship) => relationship.body_text.clone(),
-        }
-    }
-
-    fn evidence_segment_ids(&self) -> Vec<String> {
-        match self {
-            Self::Memory(memory) => memory.evidence_segment_ids.clone(),
-            Self::Entity(entity) => entity.evidence_segment_ids.clone(),
-            Self::Relationship(relationship) => relationship.evidence_segment_ids.clone(),
         }
     }
 }
@@ -1759,7 +1580,6 @@ fn create_new_output(
         target_key: candidate.target_key(),
         matched_object_id: None,
         rationale: "No high-confidence existing archive match was found.".to_string(),
-        evidence_segment_ids: candidate.evidence_segment_ids(),
     }
 }
 
@@ -1774,7 +1594,6 @@ fn attach_existing_output(
         target_key: candidate.target_key(),
         matched_object_id: Some(matched_object_id.to_string()),
         rationale,
-        evidence_segment_ids: candidate.evidence_segment_ids(),
     }
 }
 
@@ -1969,7 +1788,6 @@ pub(crate) fn build_reconciliation_decisions(
             target_key: output.target_key,
             matched_object_id: output.matched_object_id,
             rationale: output.rationale,
-            evidence_segment_ids: output.evidence_segment_ids,
             status: "completed".to_string(),
             error_message: None,
         })
@@ -2012,22 +1830,10 @@ fn entity_target_key(entity: &CandidateEntity) -> String {
     entity.entity_key.clone()
 }
 
-fn extend_unique(target: &mut Vec<String>, values: &[String]) {
-    for value in values {
-        if !target.contains(value) {
-            target.push(value.clone());
-        }
-    }
-}
-
 fn merge_classification_output(target: &mut ClassificationOutput, incoming: &ClassificationOutput) {
     target.title = prefer_richer_optional_text(target.title.take(), incoming.title.clone());
     target.body_text =
         prefer_richer_optional_text(target.body_text.take(), incoming.body_text.clone());
-    extend_unique(
-        &mut target.evidence_segment_ids,
-        &incoming.evidence_segment_ids,
-    );
 }
 
 fn merge_memory_output(target: &mut MemoryOutput, incoming: &MemoryOutput) {
@@ -2035,10 +1841,6 @@ fn merge_memory_output(target: &mut MemoryOutput, incoming: &MemoryOutput) {
     if incoming.body_text.len() > target.body_text.len() {
         target.body_text = incoming.body_text.clone();
     }
-    extend_unique(
-        &mut target.evidence_segment_ids,
-        &incoming.evidence_segment_ids,
-    );
 }
 
 fn merge_entity_output(target: &mut EntityOutput, incoming: &EntityOutput) {
@@ -2048,10 +1850,6 @@ fn merge_entity_output(target: &mut EntityOutput, incoming: &EntityOutput) {
     if incoming.entity_type.len() > target.entity_type.len() {
         target.entity_type = incoming.entity_type.clone();
     }
-    extend_unique(
-        &mut target.evidence_segment_ids,
-        &incoming.evidence_segment_ids,
-    );
 }
 
 fn merge_relationship_output(target: &mut RelationshipOutput, incoming: &RelationshipOutput) {
@@ -2062,23 +1860,6 @@ fn merge_relationship_output(target: &mut RelationshipOutput, incoming: &Relatio
     if confidence_rank(&incoming.confidence_label) > confidence_rank(&target.confidence_label) {
         target.confidence_label = incoming.confidence_label.clone();
     }
-    extend_unique(
-        &mut target.evidence_segment_ids,
-        &incoming.evidence_segment_ids,
-    );
-}
-
-fn merge_retrieval_intent(target: &mut RetrievalIntent, incoming: &RetrievalIntent) {
-    if incoming.question.len() > target.question.len() {
-        target.question = incoming.question.clone();
-    }
-    if incoming.query_text.len() > target.query_text.len() {
-        target.query_text = incoming.query_text.clone();
-    }
-    extend_unique(
-        &mut target.evidence_segment_ids,
-        &incoming.evidence_segment_ids,
-    );
 }
 
 fn prefer_richer_optional_text(
@@ -2145,10 +1926,7 @@ pub(crate) fn build_derivation_attempt(
                 }),
             },
         },
-        evidence_links: build_evidence_links(
-            &summary_object_id,
-            &extraction_result.summary_evidence_segment_ids,
-        ),
+        evidence_links: Vec::new(),
     });
 
     for classification in &extraction_result.classifications {
@@ -2174,10 +1952,7 @@ pub(crate) fn build_derivation_attempt(
                     },
                 },
             },
-            evidence_links: build_evidence_links(
-                &derived_object_id,
-                &classification.evidence_segment_ids,
-            ),
+            evidence_links: Vec::new(),
         });
     }
 
@@ -2231,7 +2006,7 @@ pub(crate) fn build_derivation_attempt(
                     },
                 },
             },
-            evidence_links: build_evidence_links(&derived_object_id, &memory.evidence_segment_ids),
+            evidence_links: Vec::new(),
         });
     }
 
@@ -2286,7 +2061,7 @@ pub(crate) fn build_derivation_attempt(
                     },
                 },
             },
-            evidence_links: build_evidence_links(&derived_object_id, &entity.evidence_segment_ids),
+            evidence_links: Vec::new(),
         });
     }
 
@@ -2348,10 +2123,7 @@ pub(crate) fn build_derivation_attempt(
                     },
                 },
             },
-            evidence_links: build_evidence_links(
-                &derived_object_id,
-                &relationship.evidence_segment_ids,
-            ),
+            evidence_links: Vec::new(),
         });
     }
 
@@ -2475,7 +2247,6 @@ mod tests {
             summary: SummaryOutput {
                 title: Some("Summary".to_string()),
                 body_text: "Summary body".to_string(),
-                evidence_segment_ids: vec!["seg-1".to_string()],
             },
             memories: vec![MemoryOutput {
                 candidate_key: "memory-key".to_string(),
@@ -2484,7 +2255,6 @@ mod tests {
                 memory_type: "project_fact".to_string(),
                 memory_scope: ScopeType::Artifact,
                 memory_scope_value: "artifact-1".to_string(),
-                evidence_segment_ids: vec!["seg-1".to_string()],
             }],
             entities: Vec::new(),
             relationships: Vec::new(),
@@ -2555,28 +2325,6 @@ mod tests {
             .retrieval_results_json
             .contains("\"object_id\": \"dobj-7\""));
     }
-}
-
-pub(crate) fn build_evidence_links(
-    derived_object_id: &str,
-    segment_ids: &[String],
-) -> Vec<NewEvidenceLink> {
-    segment_ids
-        .iter()
-        .enumerate()
-        .map(|(index, segment_id)| NewEvidenceLink {
-            evidence_link_id: new_id("evidence"),
-            derived_object_id: derived_object_id.to_string(),
-            segment_id: segment_id.clone(),
-            evidence_role: if index == 0 {
-                EvidenceRole::PrimarySupport
-            } else {
-                EvidenceRole::SecondarySupport
-            },
-            evidence_rank: (index + 1) as i64,
-            support_strength: SupportStrength::Strong,
-        })
-        .collect()
 }
 
 fn fail_job(
@@ -2746,11 +2494,6 @@ pub fn start_enrichment_workers_with_factory(
                 chunk_overlap_segments: 4,
                 max_chars_per_chunk: 25_000,
             });
-            let coverage_policy = Arc::new(ExtractCoveragePolicy {
-                min_coverage_percent: 60,
-                max_gap_fill_passes: 1,
-            });
-
             thread::Builder::new()
                 .name(format!("enrichment-worker-{}", worker_index))
                 .spawn(move || {
@@ -2767,7 +2510,6 @@ pub fn start_enrichment_workers_with_factory(
                             processor_factory,
                         },
                         chunking,
-                        coverage_policy,
                         poll_interval,
                         shutdown,
                     );
@@ -2815,10 +2557,6 @@ pub fn start_enrichment_pipeline(
     }
     let pid = std::process::id();
     let chunking = Arc::new(config.chunking.clone());
-    let coverage_policy = Arc::new(ExtractCoveragePolicy {
-        min_coverage_percent: config.extract_min_coverage_percent,
-        max_gap_fill_passes: config.extract_max_gap_fill_passes,
-    });
     let poll_interval = config.poll_interval;
     let direct_resources = Arc::new(WorkerResources {
         job_store: Arc::clone(&job_store),
@@ -2876,7 +2614,6 @@ pub fn start_enrichment_pipeline(
                 worker_count: mode.extract_workers,
                 resources: Arc::clone(&direct_resources),
                 chunking: Arc::clone(&chunking),
-                coverage_policy: Arc::clone(&coverage_policy),
                 poll_interval,
                 shutdown: shutdown.clone(),
             })?);
@@ -2888,7 +2625,6 @@ pub fn start_enrichment_pipeline(
                 worker_count: mode.reconcile_workers,
                 resources: Arc::clone(&direct_resources),
                 chunking: Arc::clone(&chunking),
-                coverage_policy: Arc::clone(&coverage_policy),
                 poll_interval,
                 shutdown: shutdown.clone(),
             })?);
@@ -2998,10 +2734,6 @@ fn spawn_reconcile_batch_workers(
         shutdown,
     } = config;
     let chunking = chunking.expect("reconcile batch workers require chunking placeholder");
-    let coverage_policy = Arc::new(ExtractCoveragePolicy {
-        min_coverage_percent: 60,
-        max_gap_fill_passes: 1,
-    });
     let resources = Arc::new(WorkerResources {
         job_store,
         read_store,
@@ -3020,7 +2752,6 @@ fn spawn_reconcile_batch_workers(
         worker_count,
         resources,
         chunking,
-        coverage_policy,
         poll_interval,
         shutdown,
     })
@@ -3045,10 +2776,6 @@ fn spawn_extract_batch_workers(
         shutdown,
     } = config;
     let chunking = chunking.expect("extract batch workers require chunking");
-    let coverage_policy = Arc::new(ExtractCoveragePolicy {
-        min_coverage_percent: 60,
-        max_gap_fill_passes: 1,
-    });
     let resources = Arc::new(WorkerResources {
         job_store,
         read_store,
@@ -3067,7 +2794,6 @@ fn spawn_extract_batch_workers(
         worker_count,
         resources,
         chunking,
-        coverage_policy,
         poll_interval,
         shutdown,
     })
@@ -3081,7 +2807,6 @@ struct DirectStageWorkerConfig {
     worker_count: usize,
     resources: Arc<WorkerResources>,
     chunking: Arc<ExtractionChunkingConfig>,
-    coverage_policy: Arc<ExtractCoveragePolicy>,
     poll_interval: Duration,
     shutdown: ShutdownToken,
 }
@@ -3094,7 +2819,6 @@ fn spawn_direct_stage_workers(
             let worker_id = format!("enrichment:{}:{}:{}", cfg.pid, cfg.stage_name, i);
             let resources = Arc::clone(&cfg.resources);
             let chunking = Arc::clone(&cfg.chunking);
-            let coverage_policy = Arc::clone(&cfg.coverage_policy);
             let shutdown = cfg.shutdown.clone();
             thread::Builder::new()
                 .name(format!("direct-{}-{}", cfg.stage_name, i))
@@ -3102,7 +2826,6 @@ fn spawn_direct_stage_workers(
                     let ctx = resources.as_context();
                     let policy = ExtractionPolicy {
                         chunking: chunking.as_ref(),
-                        coverage: coverage_policy.as_ref(),
                     };
                     direct_stage_worker_loop(
                         worker_id,

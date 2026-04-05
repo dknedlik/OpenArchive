@@ -119,18 +119,18 @@ The enrichment pipeline is durable and database-backed.
 Current job flow:
 
 1. import writes canonical archive rows and enqueues work
-2. extract produces summaries, classifications, memories, entities,
-   relationships, and retrieval intents
-3. retrieve-context resolves archive context for those intents
-4. reconcile turns extraction plus retrieved context into final active derived
-   objects and evidence links
+2. structural link writes deterministic artifact links available at import time
+3. extract produces summaries, classifications, memories, entities, and
+   relationships
+4. reconcile performs deterministic key matching, embedding-based candidate
+   lookup, and narrow ambiguous-case adjudication
 5. optional embedding jobs create vectors for derived-object search
 
 Execution modes:
 
 - `direct`: workers execute provider calls directly
-- `batch`: stage pollers submit and recover provider batch work without
-  blocking a thread on completion
+- `batch`: workers execute the same extraction and reconcile stages through
+  provider batch processors without blocking a thread on completion
 
 The pipeline must remain:
 

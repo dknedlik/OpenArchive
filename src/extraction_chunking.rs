@@ -4,30 +4,6 @@ use crate::config::ExtractionChunkingConfig;
 use crate::processor::ArtifactProcessorInput;
 use crate::storage::{ConversationWindowRef, LoadedSegment, TopicThreadRef};
 
-pub(crate) fn build_coverage_windows(
-    artifact_id: &str,
-    segments: &[LoadedSegment],
-    topic_threads: &[TopicThreadRef],
-    chunking: &ExtractionChunkingConfig,
-) -> Vec<ConversationWindowRef> {
-    if segments.is_empty() {
-        return Vec::new();
-    }
-
-    let covered: HashSet<i32> = topic_threads
-        .iter()
-        .flat_map(|thread| thread.spans.iter())
-        .flat_map(|span| span.start_sequence_no..=span.end_sequence_no)
-        .collect();
-    let uncovered: Vec<_> = segments
-        .iter()
-        .filter(|segment| !covered.contains(&segment.sequence_no))
-        .cloned()
-        .collect();
-
-    build_contiguous_windows(artifact_id, &uncovered, chunking)
-}
-
 pub(crate) fn build_chunk_inputs(
     input: &ArtifactProcessorInput,
     windows: &[ConversationWindowRef],
@@ -134,53 +110,6 @@ pub(crate) fn build_topic_thread_inputs(
     } else {
         inputs
     }
-}
-
-fn build_contiguous_windows(
-    artifact_id: &str,
-    segments: &[LoadedSegment],
-    chunking: &ExtractionChunkingConfig,
-) -> Vec<ConversationWindowRef> {
-    if segments.is_empty() {
-        return Vec::new();
-    }
-    if segments.len() <= chunking.max_segments_per_chunk {
-        return vec![ConversationWindowRef {
-            window_id: format!("{artifact_id}:window:0"),
-            label: "coverage fallback".to_string(),
-            start_sequence_no: segments
-                .first()
-                .map(|segment| segment.sequence_no)
-                .unwrap_or(0),
-            end_sequence_no: segments
-                .last()
-                .map(|segment| segment.sequence_no)
-                .unwrap_or(0),
-        }];
-    }
-
-    let mut windows = Vec::new();
-    let mut start = 0usize;
-    let step = chunking
-        .max_segments_per_chunk
-        .saturating_sub(chunking.chunk_overlap_segments)
-        .max(1);
-    while start < segments.len() {
-        let end = (start + chunking.max_segments_per_chunk).min(segments.len());
-        let first = &segments[start];
-        let last = &segments[end - 1];
-        windows.push(ConversationWindowRef {
-            window_id: format!("{artifact_id}:window:{}", windows.len()),
-            label: format!("messages {}-{}", first.sequence_no, last.sequence_no),
-            start_sequence_no: first.sequence_no,
-            end_sequence_no: last.sequence_no,
-        });
-        if end == segments.len() {
-            break;
-        }
-        start += step;
-    }
-    windows
 }
 
 fn split_chunk_input(

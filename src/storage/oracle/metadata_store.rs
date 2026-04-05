@@ -176,8 +176,7 @@ impl EnrichmentStateStore for OracleDerivedMetadataStore {
                            :9 AS target_key,
                            :10 AS matched_object_id,
                            :11 AS rationale,
-                           :12 AS evidence_segment_ids_json,
-                           :13 AS decision_json
+                           :12 AS decision_json
                       FROM dual
                  ) s
                  ON (t.reconciliation_decision_id = s.reconciliation_decision_id)
@@ -187,11 +186,11 @@ impl EnrichmentStateStore for OracleDerivedMetadataStore {
                  WHEN NOT MATCHED THEN INSERT
                      (reconciliation_decision_id, artifact_id, job_id, extraction_result_id,
                       pipeline_name, pipeline_version, decision_kind, target_kind, target_key, matched_object_id,
-                      rationale, evidence_segment_ids_json, decision_json)
+                      rationale, decision_json)
                      VALUES (s.reconciliation_decision_id, s.artifact_id, s.job_id, s.extraction_result_id,
                              s.pipeline_name, s.pipeline_version, s.decision_kind,
                              s.target_kind, s.target_key, s.matched_object_id, s.rationale,
-                             s.evidence_segment_ids_json, s.decision_json)",
+                             s.decision_json)",
                 &[
                     &decision.reconciliation_decision_id,
                     &decision.artifact_id,
@@ -205,8 +204,6 @@ impl EnrichmentStateStore for OracleDerivedMetadataStore {
                     &decision.target_key,
                     &decision.matched_object_id,
                     &decision.rationale,
-                    &serde_json::to_string(&decision.evidence_segment_ids)
-                        .expect("evidence ids serializable"),
                     &serde_json::to_string(decision).expect("decision serializable"),
                 ],
             )

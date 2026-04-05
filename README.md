@@ -8,7 +8,7 @@ machine-first interface.
 
 The goal is not just to make old files searchable. It is to build a grounded
 personal archive that accumulates durable knowledge over time: summaries,
-classifications, entities, relationships, memories, evidence links, and
+classifications, entities, relationships, memories, archive links, and
 user- or agent-authored writebacks. Source material goes in; structured,
 retrievable understanding comes out and grows with every import.
 
@@ -18,8 +18,8 @@ retrievable understanding comes out and grows with every import.
   exports today, with text documents and other formats following).
 - Preserve raw payload bytes outside the relational database.
 - Normalize source material into a canonical artifact and segment model.
-- Run a durable enrichment pipeline that extracts, reconciles, and embeds
-  structured knowledge from stored artifacts.
+- Run a durable enrichment pipeline that structurally links, extracts,
+  reconciles, and embeds structured knowledge from stored artifacts.
 - Expose retrieval and writeback through MCP, with a small HTTP surface for
   imports and basic listing.
 
@@ -54,7 +54,7 @@ What exists today:
 - Local filesystem object storage by default, with S3-compatible storage as an
   optional provider
 - Import handlers for ChatGPT, Claude, Grok, and Gemini export JSON
-- Durable asynchronous enrichment with extract, retrieve-context, reconcile,
+- Durable asynchronous enrichment with structural link, extract, reconcile,
   and optional embedding jobs
 - Archive retrieval through MCP
 - MCP writeback for memories, entities, links, and object status updates

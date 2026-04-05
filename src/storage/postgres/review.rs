@@ -66,14 +66,6 @@ pub fn list_review_candidates(
             fetch_limit,
         )?);
     }
-    if include_kind(ReviewItemKind::ObjectMissingEvidence) {
-        candidates.extend(list_object_missing_evidence(
-            client,
-            connection_string,
-            fetch_limit,
-        )?);
-    }
-
     Ok(candidates)
 }
 
@@ -414,58 +406,6 @@ fn list_candidate_key_collisions(
                     ),
                 })?,
             ),
-        });
-    }
-
-    Ok(candidates)
-}
-
-fn list_object_missing_evidence(
-    client: &mut Client,
-    connection_string: &str,
-    limit: i64,
-) -> StorageResult<Vec<ReviewCandidate>> {
-    let rows = client
-        .query(
-            "SELECT d.derived_object_id, d.artifact_id, a.source_type,
-                    to_char(a.captured_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'),
-                    d.derived_object_type, d.title, d.body_text
-             FROM oa_derived_object d
-             JOIN oa_artifact a ON a.artifact_id = d.artifact_id
-             LEFT JOIN oa_evidence_link e ON e.derived_object_id = d.derived_object_id
-             WHERE d.object_status = 'active'
-               AND d.origin_kind = 'inferred'
-               AND NOT EXISTS (
-                    SELECT 1
-                    FROM oa_review_decision rd
-                    WHERE rd.item_id = 'review:object_missing_evidence:' || d.derived_object_id
-                      AND rd.decision_status IN ('dismissed', 'resolved')
-               )
-             GROUP BY d.derived_object_id, d.artifact_id, a.source_type, a.captured_at,
-                      d.derived_object_type, d.title, d.body_text
-             HAVING COUNT(e.evidence_link_id) = 0
-             ORDER BY a.captured_at DESC, d.derived_object_id ASC
-             LIMIT $1",
-            &[&limit],
-        )
-        .map_err(|source| map_pg_err(connection_string, source))?;
-
-    let mut candidates = Vec::with_capacity(rows.len());
-    for row in rows {
-        let artifact_id: String = row.get(1);
-        candidates.push(ReviewCandidate {
-            kind: ReviewItemKind::ObjectMissingEvidence,
-            artifact_id: artifact_id.clone(),
-            derived_object_id: Some(row.get(0)),
-            source_type: parse_source_type(&artifact_id, row.get(2))?,
-            captured_at: row.get(3),
-            title: row.get(5),
-            body_text: row.get(6),
-            derived_object_type: Some(parse_derived_object_type(&artifact_id, row.get(4))?),
-            candidate_key: None,
-            enrichment_status: None,
-            confidence_score: None,
-            related_artifact_count: None,
         });
     }
 

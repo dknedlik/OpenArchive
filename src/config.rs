@@ -682,27 +682,6 @@ fn optional_usize_env(key: &'static str) -> ConfigResult<Option<usize>> {
     }
 }
 
-fn optional_percentage_env(key: &'static str) -> ConfigResult<Option<u8>> {
-    match env::var(key) {
-        Ok(raw) => {
-            let value = raw
-                .parse::<u8>()
-                .map_err(|_| ConfigError::InvalidPositiveIntegerEnv {
-                    key,
-                    value: raw.clone(),
-                })?;
-            if value == 0 {
-                return Err(ConfigError::InvalidPositiveIntegerEnv { key, value: raw });
-            }
-            if value > 100 {
-                return Err(ConfigError::InvalidPositiveIntegerEnv { key, value: raw });
-            }
-            Ok(Some(value))
-        }
-        Err(_) => Ok(None),
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageConfig {
     pub batch_size: usize,
@@ -738,8 +717,6 @@ pub struct EnrichmentPipelineConfig {
     pub direct: DirectPipelineModeConfig,
     pub batch: BatchPipelineModeConfig,
     pub chunking: ExtractionChunkingConfig,
-    pub extract_min_coverage_percent: u8,
-    pub extract_max_gap_fill_passes: usize,
 }
 
 impl EnrichmentPipelineConfig {
@@ -790,12 +767,6 @@ impl EnrichmentPipelineConfig {
                 max_chars_per_chunk: positive_usize_env("OA_EXTRACT_CHUNK_MAX_CHARS")?
                     .unwrap_or(25_000),
             },
-            extract_min_coverage_percent: optional_percentage_env(
-                "OA_EXTRACT_MIN_COVERAGE_PERCENT",
-            )?
-            .unwrap_or(60),
-            extract_max_gap_fill_passes: positive_usize_env("OA_EXTRACT_MAX_GAP_FILL_PASSES")?
-                .unwrap_or(1),
         })
     }
 }
@@ -881,8 +852,6 @@ mod tests {
             "OA_EXTRACT_CHUNK_SEGMENTS",
             "OA_EXTRACT_CHUNK_OVERLAP",
             "OA_EXTRACT_CHUNK_MAX_CHARS",
-            "OA_EXTRACT_MIN_COVERAGE_PERCENT",
-            "OA_EXTRACT_MAX_GAP_FILL_PASSES",
             "OA_GEMINI_BATCH_ENABLED",
             "OA_GEMINI_BATCH_MAX_JOBS",
             "OA_GEMINI_BATCH_MAX_BYTES",
@@ -1138,8 +1107,6 @@ mod tests {
         assert_eq!(config.chunking.max_segments_per_chunk, 20);
         assert_eq!(config.chunking.chunk_overlap_segments, 4);
         assert_eq!(config.chunking.max_chars_per_chunk, 25_000);
-        assert_eq!(config.extract_min_coverage_percent, 60);
-        assert_eq!(config.extract_max_gap_fill_passes, 1);
         assert_eq!(config.direct.embedding_workers, 1);
         assert_eq!(config.batch.embedding_workers, 1);
     }

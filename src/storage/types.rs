@@ -1101,7 +1101,7 @@ pub struct NewEvidenceLink {
 // Job payload contract
 // ---------------------------------------------------------------------------
 
-/// Segment-scoped work unit for extraction chunking and coverage repair.
+/// Sequence-scoped work unit for extraction chunking.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ConversationWindowRef {
     pub window_id: String,
@@ -1413,7 +1413,6 @@ pub struct CandidateEntity {
     pub entity_key: String,
     pub display_name: String,
     pub entity_type: String,
-    pub evidence_segment_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1424,7 +1423,6 @@ pub struct CandidateRelationship {
     pub title: Option<String>,
     pub body_text: String,
     pub confidence_label: String,
-    pub evidence_segment_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1433,7 +1431,6 @@ pub struct ExtractedClassification {
     pub body_text: Option<String>,
     pub classification_type: String,
     pub classification_value: String,
-    pub evidence_segment_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1445,7 +1442,6 @@ pub struct ExtractedMemory {
     pub memory_type: String,
     pub memory_scope: ScopeType,
     pub memory_scope_value: String,
-    pub evidence_segment_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1454,7 +1450,6 @@ pub struct RetrievalIntent {
     pub question: String,
     pub query_text: String,
     pub intent_type: String,
-    pub evidence_segment_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1466,12 +1461,10 @@ pub struct ArtifactExtractionResult {
     pub pipeline_version: String,
     pub summary_title: Option<String>,
     pub summary_body_text: String,
-    pub summary_evidence_segment_ids: Vec<String>,
     pub classifications: Vec<ExtractedClassification>,
     pub memories: Vec<ExtractedMemory>,
     pub entities: Vec<CandidateEntity>,
     pub relationships: Vec<CandidateRelationship>,
-    pub retrieval_intents: Vec<RetrievalIntent>,
     pub status: String,
     pub error_message: Option<String>,
 }
@@ -1513,7 +1506,6 @@ pub struct ReconciliationDecision {
     pub target_key: String,
     pub matched_object_id: Option<String>,
     pub rationale: String,
-    pub evidence_segment_ids: Vec<String>,
     pub status: String,
     pub error_message: Option<String>,
 }

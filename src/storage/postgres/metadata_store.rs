@@ -99,8 +99,8 @@ impl EnrichmentStateStore for PostgresDerivedMetadataStore {
                     "INSERT INTO oa_reconciliation_decision
                      (reconciliation_decision_id, artifact_id, job_id, extraction_result_id,
                       pipeline_name, pipeline_version, decision_kind, target_kind, target_key, matched_object_id,
-                      rationale, evidence_segment_ids_json, decision_json)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb, $8, $9, $10, $11, $12::text::jsonb, $13::text::jsonb)
+                      rationale, decision_json)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb, $8, $9, $10, $11, $12::text::jsonb)
                      ON CONFLICT (reconciliation_decision_id) DO UPDATE
                      SET decision_json = EXCLUDED.decision_json,
                          rationale = EXCLUDED.rationale",
@@ -117,8 +117,6 @@ impl EnrichmentStateStore for PostgresDerivedMetadataStore {
                         &decision.target_key,
                         &decision.matched_object_id,
                         &decision.rationale,
-                        &serde_json::to_string(&decision.evidence_segment_ids)
-                            .expect("evidence ids serializable"),
                         &serde_json::to_string(decision).expect("decision serializable"),
                     ],
                 )

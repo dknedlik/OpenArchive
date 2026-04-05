@@ -605,15 +605,9 @@ fn parse_extraction_pipeline_output(
         });
     }
 
-    let evidence_segment_ids = input
-        .segments
-        .iter()
-        .map(|segment| segment.segment_id.clone())
-        .collect::<Vec<_>>();
     let summary = SummaryOutput {
         title: normalize_optional_text(parsed.summary.title),
         body_text: parsed.summary.body_text.trim().to_string(),
-        evidence_segment_ids: evidence_segment_ids.clone(),
     };
 
     let classifications = parsed
@@ -629,7 +623,6 @@ fn parse_extraction_pipeline_output(
                 classification.classification_type.trim().to_string()
             },
             classification_value: classification.label.trim().to_string(),
-            evidence_segment_ids: evidence_segment_ids.clone(),
         })
         .collect::<Vec<_>>();
 
@@ -655,7 +648,6 @@ fn parse_extraction_pipeline_output(
                     memory_type: memory.memory_type.trim().to_string(),
                     memory_scope: ScopeType::Artifact,
                     memory_scope_value: memory.memory_scope_value.trim().to_string(),
-                    evidence_segment_ids: evidence_segment_ids.clone(),
                 }
             })
             .collect(),
@@ -673,7 +665,6 @@ fn parse_extraction_pipeline_output(
                 ),
                 display_name: entity.display_name.trim().to_string(),
                 entity_type: canonicalize_entity_type(&entity.entity_type),
-                evidence_segment_ids: evidence_segment_ids.clone(),
             })
             .collect(),
     );
@@ -719,7 +710,6 @@ fn parse_extraction_pipeline_output(
                     title: normalize_optional_text(relationship.title),
                     body_text: relationship.body_text.trim().to_string(),
                     confidence_label: "high".to_string(),
-                    evidence_segment_ids: evidence_segment_ids.clone(),
                 })
             })
             .collect::<Result<Vec<_>, _>>()?,
@@ -737,7 +727,6 @@ fn parse_extraction_pipeline_output(
         memories,
         entities,
         relationships,
-        retrieval_intents: Vec::new(),
         importance_score: 5,
     })
 }
@@ -874,6 +863,5 @@ mod tests {
             output.relationships[0].object_key,
             output.entities[1].entity_key
         );
-        assert_eq!(output.summary.evidence_segment_ids, vec!["seg-1"]);
     }
 }
