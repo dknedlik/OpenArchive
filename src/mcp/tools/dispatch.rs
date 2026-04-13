@@ -3,8 +3,8 @@ use serde_json::Value;
 use crate::app::ArchiveApplication;
 
 use super::handlers::{
-    handle_get_artifact, handle_get_context_pack, handle_get_related, handle_get_timeline,
-    handle_link_objects, handle_list_artifacts, handle_list_review_items,
+    handle_get_artifact, handle_get_context_pack, handle_get_note_metadata, handle_get_related,
+    handle_get_timeline, handle_link_objects, handle_list_artifacts, handle_list_review_items,
     handle_record_review_decision, handle_retry_artifact_enrichment, handle_search_archive,
     handle_search_objects, handle_store_entity, handle_store_memory, handle_update_object,
 };
@@ -21,6 +21,7 @@ pub(in crate::mcp) fn call_tool(app: &ArchiveApplication, params: Value) -> Valu
         "search_archive" => handle_search_archive(app, &arguments),
         "get_artifact" => handle_get_artifact(app, &arguments),
         "get_context_pack" => handle_get_context_pack(app, &arguments),
+        "get_note_metadata" => handle_get_note_metadata(app, &arguments),
         "search_objects" => handle_search_objects(app, &arguments),
         "store_memory" => handle_store_memory(app, &arguments),
         "link_objects" => handle_link_objects(app, &arguments),

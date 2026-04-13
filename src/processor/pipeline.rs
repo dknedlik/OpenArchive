@@ -1,7 +1,5 @@
 use super::*;
 
-#[path = "pipeline_candidate.rs"]
-mod candidate;
 #[path = "pipeline_cleanup.rs"]
 mod cleanup;
 #[path = "pipeline_error.rs"]
@@ -15,37 +13,17 @@ mod schema;
 
 pub use error::ProcessorError;
 pub use reconciliation::memory_candidate_key_from_fields;
-pub use schema::structured_output_schema;
 
-pub(crate) use super::artifact_policy::extraction_policy_for;
-pub(crate) use candidate::ModelCandidateArtifactOutput;
-#[cfg(test)]
-pub(crate) use cleanup::canonicalize_memory_type;
 pub(crate) use cleanup::{
-    canonicalize_entity_type, canonicalize_memory_type_for_input,
-    cleanup_artifact_processor_output, normalize_candidate_key_text, normalize_optional_text,
+    canonicalize_entity_type, cleanup_artifact_processor_output, normalize_candidate_key_text,
+    normalize_optional_text,
 };
 pub(crate) use prompts::{
-    allowed_artifact_evidence_refs, attach_output_preview, build_reconciliation_prompt,
-    build_repair_prompt, build_segment_alias_map, build_two_phase_candidate_user_prompt,
-    build_two_phase_candidate_user_prompt_with_flavor, candidate_system_prompt, preview,
-    should_retry_with_repair, should_shape_artifact_input, PromptFlavor, ANTHROPIC_PROMPT_VERSION,
-    GEMINI_PROMPT_VERSION, GROK_PROMPT_VERSION, OPENAI_PROMPT_VERSION,
-    RECONCILIATION_SYSTEM_PROMPT, TWO_PHASE_CANDIDATE_MAX_OUTPUT_TOKENS,
+    attach_output_preview, build_reconciliation_prompt, build_repair_prompt, preview,
+    should_retry_with_repair, RECONCILIATION_SYSTEM_PROMPT,
 };
-pub(crate) use reconciliation::{
-    retain_valid_items, validate_evidence_ids, validate_input, validate_text_field,
-    ModelReconciliationOutput,
-};
-pub(crate) use schema::{
-    candidate_output_schema_with_allowed_refs, candidate_output_schema_wrapper,
-    parse_candidate_output, reconciliation_output_schema, reconciliation_output_schema_wrapper,
-};
+pub(crate) use reconciliation::{validate_input, ModelReconciliationOutput};
+pub(crate) use schema::{reconciliation_output_schema, reconciliation_output_schema_wrapper};
 
-#[cfg(test)]
-pub(crate) use prompts::{
-    build_conversation_user_prompt, build_conversation_user_prompt_with_flavor,
-    build_document_user_prompt, build_document_user_prompt_with_flavor,
-};
 #[cfg(test)]
 pub(crate) use reconciliation::ModelReconciliationDecision;

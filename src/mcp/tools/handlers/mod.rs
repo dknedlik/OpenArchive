@@ -3,8 +3,8 @@ mod review;
 mod writeback;
 
 pub(super) use read::{
-    handle_get_artifact, handle_get_context_pack, handle_get_related, handle_get_timeline,
-    handle_list_artifacts, handle_search_archive, handle_search_objects,
+    handle_get_artifact, handle_get_context_pack, handle_get_note_metadata, handle_get_related,
+    handle_get_timeline, handle_list_artifacts, handle_search_archive, handle_search_objects,
 };
 pub(super) use review::{
     handle_list_review_items, handle_record_review_decision, handle_retry_artifact_enrichment,

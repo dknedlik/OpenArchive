@@ -230,19 +230,6 @@ impl DerivedMetadataHarness for OracleHarness {
         ).expect("derived count with status").0
     }
 
-    fn count_evidence_links_for_objects(&self, derived_object_ids: &[String]) -> i64 {
-        let conn = open_archive::db::connect(&self.0).expect("connect");
-        let [a, b, c] = derived_object_ids else {
-            panic!("expected 3 object ids")
-        };
-        conn.query_row_as::<(i64,)>(
-            "SELECT COUNT(*) FROM oa_evidence_link WHERE derived_object_id IN (:1, :2, :3)",
-            &[a, b, c],
-        )
-        .expect("evidence count")
-        .0
-    }
-
     fn fetch_object_json(&self, derived_object_id: &str) -> Value {
         let conn = open_archive::db::connect(&self.0).expect("connect");
         let payload: String = conn
@@ -275,16 +262,6 @@ impl DerivedMetadataHarness for OracleHarness {
         .0
     }
 
-    fn count_evidence_links_for_object(&self, derived_object_id: &str) -> i64 {
-        let conn = open_archive::db::connect(&self.0).expect("connect");
-        conn.query_row_as::<(i64,)>(
-            "SELECT COUNT(*) FROM oa_evidence_link WHERE derived_object_id = :1",
-            &[&derived_object_id],
-        )
-        .expect("evidence count")
-        .0
-    }
-
     fn count_derived_objects_for_artifact_with_status(
         &self,
         artifact_id: &str,
@@ -302,23 +279,9 @@ impl DerivedMetadataHarness for OracleHarness {
 
 #[test]
 #[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
-fn writes_summary_classification_and_memory_with_evidence() {
+fn writes_summary_classification_and_memory() {
     let Some(harness) = harness() else { return };
-    contracts::contract_writes_summary_classification_and_memory_with_evidence(&harness);
-}
-
-#[test]
-#[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
-fn rejects_cross_artifact_evidence_links_without_writing_rows() {
-    let Some(harness) = harness() else { return };
-    contracts::contract_rejects_cross_artifact_evidence_links_without_writing_rows(&harness);
-}
-
-#[test]
-#[ignore = "requires local Oracle; set OA_ORACLE_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
-fn rolls_back_partial_writes_when_evidence_insert_fails() {
-    let Some(harness) = harness() else { return };
-    contracts::contract_rolls_back_partial_writes_when_evidence_insert_fails(&harness);
+    contracts::contract_writes_summary_classification_and_memory(&harness);
 }
 
 #[test]

@@ -162,7 +162,11 @@ fn tool_success_uses_compact_summary_text() {
         ]
     }));
 
-    assert_eq!(response["content"][0]["text"], "2 results");
+    let text = response["content"][0]["text"]
+        .as_str()
+        .expect("text response");
+    assert!(text.starts_with("2 results\n{"));
+    assert!(text.contains("\"results\""));
     assert_eq!(
         response["structuredContent"]["results"]
             .as_array()
@@ -187,12 +191,11 @@ fn get_artifact_summary_text_prefers_payload_shape_over_found_flag() {
         response["content"][0]["text"],
         Value::String("found".to_string())
     );
-    assert_eq!(
-        response["content"][0]["text"],
-        Value::String(
-            "artifact: 1 summaries, 1 classifications, 1 memories, 1 segments".to_string()
-        )
-    );
+    let text = response["content"][0]["text"]
+        .as_str()
+        .expect("artifact text");
+    assert!(text.starts_with("artifact: 1 summaries, 1 classifications, 1 memories, 1 segments"));
+    assert!(text.contains("\"artifact_id\": \"artifact-1\""));
 }
 
 #[test]
@@ -211,16 +214,57 @@ fn get_context_pack_summary_text_prefers_payload_shape_over_found_flag() {
         response["content"][0]["text"],
         Value::String("found".to_string())
     );
+    let text = response["content"][0]["text"]
+        .as_str()
+        .expect("context pack text");
+    assert!(text
+        .starts_with("context pack: 0 summaries, 0 classifications, 0 memories, 0 relationships"));
+    assert!(text.contains("\"context_pack\""));
+}
+
+#[test]
+fn get_note_metadata_returns_note_focused_payload() {
+    let response = call_tool(
+        &test_app(),
+        json!({
+            "name": "get_note_metadata",
+            "arguments": {
+                "artifact_id": "artifact-1"
+            }
+        }),
+    );
+
+    assert_eq!(response["isError"], Value::Bool(false));
+    let text = response["content"][0]["text"].as_str().expect("note text");
+    assert!(text
+        .starts_with("note: 1 properties, 1 tags, 1 aliases, 1 outbound links, 1 inbound links, 1 artifact links"));
+    assert!(text.contains("\"note_path\": \"Inbox.md\""));
     assert_eq!(
-        response["content"][0]["text"],
-        Value::String(
-            "context pack: 0 summaries, 0 classifications, 0 memories, 0 relationships".to_string()
-        )
+        response["structuredContent"]["note"]["note_path"],
+        Value::String("Inbox.md".to_string())
+    );
+    assert_eq!(
+        response["structuredContent"]["note"]["imported_note_metadata"]["tags"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        response["structuredContent"]["note"]["inbound_note_links"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        response["structuredContent"]["note"]["artifact_links"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
     );
 }
 
 #[test]
-fn list_review_items_returns_items_with_compact_summary_text() {
+fn list_review_items_includes_visible_payload_text() {
     let response = call_tool(
         &test_app(),
         json!({
@@ -233,7 +277,12 @@ fn list_review_items_returns_items_with_compact_summary_text() {
     );
 
     assert_eq!(response["isError"], Value::Bool(false));
-    assert_eq!(response["content"][0]["text"], "1 review items");
+    let text = response["content"][0]["text"]
+        .as_str()
+        .expect("review queue text");
+    assert!(text.starts_with("1 review items\n{"));
+    assert!(text.contains("\"items\""));
+    assert!(text.contains("\"candidate_key\""));
     assert_eq!(
         response["structuredContent"]["items"]
             .as_array()
@@ -332,9 +381,9 @@ impl crate::storage::ArtifactDetailReadStore for MockArtifactDetailStore {
             artifact: crate::storage::ArtifactDetailRecord {
                 artifact_id: artifact_id.to_string(),
                 title: Some("Artifact".to_string()),
-                source_type: crate::storage::SourceType::ChatGptExport,
+                source_type: crate::storage::SourceType::ObsidianVault,
                 enrichment_status: crate::storage::EnrichmentStatus::Completed,
-                note_path: None,
+                note_path: Some("Inbox.md".to_string()),
             },
             segments: vec![crate::storage::ArtifactDetailSegment {
                 segment_id: "seg-1".to_string(),
@@ -366,8 +415,68 @@ impl crate::storage::ArtifactDetailReadStore for MockArtifactDetailStore {
                     confidence_score: None,
                 },
             ],
-            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
-            inbound_note_links: Vec::new(),
+            imported_note_metadata: crate::storage::ImportedNoteMetadata {
+                note_path: Some("Inbox.md".to_string()),
+                properties: vec![crate::storage::ImportedNotePropertyRecord {
+                    property_key: "status".to_string(),
+                    value_kind: crate::storage::ImportedNotePropertyValueKind::String,
+                    value_text: Some("open".to_string()),
+                    value_json: serde_json::json!("open"),
+                }],
+                tags: vec![crate::storage::ImportedNoteTagRecord {
+                    raw_tag: "#inbox".to_string(),
+                    normalized_tag: "inbox".to_string(),
+                    tag_path: "inbox".to_string(),
+                    source_kind: crate::storage::ImportedNoteTagSourceKind::Inline,
+                }],
+                aliases: vec![crate::storage::ImportedNoteAliasRecord {
+                    alias_text: "OA Inbox".to_string(),
+                    normalized_alias: "oa inbox".to_string(),
+                }],
+                outbound_links: vec![crate::storage::ImportedNoteLinkRecord {
+                    imported_note_link_id: "out-1".to_string(),
+                    source_segment_id: Some("seg-1".to_string()),
+                    link_kind: crate::storage::ImportedNoteLinkKind::Link,
+                    target_kind: crate::storage::ImportedNoteLinkTargetKind::Note,
+                    raw_target: "Projects/Acme".to_string(),
+                    normalized_target: Some("projects/acme".to_string()),
+                    display_text: Some("Acme".to_string()),
+                    target_path: Some("Projects/Acme.md".to_string()),
+                    target_heading: None,
+                    target_block: None,
+                    external_url: None,
+                    resolved_artifact_id: Some("artifact-2".to_string()),
+                    resolution_status: crate::storage::ImportedNoteLinkResolutionStatus::Resolved,
+                    locator_json: None,
+                }],
+            },
+            inbound_note_links: vec![crate::storage::ImportedNoteLinkRecord {
+                imported_note_link_id: "in-1".to_string(),
+                source_segment_id: None,
+                link_kind: crate::storage::ImportedNoteLinkKind::Link,
+                target_kind: crate::storage::ImportedNoteLinkTargetKind::Note,
+                raw_target: "Inbox".to_string(),
+                normalized_target: Some("inbox".to_string()),
+                display_text: Some("Inbox".to_string()),
+                target_path: Some("Inbox.md".to_string()),
+                target_heading: None,
+                target_block: None,
+                external_url: None,
+                resolved_artifact_id: Some(artifact_id.to_string()),
+                resolution_status: crate::storage::ImportedNoteLinkResolutionStatus::Resolved,
+                locator_json: None,
+            }],
+            artifact_links: vec![crate::storage::ArtifactLinkRecord {
+                artifact_link_id: "artlink-1".to_string(),
+                source_artifact_id: artifact_id.to_string(),
+                source_title: Some("Artifact".to_string()),
+                source_note_path: Some("Inbox.md".to_string()),
+                target_artifact_id: "artifact-2".to_string(),
+                target_title: Some("Acme".to_string()),
+                target_note_path: Some("Projects/Acme.md".to_string()),
+                link_type: crate::storage::ArtifactLinkType::Wikilink,
+                link_value: "Projects/Acme.md".to_string(),
+            }],
         }))
     }
 }
@@ -386,13 +495,51 @@ impl crate::storage::ArtifactContextPackReadStore for MockContextPackStore {
             artifact: crate::storage::ArtifactDetailRecord {
                 artifact_id: artifact_id.to_string(),
                 title: Some("Artifact".to_string()),
-                source_type: crate::storage::SourceType::ChatGptExport,
+                source_type: crate::storage::SourceType::ObsidianVault,
                 enrichment_status: crate::storage::EnrichmentStatus::Completed,
-                note_path: None,
+                note_path: Some("Inbox.md".to_string()),
             },
             segments: vec![],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata {
+                note_path: Some("Inbox.md".to_string()),
+                properties: vec![],
+                tags: vec![crate::storage::ImportedNoteTagRecord {
+                    raw_tag: "#inbox".to_string(),
+                    normalized_tag: "inbox".to_string(),
+                    tag_path: "inbox".to_string(),
+                    source_kind: crate::storage::ImportedNoteTagSourceKind::Inline,
+                }],
+                aliases: vec![],
+                outbound_links: vec![],
+            },
+            inbound_note_links: vec![crate::storage::ImportedNoteLinkRecord {
+                imported_note_link_id: "in-1".to_string(),
+                source_segment_id: None,
+                link_kind: crate::storage::ImportedNoteLinkKind::Link,
+                target_kind: crate::storage::ImportedNoteLinkTargetKind::Note,
+                raw_target: "Inbox".to_string(),
+                normalized_target: Some("inbox".to_string()),
+                display_text: Some("Inbox".to_string()),
+                target_path: Some("Inbox.md".to_string()),
+                target_heading: None,
+                target_block: None,
+                external_url: None,
+                resolved_artifact_id: Some(artifact_id.to_string()),
+                resolution_status: crate::storage::ImportedNoteLinkResolutionStatus::Resolved,
+                locator_json: None,
+            }],
+            artifact_links: vec![crate::storage::ArtifactLinkRecord {
+                artifact_link_id: "artlink-1".to_string(),
+                source_artifact_id: artifact_id.to_string(),
+                source_title: Some("Artifact".to_string()),
+                source_note_path: Some("Inbox.md".to_string()),
+                target_artifact_id: "artifact-2".to_string(),
+                target_title: Some("Acme".to_string()),
+                target_note_path: Some("Projects/Acme.md".to_string()),
+                link_type: crate::storage::ArtifactLinkType::SharedTag,
+                link_value: "inbox".to_string(),
+            }],
             derived_objects: vec![],
-            evidence_links: vec![],
         }))
     }
 }

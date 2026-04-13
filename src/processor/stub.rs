@@ -1,6 +1,4 @@
-use crate::storage::types::{
-    EnrichmentTier, ReconciliationDecisionKind, RetrievalIntent, ScopeType,
-};
+use crate::storage::types::{EnrichmentTier, ReconciliationDecisionKind, ScopeType};
 
 use super::*;
 
@@ -12,14 +10,6 @@ impl ArtifactProcessor for StubProcessor {
         &self,
         input: &ArtifactProcessorInput,
     ) -> Result<ArtifactProcessorOutput, ProcessorError> {
-        let first_segment_id = input
-            .segments
-            .first()
-            .map(|segment| segment.segment_id.clone())
-            .ok_or_else(|| ProcessorError::InvalidInput {
-                detail: format!("artifact {} has no segments to enrich", input.artifact_id),
-            })?;
-        let evidence_segment_ids = vec![first_segment_id];
         let segment_count = input.segments.len();
         let participant_count = input.participants.len();
         let title = input
@@ -40,7 +30,6 @@ impl ArtifactProcessor for StubProcessor {
                     "Stub summary for artifact {} with {} segments and {} participants.",
                     input.artifact_id, segment_count, participant_count
                 ),
-                evidence_segment_ids: evidence_segment_ids.clone(),
             },
             classifications: vec![ClassificationOutput {
                 title: Some("Source type".to_string()),
@@ -51,7 +40,6 @@ impl ArtifactProcessor for StubProcessor {
                 )),
                 classification_type: "topic".to_string(),
                 classification_value: "stub_enrichment".to_string(),
-                evidence_segment_ids: evidence_segment_ids.clone(),
             }],
             memories: vec![MemoryOutput {
                 candidate_key: memory_candidate_key_from_fields(
@@ -72,7 +60,6 @@ impl ArtifactProcessor for StubProcessor {
                 memory_type: "project_fact".to_string(),
                 memory_scope: ScopeType::Artifact,
                 memory_scope_value: input.artifact_id.clone(),
-                evidence_segment_ids,
             }],
             entities: input
                 .participants
@@ -90,7 +77,6 @@ impl ArtifactProcessor for StubProcessor {
                         .clone()
                         .unwrap_or_else(|| format!("Participant {index}")),
                     entity_type: "participant".to_string(),
-                    evidence_segment_ids: vec![input.segments[0].segment_id.clone()],
                 })
                 .collect(),
             relationships: if input.participants.len() >= 2 {
@@ -114,18 +100,10 @@ impl ArtifactProcessor for StubProcessor {
                     body_text: "The artifact captures an interaction between two participants."
                         .to_string(),
                     confidence_label: "medium".to_string(),
-                    evidence_segment_ids: vec![input.segments[0].segment_id.clone()],
                 }]
             } else {
                 Vec::new()
             },
-            retrieval_intents: vec![RetrievalIntent {
-                intent_id: "intent-stub-1".to_string(),
-                question: "Find prior archive context related to the artifact memory.".to_string(),
-                query_text: title.clone(),
-                intent_type: "memory_match".to_string(),
-                evidence_segment_ids: vec![input.segments[0].segment_id.clone()],
-            }],
             importance_score: 1,
         })
     }
@@ -148,7 +126,6 @@ impl ReconciliationProcessor for StubReconciliationProcessor {
                 target_key: memory.candidate_key.clone(),
                 matched_object_id: None,
                 rationale: "Stub reconciliation defaults to create_new.".to_string(),
-                evidence_segment_ids: memory.evidence_segment_ids.clone(),
             })
             .chain(
                 input
@@ -160,7 +137,6 @@ impl ReconciliationProcessor for StubReconciliationProcessor {
                         target_key: entity.entity_key.clone(),
                         matched_object_id: None,
                         rationale: "Stub reconciliation defaults to create_new.".to_string(),
-                        evidence_segment_ids: entity.evidence_segment_ids.clone(),
                     }),
             )
             .chain(
@@ -178,7 +154,6 @@ impl ReconciliationProcessor for StubReconciliationProcessor {
                         ),
                         matched_object_id: None,
                         rationale: "Stub reconciliation defaults to create_new.".to_string(),
-                        evidence_segment_ids: relationship.evidence_segment_ids.clone(),
                     }),
             )
             .collect())
@@ -189,24 +164,14 @@ impl ReconciliationProcessor for StubReconciliationProcessor {
 pub struct StubProcessorFactory;
 
 impl ArtifactProcessorFactory for StubProcessorFactory {
-    fn build(&self, tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError> {
-        match tier {
-            EnrichmentTier::Standard => Ok(Box::new(StubProcessor)),
-            unsupported => Err(ProcessorError::UnsupportedTier {
-                tier: unsupported.as_str().to_string(),
-            }),
-        }
+    fn build(&self, _tier: EnrichmentTier) -> Result<Box<dyn ArtifactProcessor>, ProcessorError> {
+        Ok(Box::new(StubProcessor))
     }
 
     fn build_reconciliation_processor(
         &self,
-        tier: EnrichmentTier,
+        _tier: EnrichmentTier,
     ) -> Result<Box<dyn ReconciliationProcessor>, ProcessorError> {
-        match tier {
-            EnrichmentTier::Standard => Ok(Box::new(StubReconciliationProcessor)),
-            unsupported => Err(ProcessorError::UnsupportedTier {
-                tier: unsupported.as_str().to_string(),
-            }),
-        }
+        Ok(Box::new(StubReconciliationProcessor))
     }
 }

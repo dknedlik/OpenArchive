@@ -1,7 +1,7 @@
 use crate::error::StorageResult;
 use crate::storage::types::{
-    DerivedObjectType, EnrichmentStatus, EvidenceRole, ImportedNoteLinkRecord,
-    ImportedNoteMetadata, ScopeType, SourceType, SupportStrength,
+    ArtifactLinkRecord, DerivedObjectType, EnrichmentStatus, ImportedNoteLinkRecord,
+    ImportedNoteMetadata, ScopeType, SourceType,
 };
 use crate::ParticipantRole;
 
@@ -76,6 +76,7 @@ pub struct ArtifactDetailView {
     pub segments: Vec<ArtifactDetailSegment>,
     pub imported_note_metadata: ImportedNoteMetadata,
     pub inbound_note_links: Vec<ImportedNoteLinkRecord>,
+    pub artifact_links: Vec<ArtifactLinkRecord>,
     pub derived_objects: Vec<ArtifactDetailDerivedObject>,
 }
 
@@ -94,22 +95,14 @@ pub struct ArtifactContextDerivedObject {
     pub candidate_key: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArtifactContextEvidenceLink {
-    pub evidence_link_id: String,
-    pub derived_object_id: String,
-    pub segment_id: String,
-    pub evidence_role: EvidenceRole,
-    pub support_strength: SupportStrength,
-    pub evidence_rank: i32,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArtifactContextPackMaterial {
     pub artifact: ArtifactDetailRecord,
     pub segments: Vec<ArtifactDetailSegment>,
+    pub imported_note_metadata: ImportedNoteMetadata,
+    pub inbound_note_links: Vec<ImportedNoteLinkRecord>,
+    pub artifact_links: Vec<ArtifactLinkRecord>,
     pub derived_objects: Vec<ArtifactContextDerivedObject>,
-    pub evidence_links: Vec<ArtifactContextEvidenceLink>,
 }
 
 pub trait ArtifactContextPackReadStore: Send + Sync {
@@ -183,7 +176,7 @@ impl<T> MvpRetrievalReadStore for T where
 {
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
 pub struct RelatedDerivedObject {
     pub derived_object_id: String,
     pub artifact_id: String,
@@ -192,6 +185,18 @@ pub struct RelatedDerivedObject {
     pub body_text: Option<String>,
     pub candidate_key: Option<String>,
     pub confidence_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct RelatedDerivedObjectEmbeddingMatch {
+    pub derived_object_id: String,
+    pub artifact_id: String,
+    pub derived_object_type: DerivedObjectType,
+    pub title: Option<String>,
+    pub body_text: Option<String>,
+    pub candidate_key: Option<String>,
+    pub confidence_score: Option<f64>,
+    pub similarity_score: f32,
 }
 
 pub trait CrossArtifactReadStore: Send + Sync {
@@ -203,4 +208,14 @@ pub trait CrossArtifactReadStore: Send + Sync {
         candidate_keys: &[String],
         limit: usize,
     ) -> StorageResult<Vec<RelatedDerivedObject>>;
+
+    /// Given a freshly embedded candidate, find active derived objects from
+    /// OTHER artifacts of the same type ordered by embedding similarity.
+    fn find_related_by_embedding(
+        &self,
+        artifact_id: &str,
+        derived_object_type: DerivedObjectType,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> StorageResult<Vec<RelatedDerivedObjectEmbeddingMatch>>;
 }

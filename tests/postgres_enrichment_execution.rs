@@ -175,17 +175,4 @@ fn test_stub_worker_persists_derivations_and_completes_job() {
         .expect("object count")
         .get(0);
     assert!(object_count >= 3);
-
-    let evidence_count: i64 = client
-        .query_one(
-            "SELECT COUNT(*) \
-             FROM oa_evidence_link e \
-             JOIN oa_derived_object o ON o.derived_object_id = e.derived_object_id \
-             JOIN oa_derivation_run r ON r.derivation_run_id = o.derivation_run_id \
-             WHERE r.job_id = $1",
-            &[&job_id],
-        )
-        .expect("evidence count")
-        .get(0);
-    assert!(evidence_count >= 3);
 }

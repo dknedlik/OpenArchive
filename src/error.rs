@@ -407,6 +407,17 @@ pub enum StorageError {
         source: Box<dyn StdError + Send + Sync>,
     },
 
+    #[error(
+        "failed to insert artifact link from {source_artifact_id} to {target_artifact_id} ({link_type})"
+    )]
+    InsertArtifactLink {
+        source_artifact_id: String,
+        target_artifact_id: String,
+        link_type: String,
+        #[source]
+        source: Box<dyn StdError + Send + Sync>,
+    },
+
     #[error("failed to insert derivation run {derivation_run_id} for artifact {artifact_id}")]
     InsertDerivationRun {
         derivation_run_id: String,
@@ -426,16 +437,6 @@ pub enum StorageError {
     #[error("failed to update derived object status for artifact {artifact_id}")]
     UpdateDerivedObjectStatus {
         artifact_id: String,
-        #[source]
-        source: Box<oracle::Error>,
-    },
-
-    #[error(
-        "failed to insert evidence link {evidence_link_id} for derived object {derived_object_id}"
-    )]
-    InsertEvidenceLink {
-        evidence_link_id: String,
-        derived_object_id: String,
         #[source]
         source: Box<oracle::Error>,
     },
@@ -532,14 +533,11 @@ pub enum StorageError {
     #[error("invalid derived_object_type '{value}' while loading context for {artifact_id}")]
     InvalidDerivedObjectType { artifact_id: String, value: String },
 
+    #[error("invalid artifact_link_type '{value}' while loading context for {artifact_id}")]
+    InvalidArtifactLinkType { artifact_id: String, value: String },
+
     #[error("invalid scope_type '{value}' while loading context for {artifact_id}")]
     InvalidScopeType { artifact_id: String, value: String },
-
-    #[error("invalid evidence_role '{value}' while loading context for {artifact_id}")]
-    InvalidEvidenceRole { artifact_id: String, value: String },
-
-    #[error("invalid support_strength '{value}' while loading context for {artifact_id}")]
-    InvalidSupportStrength { artifact_id: String, value: String },
 
     #[error(
         "failed to read confidence_score for derived object {derived_object_id} while loading artifact {artifact_id}"
@@ -647,6 +645,9 @@ pub enum EmbeddingError {
 pub enum WorkerError {
     #[error(transparent)]
     Processor(#[from] crate::processor::ProcessorError),
+
+    #[error("batch execution mode requires {stage} batch processor support")]
+    MissingBatchProcessor { stage: &'static str },
 
     #[error("batch execution mode requires {stage} batch submitter support")]
     MissingBatchSubmitter { stage: &'static str },

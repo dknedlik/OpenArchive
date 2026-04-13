@@ -1,16 +1,16 @@
 use postgres::Client;
 
 use crate::error::{StorageError, StorageResult};
-use crate::storage::postgres::{embedding::vector_literal, imported_note};
+use crate::storage::postgres::{artifact_link, embedding::vector_literal, imported_note};
 use crate::storage::retrieval_read_store::{
-    ArchiveSearchCandidate, ArtifactContextDerivedObject, ArtifactContextEvidenceLink,
-    ArtifactContextPackMaterial, ArtifactDetailDerivedObject, ArtifactDetailRecord,
-    ArtifactDetailSegment, ArtifactDetailView, DerivedObjectSearchResult, GraphRelatedEntry,
-    ObjectSearchFilters, RelatedDerivedObject, SearchCandidateKind, SearchFilters,
+    ArchiveSearchCandidate, ArtifactContextDerivedObject, ArtifactContextPackMaterial,
+    ArtifactDetailDerivedObject, ArtifactDetailRecord, ArtifactDetailSegment, ArtifactDetailView,
+    DerivedObjectSearchResult, GraphRelatedEntry, ObjectSearchFilters, RelatedDerivedObject,
+    RelatedDerivedObjectEmbeddingMatch, SearchCandidateKind, SearchFilters,
 };
 use crate::storage::types::{
-    DerivedObjectType, EnrichmentStatus, EvidenceRole, RetrievalIntent, RetrievedContextItem,
-    ScopeType, SourceType, SupportStrength,
+    DerivedObjectType, EnrichmentStatus, RetrievalIntent, RetrievedContextItem, ScopeType,
+    SourceType,
 };
 use crate::ParticipantRole;
 
@@ -202,7 +202,7 @@ pub fn search_candidates(
                     'artifact_title' AS match_kind,
                     NULL::text AS derived_object_type,
                     COALESCE(a.title, '') AS snippet,
-                    300 + LEAST(99, GREATEST(0, FLOOR(ts_rank_cd(a.title_tsv, {tsquery}) * 100)::int)) AS score_hint
+                    240 + GREATEST(0, FLOOR(ts_rank_cd(a.title_tsv, {tsquery}) * 100)::int) AS score_hint
                FROM oa_artifact a
               WHERE a.title_tsv @@ {tsquery}{artifact_filter}"
         ));
@@ -234,7 +234,7 @@ pub fn search_candidates(
                     'imported_note_path' AS match_kind,
                     NULL::text AS derived_object_type,
                     COALESCE(a.source_conversation_key, '') AS snippet,
-                    360 AS score_hint
+                    220 AS score_hint
                FROM oa_artifact a
               WHERE lower(coalesce(a.source_conversation_key, '')) LIKE ('%' || lower($1) || '%'){artifact_filter}"
         ));
@@ -247,8 +247,8 @@ pub fn search_candidates(
                     CASE
                         WHEN lower(coalesce(nl.external_url, '')) = lower($1) THEN 395
                         WHEN lower(coalesce(nl.external_url, '')) LIKE ('%' || lower($1) || '%') THEN 390
-                        WHEN lower(coalesce(nl.display_text, '')) LIKE ('%' || lower($1) || '%') THEN 380
-                        ELSE 370
+                        WHEN lower(coalesce(nl.display_text, '')) LIKE ('%' || lower($1) || '%') THEN 250
+                        ELSE 230
                     END AS score_hint
                FROM oa_artifact_note_link nl
                JOIN oa_artifact a ON a.artifact_id = nl.artifact_id
@@ -294,7 +294,7 @@ pub fn search_candidates(
                     'derived_object' AS match_kind,
                     d.derived_object_type AS derived_object_type,
                     COALESCE(d.title, d.body_text, '') AS snippet,
-                    200 + LEAST(99, GREATEST(0, FLOOR(ts_rank_cd(d.search_tsv, {tsquery}) * 100)::int)) AS score_hint
+                    360 + GREATEST(0, FLOOR(ts_rank_cd(d.search_tsv, {tsquery}) * 100)::int) AS score_hint
                FROM oa_derived_object d
               WHERE d.object_status = 'active'
                 AND d.search_tsv @@ {tsquery}{derived_extra}"
@@ -331,7 +331,7 @@ pub fn search_candidates(
                     'segment_excerpt' AS match_kind,
                     NULL::text AS derived_object_type,
                     COALESCE(s.text_content, '') AS snippet,
-                    100 + LEAST(99, GREATEST(0, FLOOR(ts_rank_cd(s.text_content_tsv, {tsquery}) * 100)::int)) AS score_hint
+                    300 + GREATEST(0, FLOOR(ts_rank_cd(s.text_content_tsv, {tsquery}) * 100)::int) AS score_hint
                FROM oa_segment s
               WHERE s.text_content_tsv @@ {tsquery}{source_join}"
         ));
@@ -428,18 +428,15 @@ pub fn retrieve_for_intents(
                             d.artifact_id,
                             d.title,
                             d.body_text,
-                            COALESCE(array_agg(e.segment_id ORDER BY e.evidence_rank)
-                                FILTER (WHERE e.segment_id IS NOT NULL), ARRAY[]::text[]) AS segment_ids,
+                            ARRAY[]::text[] AS segment_ids,
                             (to_tsvector('english', COALESCE(d.title, '')) @@ {tsquery}) AS title_hit,
                             (to_tsvector('english', COALESCE(d.body_text, '')) @@ {tsquery}) AS body_hit,
                             ts_rank_cd(d.search_tsv, {tsquery}) AS rank_score
                      FROM oa_derived_object d
-                     LEFT JOIN oa_evidence_link e ON e.derived_object_id = d.derived_object_id
                      WHERE d.artifact_id <> $1
                        AND d.object_status = 'active'
                        {derived_type_filter}
                        AND d.search_tsv @@ {tsquery}
-                     GROUP BY d.derived_object_type, d.derived_object_id, d.artifact_id, d.title, d.body_text, d.search_tsv
                      ORDER BY rank_score DESC, d.derived_object_id ASC
                      LIMIT $3"
                 ),
@@ -494,6 +491,7 @@ pub fn load_artifact_detail(
             connection_string,
             artifact_id,
         )?,
+        artifact_links: artifact_link::load_artifact_links(client, connection_string, artifact_id)?,
         segments: load_artifact_segments(client, connection_string, artifact_id)?,
         artifact,
         derived_objects: load_artifact_detail_derived_objects(
@@ -512,16 +510,24 @@ pub fn load_artifact_context_pack_material(
     let Some(artifact) = load_artifact_record(client, connection_string, artifact_id)? else {
         return Ok(None);
     };
+    let note_path = artifact.note_path.clone();
 
     Ok(Some(ArtifactContextPackMaterial {
         artifact,
         segments: load_artifact_segments(client, connection_string, artifact_id)?,
-        derived_objects: load_artifact_context_derived_objects(
+        imported_note_metadata: imported_note::load_imported_note_metadata(
+            client,
+            connection_string,
+            artifact_id,
+            note_path,
+        )?,
+        inbound_note_links: imported_note::load_inbound_note_links(
             client,
             connection_string,
             artifact_id,
         )?,
-        evidence_links: load_artifact_context_evidence_links(
+        artifact_links: artifact_link::load_artifact_links(client, connection_string, artifact_id)?,
+        derived_objects: load_artifact_context_derived_objects(
             client,
             connection_string,
             artifact_id,
@@ -698,52 +704,6 @@ fn load_artifact_context_derived_objects(
     }
 
     Ok(objects)
-}
-
-fn load_artifact_context_evidence_links(
-    client: &mut Client,
-    connection_string: &str,
-    artifact_id: &str,
-) -> StorageResult<Vec<ArtifactContextEvidenceLink>> {
-    let rows = client
-        .query(
-            "SELECT e.evidence_link_id,
-                    e.derived_object_id,
-                    e.segment_id,
-                    e.evidence_role,
-                    e.support_strength,
-                    e.evidence_rank
-             FROM oa_evidence_link e
-             JOIN oa_derived_object d ON d.derived_object_id = e.derived_object_id
-             WHERE d.artifact_id = $1 AND d.object_status = 'active'
-             ORDER BY e.derived_object_id ASC, e.evidence_rank ASC, e.evidence_link_id ASC",
-            &[&artifact_id],
-        )
-        .map_err(|source| map_pg_err(connection_string, source))?;
-
-    let mut links = Vec::with_capacity(rows.len());
-    for row in rows {
-        links.push(ArtifactContextEvidenceLink {
-            evidence_link_id: row.get(0),
-            derived_object_id: row.get(1),
-            segment_id: row.get(2),
-            evidence_role: EvidenceRole::parse(&row.get::<_, String>(3)).ok_or_else(|| {
-                StorageError::InvalidEvidenceRole {
-                    artifact_id: artifact_id.to_string(),
-                    value: row.get(3),
-                }
-            })?,
-            support_strength: SupportStrength::parse(&row.get::<_, String>(4)).ok_or_else(
-                || StorageError::InvalidSupportStrength {
-                    artifact_id: artifact_id.to_string(),
-                    value: row.get(4),
-                },
-            )?,
-            evidence_rank: row.get(5),
-        });
-    }
-
-    Ok(links)
 }
 
 pub fn search_objects(
@@ -1037,6 +997,68 @@ pub fn find_related_by_candidate_keys(
     Ok(results)
 }
 
+pub fn find_related_by_embedding(
+    client: &mut Client,
+    connection_string: &str,
+    artifact_id: &str,
+    derived_object_type: DerivedObjectType,
+    query_embedding: &[f32],
+    limit: usize,
+) -> StorageResult<Vec<RelatedDerivedObjectEmbeddingMatch>> {
+    let limit = i64::try_from(limit).map_err(|_| StorageError::InvalidDerivationWrite {
+        detail: format!("limit {limit} exceeds Postgres BIGINT range"),
+    })?;
+    let derived_object_type = derived_object_type.as_str().to_string();
+    let embedding_literal = vector_literal(query_embedding);
+
+    let sql = format!(
+        "SELECT d.derived_object_id, d.artifact_id, d.derived_object_type, d.title, d.body_text,
+                d.candidate_key, d.confidence_score::double precision,
+                GREATEST(0::real, (1 - (e.embedding <=> '{embedding_literal}'::vector))::real) AS score
+         FROM oa_derived_object_embedding e
+         JOIN oa_derived_object d ON d.derived_object_id = e.derived_object_id
+         WHERE d.object_status = 'active'
+           AND d.artifact_id <> $1
+           AND d.derived_object_type = $2
+         ORDER BY e.embedding <=> '{embedding_literal}'::vector ASC, d.derived_object_id ASC
+         LIMIT $3"
+    );
+
+    let rows = client
+        .query(&sql, &[&artifact_id, &derived_object_type, &limit])
+        .map_err(|source| map_pg_err(connection_string, source))?;
+
+    let mut results = Vec::with_capacity(rows.len());
+    for row in rows {
+        let derived_object_id: String = row.get(0);
+        let row_artifact_id: String = row.get(1);
+        let derived_object_type_str: String = row.get(2);
+        results.push(RelatedDerivedObjectEmbeddingMatch {
+            derived_object_id: derived_object_id.clone(),
+            artifact_id: row_artifact_id.clone(),
+            derived_object_type: DerivedObjectType::parse(&derived_object_type_str).ok_or_else(
+                || StorageError::InvalidDerivedObjectType {
+                    artifact_id: row_artifact_id.clone(),
+                    value: derived_object_type_str,
+                },
+            )?,
+            title: row.get(3),
+            body_text: row.get(4),
+            candidate_key: row.get(5),
+            confidence_score: row.try_get(6).map_err(|source| {
+                StorageError::ReadDerivedObjectConfidenceScore {
+                    artifact_id: row_artifact_id.clone(),
+                    derived_object_id: derived_object_id.clone(),
+                    source: Box::new(source),
+                }
+            })?,
+            similarity_score: row.get(7),
+        });
+    }
+
+    Ok(results)
+}
+
 pub fn get_related_objects(
     client: &mut Client,
     connection_string: &str,
@@ -1072,18 +1094,6 @@ pub fn get_related_objects(
          AND d.derived_object_id != source.derived_object_id
         WHERE source.derived_object_id = $1
           AND COALESCE(source.candidate_key, '') <> ''
-          AND d.object_status = 'active'
-
-        UNION ALL
-
-        SELECT DISTINCT d.derived_object_id, d.artifact_id, d.derived_object_type,
-               d.title, d.body_text,
-               'shared_evidence'::text AS relation_kind,
-               NULL::text, NULL::float8, NULL::text
-        FROM oa_evidence_link el1
-        JOIN oa_evidence_link el2 ON el2.segment_id = el1.segment_id AND el2.derived_object_id != $1
-        JOIN oa_derived_object d ON d.derived_object_id = el2.derived_object_id
-        WHERE el1.derived_object_id = $1
           AND d.object_status = 'active'
 
         LIMIT $2

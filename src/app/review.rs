@@ -187,9 +187,7 @@ fn build_item_id(
 fn validate_decision_request(request: &ReviewDecisionRequest) -> Result<()> {
     let derived_object_required = matches!(
         request.kind,
-        ReviewItemKind::ObjectLowConfidence
-            | ReviewItemKind::CandidateKeyCollision
-            | ReviewItemKind::ObjectMissingEvidence
+        ReviewItemKind::ObjectLowConfidence | ReviewItemKind::CandidateKeyCollision
     );
     if derived_object_required && request.derived_object_id.is_none() {
         return Err(OpenArchiveError::Invariant(format!(
@@ -211,9 +209,7 @@ fn priority_for_kind(kind: ReviewItemKind) -> ReviewPriority {
         ReviewItemKind::ArtifactNeedsAttention | ReviewItemKind::ArtifactMissingSummary => {
             ReviewPriority::High
         }
-        ReviewItemKind::CandidateKeyCollision | ReviewItemKind::ObjectMissingEvidence => {
-            ReviewPriority::Medium
-        }
+        ReviewItemKind::CandidateKeyCollision => ReviewPriority::Medium,
         ReviewItemKind::ObjectLowConfidence => ReviewPriority::Low,
     }
 }
@@ -262,15 +258,6 @@ fn recommended_actions(kind: ReviewItemKind) -> Vec<ReviewAction> {
             ReviewAction::DismissItem,
             ReviewAction::ResolveItem,
         ],
-        ReviewItemKind::ObjectMissingEvidence => vec![
-            ReviewAction::InspectArtifact,
-            ReviewAction::InspectContextPack,
-            ReviewAction::RejectObject,
-            ReviewAction::SupersedeObject,
-            ReviewAction::NoteItem,
-            ReviewAction::DismissItem,
-            ReviewAction::ResolveItem,
-        ],
     }
 }
 
@@ -308,9 +295,6 @@ fn reason_for_candidate(candidate: &ReviewCandidate) -> String {
             }
             _ => "Candidate key appears on multiple artifacts.".to_string(),
         },
-        ReviewItemKind::ObjectMissingEvidence => {
-            "Active inferred object has no evidence links.".to_string()
-        }
     }
 }
 
@@ -506,7 +490,7 @@ mod tests {
 
         let decision_id = service
             .record_decision(ReviewDecisionRequest {
-                kind: ReviewItemKind::ObjectMissingEvidence,
+                kind: ReviewItemKind::ObjectLowConfidence,
                 artifact_id: "artifact-1".to_string(),
                 derived_object_id: Some("obj-1".to_string()),
                 decision_status: ReviewDecisionStatus::Dismissed,
@@ -518,7 +502,7 @@ mod tests {
         assert!(decision_id.starts_with("reviewdec-"));
         let recorded = store.recorded.lock().unwrap();
         assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].item_id, "review:object_missing_evidence:obj-1");
+        assert_eq!(recorded[0].item_id, "review:object_low_confidence:obj-1");
         assert_eq!(recorded[0].decision_status, ReviewDecisionStatus::Dismissed);
     }
 

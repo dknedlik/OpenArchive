@@ -11,7 +11,9 @@ use fixtures::TestImportFixture;
 use harness::{DerivationRunRecord, DerivedMetadataHarness};
 use open_archive::config::PostgresConfig;
 use open_archive::migrations;
-use open_archive::storage::{DerivedMetadataWriteStore, PostgresDerivedMetadataStore};
+use open_archive::storage::{
+    DerivedMetadataWriteStore, NewArchiveLink, PostgresDerivedMetadataStore,
+};
 use postgres::NoTls;
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -252,17 +254,6 @@ impl DerivedMetadataHarness for PostgresHarness {
             .get(0)
     }
 
-    fn count_evidence_links_for_objects(&self, derived_object_ids: &[String]) -> i64 {
-        let mut client = open_archive::postgres_db::connect(&self.0).expect("connect");
-        client
-            .query_one(
-                "SELECT COUNT(*)::bigint FROM oa_evidence_link WHERE derived_object_id = ANY($1)",
-                &[&derived_object_ids],
-            )
-            .expect("evidence count")
-            .get(0)
-    }
-
     fn fetch_object_json(&self, derived_object_id: &str) -> Value {
         let mut client = open_archive::postgres_db::connect(&self.0).expect("connect");
         let payload: String = client
@@ -297,17 +288,6 @@ impl DerivedMetadataHarness for PostgresHarness {
             .get(0)
     }
 
-    fn count_evidence_links_for_object(&self, derived_object_id: &str) -> i64 {
-        let mut client = open_archive::postgres_db::connect(&self.0).expect("connect");
-        client
-            .query_one(
-                "SELECT COUNT(*)::bigint FROM oa_evidence_link WHERE derived_object_id = $1",
-                &[&derived_object_id],
-            )
-            .expect("evidence count")
-            .get(0)
-    }
-
     fn count_derived_objects_for_artifact_with_status(
         &self,
         artifact_id: &str,
@@ -326,23 +306,9 @@ impl DerivedMetadataHarness for PostgresHarness {
 
 #[test]
 #[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
-fn writes_summary_classification_and_memory_with_evidence() {
+fn writes_summary_classification_and_memory() {
     let Some(harness) = harness() else { return };
-    contracts::contract_writes_summary_classification_and_memory_with_evidence(&harness);
-}
-
-#[test]
-#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
-fn rejects_cross_artifact_evidence_links_without_writing_rows() {
-    let Some(harness) = harness() else { return };
-    contracts::contract_rejects_cross_artifact_evidence_links_without_writing_rows(&harness);
-}
-
-#[test]
-#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
-fn rolls_back_partial_writes_when_evidence_insert_fails() {
-    let Some(harness) = harness() else { return };
-    contracts::contract_rolls_back_partial_writes_when_evidence_insert_fails(&harness);
+    contracts::contract_writes_summary_classification_and_memory(&harness);
 }
 
 #[test]
@@ -350,4 +316,85 @@ fn rolls_back_partial_writes_when_evidence_insert_fails() {
 fn rerun_supersedes_previous_active_objects() {
     let Some(harness) = harness() else { return };
     contracts::contract_rerun_supersedes_previous_active_objects(&harness);
+}
+
+#[test]
+#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+fn writes_archive_links_from_derivation_attempts() {
+    let Some(harness) = harness() else { return };
+    let _guard = fixtures::lock_live_test();
+    harness.reset_schema();
+
+    let source_fixture = fixtures::make_test_import_fixture(&fixtures::unique_suffix("dsrc"));
+    let target_fixture = fixtures::make_test_import_fixture(&fixtures::unique_suffix("dtgt"));
+
+    harness.seed_artifact(&source_fixture);
+    harness.seed_artifact(&target_fixture);
+    fixtures::seed_postgres_stub_derivations(
+        &harness.0,
+        &target_fixture.artifact_id,
+        &target_fixture.job_id,
+        &target_fixture.segment_ids,
+    );
+
+    let summary_id = format!("dobj-{}", fixtures::unique_suffix("sum"));
+    let target_object_id = format!("derived-memory-{}", target_fixture.artifact_id);
+    let mut attempt = fixtures::fixture_derivation_attempt(
+        &source_fixture,
+        fixtures::FixtureDerivationAttemptSpec {
+            run_id: &format!("run-{}", fixtures::unique_suffix("alink")),
+            summary_id: &summary_id,
+            classification_id: &format!("dobj-{}", fixtures::unique_suffix("cls")),
+            memory_id: &format!("dobj-{}", fixtures::unique_suffix("mem")),
+            pipeline_version: "v1",
+            provider_name: "test",
+            model_name: "stub",
+            prompt_version: "v1",
+        },
+    );
+    let archive_link_id = format!("alink-{}", fixtures::unique_suffix("persist"));
+    attempt.archive_links.push(NewArchiveLink {
+        archive_link_id: archive_link_id.clone(),
+        source_object_id: summary_id.clone(),
+        target_object_id: target_object_id.clone(),
+        link_type: "refers_to".to_string(),
+        confidence_score: None,
+        rationale: Some("Matched existing entity during reconciliation".to_string()),
+        contributed_by: Some("artifact_reconciliation".to_string()),
+    });
+
+    harness
+        .derivation_store()
+        .write_derivation_attempt(attempt)
+        .expect("derivation attempt with archive links should succeed");
+
+    let mut client = open_archive::postgres_db::connect(&harness.0).expect("connect");
+    let row = client
+        .query_one(
+            "SELECT COUNT(*) OVER (),
+                    archive_link_id,
+                    source_object_id,
+                    target_object_id,
+                    link_type,
+                    rationale,
+                    contributed_by
+               FROM oa_archive_link
+              WHERE archive_link_id = $1",
+            &[&archive_link_id],
+        )
+        .expect("persisted archive link row should exist");
+
+    assert_eq!(row.get::<_, i64>(0), 1);
+    assert_eq!(row.get::<_, String>(1), archive_link_id);
+    assert_eq!(row.get::<_, String>(2), summary_id);
+    assert_eq!(row.get::<_, String>(3), target_object_id);
+    assert_eq!(row.get::<_, String>(4), "refers_to");
+    assert_eq!(
+        row.get::<_, Option<String>>(5),
+        Some("Matched existing entity during reconciliation".to_string())
+    );
+    assert_eq!(
+        row.get::<_, Option<String>>(6),
+        Some("artifact_reconciliation".to_string())
+    );
 }

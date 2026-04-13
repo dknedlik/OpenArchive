@@ -1,4 +1,5 @@
 pub mod artifact;
+pub mod artifact_link;
 pub mod derivation;
 pub mod embedding;
 pub mod import;

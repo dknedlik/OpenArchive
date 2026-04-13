@@ -830,7 +830,6 @@ struct ArtifactEnrichmentSnapshot {
     completed_jobs: i64,
     failed_jobs: i64,
     extraction_results: i64,
-    retrieval_result_sets: i64,
     reconciliation_decisions: i64,
     completed_derivation_runs: i64,
 }
@@ -885,7 +884,6 @@ fn load_artifact_enrichment_snapshot(
                 COALESCE((SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = $1 AND job_status = 'completed'), 0),
                 COALESCE((SELECT COUNT(*) FROM oa_enrichment_job WHERE artifact_id = $1 AND job_status = 'failed'), 0),
                 COALESCE((SELECT COUNT(*) FROM oa_artifact_extraction_result WHERE artifact_id = $1), 0),
-                COALESCE((SELECT COUNT(*) FROM oa_retrieval_result_set WHERE artifact_id = $1), 0),
                 COALESCE((SELECT COUNT(*) FROM oa_reconciliation_decision WHERE artifact_id = $1), 0),
                 COALESCE((SELECT COUNT(*) FROM oa_derivation_run WHERE artifact_id = $1 AND run_status = 'completed'), 0)",
             &[&artifact_id],
@@ -898,9 +896,8 @@ fn load_artifact_enrichment_snapshot(
         completed_jobs: row.get(3),
         failed_jobs: row.get(4),
         extraction_results: row.get(5),
-        retrieval_result_sets: row.get(6),
-        reconciliation_decisions: row.get(7),
-        completed_derivation_runs: row.get(8),
+        reconciliation_decisions: row.get(6),
+        completed_derivation_runs: row.get(7),
     })
 }
 
@@ -910,12 +907,11 @@ fn derive_artifact_enrichment_status(snapshot: ArtifactEnrichmentSnapshot) -> En
     let has_failed = snapshot.failed_jobs > 0;
     let has_completed_jobs = snapshot.completed_jobs > 0;
     let has_durable_outputs = snapshot.extraction_results > 0
-        || snapshot.retrieval_result_sets > 0
         || snapshot.reconciliation_decisions > 0
         || snapshot.completed_derivation_runs > 0;
     let is_fully_derived = snapshot.completed_derivation_runs > 0;
 
-    if is_fully_derived && !has_running && !has_pending && !has_failed {
+    if is_fully_derived && !has_running && !has_pending {
         return EnrichmentStatus::Completed;
     }
     if has_running {
@@ -1046,7 +1042,22 @@ mod tests {
         let snapshot = ArtifactEnrichmentSnapshot {
             completed_jobs: 4,
             extraction_results: 1,
-            retrieval_result_sets: 1,
+            reconciliation_decisions: 2,
+            completed_derivation_runs: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            derive_artifact_enrichment_status(snapshot),
+            EnrichmentStatus::Completed
+        );
+    }
+
+    #[test]
+    fn artifact_status_is_completed_after_successful_retry_even_with_old_failed_jobs() {
+        let snapshot = ArtifactEnrichmentSnapshot {
+            completed_jobs: 5,
+            failed_jobs: 1,
+            extraction_results: 1,
             reconciliation_decisions: 2,
             completed_derivation_runs: 1,
             ..Default::default()

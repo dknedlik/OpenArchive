@@ -19,22 +19,28 @@ pub(crate) struct ModelReconciliationDecision {
     pub(crate) target_key: String,
     pub(crate) matched_object_id: Option<String>,
     pub(crate) rationale: String,
-    pub(crate) evidence_segment_ids: Vec<String>,
 }
 
 impl ModelReconciliationOutput {
-    fn normalize_ungrounded_existing_decisions(mut self) -> Self {
+    fn normalize_decisions(mut self, allowed_match_ids: &HashMap<String, HashSet<String>>) -> Self {
         for decision in &mut self.decisions {
-            if requires_matched_object_id(decision.decision_kind)
-                && decision
-                    .matched_object_id
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or_default()
-                    .is_empty()
-            {
+            if !requires_matched_object_id(decision.decision_kind) {
+                continue;
+            }
+
+            let matched_object_id = decision
+                .matched_object_id
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default();
+            let is_allowed = allowed_match_ids
+                .get(&decision.target_key)
+                .is_some_and(|ids| ids.contains(matched_object_id));
+
+            if matched_object_id.is_empty() || !is_allowed {
                 // Reconciliation is only allowed to merge when it can point at a
-                // concrete existing object. Otherwise preserve the extracted
+                // concrete existing object that was actually offered as a match
+                // option for this target. Otherwise preserve the extracted
                 // candidate by treating it as create_new.
                 decision.decision_kind = ReconciliationDecisionKind::CreateNew;
                 decision.matched_object_id = None;
@@ -46,31 +52,8 @@ impl ModelReconciliationOutput {
     pub(crate) fn validate_against(
         &self,
         input: &ReconciliationProcessorInput,
+        allowed_match_ids: &HashMap<String, HashSet<String>>,
     ) -> Result<(), ProcessorError> {
-        let valid_evidence_ids: HashSet<&str> = input
-            .summary
-            .evidence_segment_ids
-            .iter()
-            .chain(
-                input
-                    .memories
-                    .iter()
-                    .flat_map(|memory| memory.evidence_segment_ids.iter()),
-            )
-            .chain(
-                input
-                    .entities
-                    .iter()
-                    .flat_map(|entity| entity.evidence_segment_ids.iter()),
-            )
-            .chain(
-                input
-                    .relationships
-                    .iter()
-                    .flat_map(|relationship| relationship.evidence_segment_ids.iter()),
-            )
-            .map(String::as_str)
-            .collect();
         let valid_targets: HashSet<String> = input
             .memories
             .iter()
@@ -168,6 +151,24 @@ impl ModelReconciliationOutput {
                     ),
                 });
             }
+            if requires_matched_object_id(decision.decision_kind) {
+                let matched_object_id = decision
+                    .matched_object_id
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default();
+                let is_allowed = allowed_match_ids
+                    .get(&decision.target_key)
+                    .is_some_and(|ids| ids.contains(matched_object_id));
+                if !is_allowed {
+                    return Err(ProcessorError::InvalidModelOutput {
+                        detail: format!(
+                            "decisions[{index}].matched_object_id {:?} was not offered for target_key {:?}",
+                            matched_object_id, decision.target_key
+                        ),
+                    });
+                }
+            }
             if !seen_targets.insert(decision.target_key.clone()) {
                 return Err(ProcessorError::InvalidModelOutput {
                     detail: format!(
@@ -176,11 +177,6 @@ impl ModelReconciliationOutput {
                     ),
                 });
             }
-            validate_evidence_ids(
-                &format!("decisions[{index}].evidence_segment_ids"),
-                &decision.evidence_segment_ids,
-                &valid_evidence_ids,
-            )?;
         }
 
         if seen_targets != valid_targets {
@@ -197,8 +193,9 @@ impl ModelReconciliationOutput {
         self,
         input: &ReconciliationProcessorInput,
     ) -> Result<Vec<ReconciliationDecisionOutput>, ProcessorError> {
-        let normalized = self.normalize_ungrounded_existing_decisions();
-        normalized.validate_against(input)?;
+        let allowed_match_ids = allowed_match_ids_by_target(input)?;
+        let normalized = self.normalize_decisions(&allowed_match_ids);
+        normalized.validate_against(input, &allowed_match_ids)?;
         Ok(normalized.into_outputs())
     }
 
@@ -211,17 +208,100 @@ impl ModelReconciliationOutput {
                 target_key: decision.target_key,
                 matched_object_id: decision.matched_object_id,
                 rationale: decision.rationale,
-                evidence_segment_ids: decision.evidence_segment_ids,
             })
             .collect()
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ReconciliationMatchOption {
+    object_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReconciliationMatchOptionCase {
+    target_key: String,
+    #[serde(default)]
+    embedding_matches: Vec<ReconciliationMatchOption>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyReconciliationMatchOptionEnvelope {
+    #[serde(default)]
+    objects: Vec<ReconciliationMatchOption>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ReconciliationMatchOptionEnvelope {
+    Cases(Vec<ReconciliationMatchOptionCase>),
+    Legacy(LegacyReconciliationMatchOptionEnvelope),
+}
+
+fn allowed_match_ids_by_target(
+    input: &ReconciliationProcessorInput,
+) -> Result<HashMap<String, HashSet<String>>, ProcessorError> {
+    let valid_targets: Vec<String> = input
+        .memories
+        .iter()
+        .map(|memory| memory.candidate_key.clone())
+        .chain(
+            input
+                .entities
+                .iter()
+                .map(|entity| entity.entity_key.clone()),
+        )
+        .chain(input.relationships.iter().map(|relationship| {
+            format!(
+                "{}:{}:{}",
+                relationship.relationship_type, relationship.subject_key, relationship.object_key
+            )
+        }))
+        .collect();
+
+    let trimmed = input.retrieval_results_json.trim();
+    if trimmed.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let parsed: ReconciliationMatchOptionEnvelope =
+        serde_json::from_str(trimmed).map_err(|source| ProcessorError::InvalidInput {
+            detail: format!("invalid reconciliation candidate_match_options JSON: {source}"),
+        })?;
+
+    let map = match parsed {
+        ReconciliationMatchOptionEnvelope::Cases(cases) => cases
+            .into_iter()
+            .map(|case| {
+                (
+                    case.target_key,
+                    case.embedding_matches
+                        .into_iter()
+                        .map(|option| option.object_id)
+                        .collect::<HashSet<_>>(),
+                )
+            })
+            .collect(),
+        ReconciliationMatchOptionEnvelope::Legacy(legacy) => {
+            let shared_ids = legacy
+                .objects
+                .into_iter()
+                .map(|option| option.object_id)
+                .collect::<HashSet<_>>();
+            valid_targets
+                .into_iter()
+                .map(|target_key| (target_key, shared_ids.clone()))
+                .collect()
+        }
+    };
+
+    Ok(map)
 }
 
 fn requires_matched_object_id(kind: ReconciliationDecisionKind) -> bool {
     matches!(
         kind,
         ReconciliationDecisionKind::AttachToExisting
-            | ReconciliationDecisionKind::StrengthenExisting
             | ReconciliationDecisionKind::SupersedeExisting
             | ReconciliationDecisionKind::ContradictsExisting
     )
@@ -237,7 +317,7 @@ pub(crate) fn validate_input(input: &ArtifactProcessorInput) -> Result<(), Proce
     Ok(())
 }
 
-pub(crate) fn validate_text_field(field: &str, value: &str) -> Result<(), ProcessorError> {
+fn validate_text_field(field: &str, value: &str) -> Result<(), ProcessorError> {
     if value.trim().is_empty() {
         return Err(ProcessorError::InvalidModelOutput {
             detail: format!("{field} must not be empty"),
@@ -245,39 +325,6 @@ pub(crate) fn validate_text_field(field: &str, value: &str) -> Result<(), Proces
     }
 
     Ok(())
-}
-
-pub(crate) fn validate_evidence_ids(
-    field: &str,
-    evidence_segment_ids: &[String],
-    valid_segment_ids: &HashSet<&str>,
-) -> Result<(), ProcessorError> {
-    if evidence_segment_ids.is_empty() {
-        return Err(ProcessorError::InvalidModelOutput {
-            detail: format!("{field} must contain at least one segment id"),
-        });
-    }
-
-    for segment_id in evidence_segment_ids {
-        if !valid_segment_ids.contains(segment_id.as_str()) {
-            return Err(ProcessorError::InvalidModelOutput {
-                detail: format!("{field} contains unknown segment id {segment_id:?}"),
-            });
-        }
-    }
-
-    Ok(())
-}
-
-pub(crate) fn retain_valid_items<T>(
-    items: Vec<T>,
-    mut validate: impl FnMut(usize, &T) -> Result<(), ProcessorError>,
-) -> Vec<T> {
-    items
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, item)| validate(index, &item).ok().map(|_| item))
-        .collect()
 }
 
 fn hex_prefix(bytes: &[u8]) -> String {

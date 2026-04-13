@@ -80,28 +80,6 @@ pub fn store_agent_memory(
             )
             .map_err(|source| pg_error(connection_string, source))?;
 
-        // 4. Insert evidence links
-        for (idx, ev) in memory.evidence.iter().enumerate() {
-            let evidence_rank = (idx + 1) as i32;
-            let role_str = ev.evidence_role.as_str().to_string();
-            let strength_str = ev.support_strength.as_str().to_string();
-            client
-                .execute(
-                    "INSERT INTO oa_evidence_link \
-                     (evidence_link_id, derived_object_id, segment_id, evidence_role, evidence_rank, support_strength) \
-                     VALUES ($1, $2, $3, $4, $5, $6)",
-                    &[
-                        &ev.evidence_link_id,
-                        &memory.derived_object_id,
-                        &ev.segment_id,
-                        &role_str,
-                        &evidence_rank,
-                        &strength_str,
-                    ],
-                )
-                .map_err(|source| pg_error(connection_string, source))?;
-        }
-
         Ok(())
     })();
 
@@ -245,28 +223,6 @@ pub fn store_agent_entity(
                 ],
             )
             .map_err(|source| pg_error(connection_string, source))?;
-
-        // 4. Insert evidence links
-        for (idx, ev) in entity.evidence.iter().enumerate() {
-            let evidence_rank = (idx + 1) as i32;
-            let role_str = ev.evidence_role.as_str().to_string();
-            let strength_str = ev.support_strength.as_str().to_string();
-            client
-                .execute(
-                    "INSERT INTO oa_evidence_link \
-                     (evidence_link_id, derived_object_id, segment_id, evidence_role, evidence_rank, support_strength) \
-                     VALUES ($1, $2, $3, $4, $5, $6)",
-                    &[
-                        &ev.evidence_link_id,
-                        &entity.derived_object_id,
-                        &ev.segment_id,
-                        &role_str,
-                        &evidence_rank,
-                        &strength_str,
-                    ],
-                )
-                .map_err(|source| pg_error(connection_string, source))?;
-        }
 
         Ok(())
     })();

@@ -13,7 +13,6 @@ pub struct AppConfig {
     pub object_store: ObjectStoreConfig,
     pub inference: InferenceConfig,
     pub embeddings: EmbeddingConfig,
-    pub reconcile_inference: Option<InferenceConfig>,
     pub inference_mode: InferenceExecutionMode,
 }
 
@@ -25,9 +24,6 @@ impl AppConfig {
             object_store: ObjectStoreConfig::from_env()?,
             inference: InferenceConfig::from_env()?,
             embeddings: EmbeddingConfig::from_env()?,
-            reconcile_inference: InferenceConfig::from_optional_env(
-                "OA_RECONCILE_INFERENCE_PROVIDER",
-            )?,
             inference_mode: InferenceExecutionMode::from_env()?,
         })
     }
@@ -58,6 +54,7 @@ impl InferenceExecutionMode {
 pub enum EmbeddingConfig {
     Disabled,
     Stub(StubEmbeddingConfig),
+    Gemini(GeminiEmbeddingConfig),
     OpenAi(OpenAiEmbeddingConfig),
 }
 
@@ -67,11 +64,12 @@ impl EmbeddingConfig {
         match provider.as_str() {
             "disabled" => Ok(Self::Disabled),
             "stub" => Ok(Self::Stub(StubEmbeddingConfig::from_env()?)),
+            "gemini" => Ok(Self::Gemini(GeminiEmbeddingConfig::from_env()?)),
             "openai" => Ok(Self::OpenAi(OpenAiEmbeddingConfig::from_env()?)),
             _ => Err(ConfigError::InvalidEnumEnv {
                 key: "OA_EMBEDDING_PROVIDER",
                 value: provider,
-                expected: "disabled, stub, openai",
+                expected: "disabled, stub, gemini, openai",
             }),
         }
     }
@@ -94,6 +92,27 @@ impl StubEmbeddingConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeminiEmbeddingConfig {
+    pub api_key: String,
+    pub base_url: String,
+    pub embedding_model: String,
+    pub embedding_dimensions: usize,
+}
+
+impl GeminiEmbeddingConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        Ok(Self {
+            api_key: required_env("OA_GEMINI_API_KEY")?,
+            base_url: env::var("OA_GEMINI_BASE_URL")
+                .unwrap_or_else(|_| "https://generativelanguage.googleapis.com/v1beta".to_string()),
+            embedding_model: env::var("OA_EMBEDDING_MODEL")
+                .unwrap_or_else(|_| "gemini-embedding-001".to_string()),
+            embedding_dimensions: positive_usize_env("OA_EMBEDDING_DIMENSIONS")?.unwrap_or(3072),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenAiEmbeddingConfig {
     pub api_key: String,
     pub base_url: String,
@@ -107,10 +126,9 @@ impl OpenAiEmbeddingConfig {
             api_key: required_env("OA_OPENAI_API_KEY")?,
             base_url: env::var("OA_OPENAI_BASE_URL")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
-            embedding_model: env::var("OA_OPENAI_EMBEDDING_MODEL")
+            embedding_model: env::var("OA_EMBEDDING_MODEL")
                 .unwrap_or_else(|_| "text-embedding-3-small".to_string()),
-            embedding_dimensions: positive_usize_env("OA_OPENAI_EMBEDDING_DIMENSIONS")?
-                .unwrap_or(1536),
+            embedding_dimensions: positive_usize_env("OA_EMBEDDING_DIMENSIONS")?.unwrap_or(1536),
         })
     }
 }
@@ -255,23 +273,13 @@ pub enum InferenceConfig {
     Gemini(GeminiConfig),
     Anthropic(AnthropicConfig),
     Grok(GrokConfig),
+    Oci(OciConfig),
 }
 
 impl InferenceConfig {
     pub fn from_env() -> ConfigResult<Self> {
-        Self::from_provider("OA_INFERENCE_PROVIDER", "stub")
-    }
-
-    pub fn from_optional_env(key: &'static str) -> ConfigResult<Option<Self>> {
-        let Some(provider) = optional_trimmed_env(key) else {
-            return Ok(None);
-        };
-        Ok(Some(Self::from_named_provider(key, provider)?))
-    }
-
-    fn from_provider(key: &'static str, default_provider: &str) -> ConfigResult<Self> {
-        let provider = env::var(key).unwrap_or_else(|_| default_provider.to_string());
-        Self::from_named_provider(key, provider)
+        let provider = env::var("OA_MODEL_PROVIDER").unwrap_or_else(|_| "stub".to_string());
+        Self::from_named_provider("OA_MODEL_PROVIDER", provider)
     }
 
     fn from_named_provider(key: &'static str, provider: String) -> ConfigResult<Self> {
@@ -281,10 +289,11 @@ impl InferenceConfig {
             "gemini" => Ok(Self::Gemini(GeminiConfig::from_env()?)),
             "anthropic" => Ok(Self::Anthropic(AnthropicConfig::from_env()?)),
             "grok" => Ok(Self::Grok(GrokConfig::from_env()?)),
+            "oci" => Ok(Self::Oci(OciConfig::from_env()?)),
             _ => Err(ConfigError::InvalidEnumEnv {
                 key,
                 value: provider,
-                expected: "stub, openai, gemini, anthropic, grok",
+                expected: "stub, openai, gemini, anthropic, grok, oci",
             }),
         }
     }
@@ -296,10 +305,8 @@ pub struct GeminiConfig {
     pub base_url: String,
     pub max_output_tokens: u32,
     pub repair_max_output_tokens: u32,
-    pub standard_model: String,
-    pub quality_model: Option<String>,
-    pub reconcile_standard_model: String,
-    pub reconcile_quality_model: Option<String>,
+    pub heavy_model: String,
+    pub fast_model: String,
     pub batch_enabled: bool,
     pub batch_max_jobs: usize,
     pub batch_max_bytes: usize,
@@ -308,6 +315,8 @@ pub struct GeminiConfig {
 
 impl GeminiConfig {
     pub fn from_env() -> ConfigResult<Self> {
+        let heavy_model = required_env("OA_HEAVY_MODEL")?;
+        let fast_model = required_env("OA_FAST_MODEL")?;
         Ok(Self {
             api_key: required_env("OA_GEMINI_API_KEY")?,
             base_url: env::var("OA_GEMINI_BASE_URL")
@@ -320,14 +329,8 @@ impl GeminiConfig {
                 .ok()
                 .and_then(|value| value.parse::<u32>().ok())
                 .unwrap_or(8000),
-            standard_model: required_env("OA_GEMINI_STANDARD_MODEL")?,
-            quality_model: optional_trimmed_env("OA_GEMINI_QUALITY_MODEL"),
-            reconcile_standard_model: required_env_fallback(
-                "OA_GEMINI_RECONCILE_STANDARD_MODEL",
-                "OA_GEMINI_STANDARD_MODEL",
-            )?,
-            reconcile_quality_model: optional_trimmed_env("OA_GEMINI_RECONCILE_QUALITY_MODEL")
-                .or_else(|| optional_trimmed_env("OA_GEMINI_QUALITY_MODEL")),
+            heavy_model,
+            fast_model,
             batch_enabled: env::var("OA_GEMINI_BATCH_ENABLED")
                 .ok()
                 .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
@@ -347,14 +350,14 @@ pub struct OpenAiConfig {
     pub max_output_tokens: u32,
     pub repair_max_output_tokens: u32,
     pub reasoning_effort_override: OpenAiReasoningEffort,
-    pub standard_model: String,
-    pub quality_model: Option<String>,
-    pub reconcile_standard_model: String,
-    pub reconcile_quality_model: Option<String>,
+    pub heavy_model: String,
+    pub fast_model: String,
 }
 
 impl OpenAiConfig {
     pub fn from_env() -> ConfigResult<Self> {
+        let heavy_model = required_env("OA_HEAVY_MODEL")?;
+        let fast_model = required_env("OA_FAST_MODEL")?;
         Ok(Self {
             api_key: required_env("OA_OPENAI_API_KEY")?,
             base_url: env::var("OA_OPENAI_BASE_URL")
@@ -368,14 +371,8 @@ impl OpenAiConfig {
                 .and_then(|value| value.parse::<u32>().ok())
                 .unwrap_or(8000),
             reasoning_effort_override: OpenAiReasoningEffort::from_env()?,
-            standard_model: required_env("OA_OPENAI_STANDARD_MODEL")?,
-            quality_model: optional_trimmed_env("OA_OPENAI_QUALITY_MODEL"),
-            reconcile_standard_model: required_env_fallback(
-                "OA_OPENAI_RECONCILE_STANDARD_MODEL",
-                "OA_OPENAI_STANDARD_MODEL",
-            )?,
-            reconcile_quality_model: optional_trimmed_env("OA_OPENAI_RECONCILE_QUALITY_MODEL")
-                .or_else(|| optional_trimmed_env("OA_OPENAI_QUALITY_MODEL")),
+            heavy_model,
+            fast_model,
         })
     }
 }
@@ -425,14 +422,14 @@ pub struct AnthropicConfig {
     pub api_key: String,
     pub base_url: String,
     pub max_output_tokens: u32,
-    pub standard_model: String,
-    pub quality_model: Option<String>,
-    pub reconcile_standard_model: String,
-    pub reconcile_quality_model: Option<String>,
+    pub heavy_model: String,
+    pub fast_model: String,
 }
 
 impl AnthropicConfig {
     pub fn from_env() -> ConfigResult<Self> {
+        let heavy_model = required_env("OA_HEAVY_MODEL")?;
+        let fast_model = required_env("OA_FAST_MODEL")?;
         Ok(Self {
             api_key: required_env("OA_ANTHROPIC_API_KEY")?,
             base_url: env::var("OA_ANTHROPIC_BASE_URL")
@@ -441,14 +438,8 @@ impl AnthropicConfig {
                 .ok()
                 .and_then(|value| value.parse::<u32>().ok())
                 .unwrap_or(4000),
-            standard_model: required_env("OA_ANTHROPIC_STANDARD_MODEL")?,
-            quality_model: optional_trimmed_env("OA_ANTHROPIC_QUALITY_MODEL"),
-            reconcile_standard_model: required_env_fallback(
-                "OA_ANTHROPIC_RECONCILE_STANDARD_MODEL",
-                "OA_ANTHROPIC_STANDARD_MODEL",
-            )?,
-            reconcile_quality_model: optional_trimmed_env("OA_ANTHROPIC_RECONCILE_QUALITY_MODEL")
-                .or_else(|| optional_trimmed_env("OA_ANTHROPIC_QUALITY_MODEL")),
+            heavy_model,
+            fast_model,
         })
     }
 }
@@ -459,14 +450,14 @@ pub struct GrokConfig {
     pub base_url: String,
     pub max_output_tokens: u32,
     pub repair_max_output_tokens: u32,
-    pub standard_model: String,
-    pub quality_model: Option<String>,
-    pub reconcile_standard_model: String,
-    pub reconcile_quality_model: Option<String>,
+    pub heavy_model: String,
+    pub fast_model: String,
 }
 
 impl GrokConfig {
     pub fn from_env() -> ConfigResult<Self> {
+        let heavy_model = required_env("OA_HEAVY_MODEL")?;
+        let fast_model = required_env("OA_FAST_MODEL")?;
         Ok(Self {
             api_key: required_env("OA_GROK_API_KEY")?,
             base_url: env::var("OA_GROK_BASE_URL")
@@ -479,14 +470,45 @@ impl GrokConfig {
                 .ok()
                 .and_then(|value| value.parse::<u32>().ok())
                 .unwrap_or(8000),
-            standard_model: required_env("OA_GROK_STANDARD_MODEL")?,
-            quality_model: optional_trimmed_env("OA_GROK_QUALITY_MODEL"),
-            reconcile_standard_model: required_env_fallback(
-                "OA_GROK_RECONCILE_STANDARD_MODEL",
-                "OA_GROK_STANDARD_MODEL",
-            )?,
-            reconcile_quality_model: optional_trimmed_env("OA_GROK_RECONCILE_QUALITY_MODEL")
-                .or_else(|| optional_trimmed_env("OA_GROK_QUALITY_MODEL")),
+            heavy_model,
+            fast_model,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciConfig {
+    pub region: String,
+    pub compartment_id: String,
+    pub cli_path: String,
+    pub profile: Option<String>,
+    pub max_output_tokens: u32,
+    pub repair_max_output_tokens: u32,
+    pub heavy_model: String,
+    pub fast_model: String,
+}
+
+impl OciConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        let heavy_model = required_env("OA_HEAVY_MODEL")?;
+        let fast_model = required_env("OA_FAST_MODEL")?;
+        let max_output_tokens = env::var("OA_OCI_MAX_OUTPUT_TOKENS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(4000);
+        let repair_max_output_tokens = env::var("OA_OCI_REPAIR_MAX_OUTPUT_TOKENS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(8000);
+        Ok(Self {
+            region: required_env("OA_OCI_REGION")?,
+            compartment_id: required_env("OA_OCI_COMPARTMENT_ID")?,
+            cli_path: env::var("OA_OCI_CLI_PATH").unwrap_or_else(|_| "oci".to_string()),
+            profile: optional_trimmed_env("OA_OCI_PROFILE"),
+            max_output_tokens,
+            repair_max_output_tokens,
+            heavy_model,
+            fast_model,
         })
     }
 }
@@ -602,12 +624,6 @@ fn required_env(key: &'static str) -> ConfigResult<String> {
     env::var(key).map_err(|_| ConfigError::MissingEnv { key })
 }
 
-fn required_env_fallback(primary: &'static str, fallback: &'static str) -> ConfigResult<String> {
-    env::var(primary)
-        .or_else(|_| env::var(fallback))
-        .map_err(|_| ConfigError::MissingEnv { key: primary })
-}
-
 fn optional_trimmed_env(key: &'static str) -> Option<String> {
     env::var(key)
         .ok()
@@ -666,31 +682,26 @@ fn optional_usize_env(key: &'static str) -> ConfigResult<Option<usize>> {
     }
 }
 
-fn optional_percentage_env(key: &'static str) -> ConfigResult<Option<u8>> {
-    match env::var(key) {
-        Ok(raw) => {
-            let value = raw
-                .parse::<u8>()
-                .map_err(|_| ConfigError::InvalidPositiveIntegerEnv {
-                    key,
-                    value: raw.clone(),
-                })?;
-            if value == 0 {
-                return Err(ConfigError::InvalidPositiveIntegerEnv { key, value: raw });
-            }
-            if value > 100 {
-                return Err(ConfigError::InvalidPositiveIntegerEnv { key, value: raw });
-            }
-            Ok(Some(value))
-        }
-        Err(_) => Ok(None),
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageConfig {
     pub batch_size: usize,
     pub max_concurrent_batches: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectPipelineModeConfig {
+    pub extract_workers: usize,
+    pub reconcile_workers: usize,
+    pub embedding_workers: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchPipelineModeConfig {
+    pub extract_workers: usize,
+    pub extract: StageConfig,
+    pub reconcile_workers: usize,
+    pub reconcile: StageConfig,
+    pub embedding_workers: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -703,40 +714,51 @@ pub struct ExtractionChunkingConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnrichmentPipelineConfig {
     pub poll_interval: Duration,
-    pub extract_workers: usize,
-    pub extract: StageConfig,
-    pub reconcile_workers: usize,
-    pub reconcile: StageConfig,
-    pub retrieve_context_workers: usize,
-    pub embedding_workers: usize,
+    pub direct: DirectPipelineModeConfig,
+    pub batch: BatchPipelineModeConfig,
     pub chunking: ExtractionChunkingConfig,
-    pub extract_min_coverage_percent: u8,
-    pub extract_max_gap_fill_passes: usize,
 }
 
 impl EnrichmentPipelineConfig {
     pub fn from_env() -> ConfigResult<Self> {
         let shared_worker_default = optional_usize_env("OA_ENRICHMENT_WORKERS")?.unwrap_or(1);
+        let direct_extract_workers =
+            positive_usize_env("OA_DIRECT_EXTRACT_WORKERS")?.unwrap_or(shared_worker_default);
+        let direct_reconcile_workers =
+            positive_usize_env("OA_DIRECT_RECONCILE_WORKERS")?.unwrap_or(shared_worker_default);
+        let direct_embedding_workers =
+            positive_usize_env("OA_DIRECT_EMBEDDING_WORKERS")?.unwrap_or(1);
+        let batch_extract_workers =
+            positive_usize_env("OA_BATCH_EXTRACT_WORKERS")?.unwrap_or(shared_worker_default);
+        let batch_reconcile_workers =
+            positive_usize_env("OA_BATCH_RECONCILE_WORKERS")?.unwrap_or(shared_worker_default);
+        let batch_embedding_workers =
+            positive_usize_env("OA_BATCH_EMBEDDING_WORKERS")?.unwrap_or(1);
         Ok(Self {
             poll_interval: optional_duration_env_ms("OA_ENRICHMENT_POLL_INTERVAL_MS")?
                 .unwrap_or(Duration::from_millis(2000)),
-            extract_workers: positive_usize_env("OA_EXTRACT_WORKERS")?
-                .unwrap_or(shared_worker_default),
-            extract: StageConfig {
-                batch_size: positive_usize_env("OA_EXTRACT_BATCH_SIZE")?.unwrap_or(5),
-                max_concurrent_batches: positive_usize_env("OA_EXTRACT_MAX_CONCURRENT")?
-                    .unwrap_or(3),
+            direct: DirectPipelineModeConfig {
+                extract_workers: direct_extract_workers,
+                reconcile_workers: direct_reconcile_workers,
+                embedding_workers: direct_embedding_workers,
             },
-            reconcile_workers: positive_usize_env("OA_RECONCILE_WORKERS")?
-                .unwrap_or(shared_worker_default),
-            reconcile: StageConfig {
-                batch_size: positive_usize_env("OA_RECONCILE_BATCH_SIZE")?.unwrap_or(5),
-                max_concurrent_batches: positive_usize_env("OA_RECONCILE_MAX_CONCURRENT")?
+            batch: BatchPipelineModeConfig {
+                extract_workers: batch_extract_workers,
+                extract: StageConfig {
+                    batch_size: positive_usize_env("OA_BATCH_EXTRACT_BATCH_SIZE")?.unwrap_or(5),
+                    max_concurrent_batches: positive_usize_env("OA_BATCH_EXTRACT_MAX_CONCURRENT")?
+                        .unwrap_or(3),
+                },
+                reconcile_workers: batch_reconcile_workers,
+                reconcile: StageConfig {
+                    batch_size: positive_usize_env("OA_BATCH_RECONCILE_BATCH_SIZE")?.unwrap_or(5),
+                    max_concurrent_batches: positive_usize_env(
+                        "OA_BATCH_RECONCILE_MAX_CONCURRENT",
+                    )?
                     .unwrap_or(2),
+                },
+                embedding_workers: batch_embedding_workers,
             },
-            retrieve_context_workers: positive_usize_env("OA_RETRIEVE_CONTEXT_WORKERS")?
-                .unwrap_or(2),
-            embedding_workers: positive_usize_env("OA_EMBEDDING_WORKERS")?.unwrap_or(1),
             chunking: ExtractionChunkingConfig {
                 max_segments_per_chunk: positive_usize_env("OA_EXTRACT_CHUNK_SEGMENTS")?
                     .unwrap_or(20),
@@ -745,12 +767,6 @@ impl EnrichmentPipelineConfig {
                 max_chars_per_chunk: positive_usize_env("OA_EXTRACT_CHUNK_MAX_CHARS")?
                     .unwrap_or(25_000),
             },
-            extract_min_coverage_percent: optional_percentage_env(
-                "OA_EXTRACT_MIN_COVERAGE_PERCENT",
-            )?
-            .unwrap_or(60),
-            extract_max_gap_fill_passes: positive_usize_env("OA_EXTRACT_MAX_GAP_FILL_PASSES")?
-                .unwrap_or(1),
         })
     }
 }
@@ -762,7 +778,9 @@ mod tests {
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn clear_test_env() {
@@ -776,45 +794,37 @@ mod tests {
             "OA_S3_SECRET_ACCESS_KEY",
             "OA_S3_KEY_PREFIX",
             "OA_S3_URL_STYLE",
-            "OA_INFERENCE_PROVIDER",
+            "OA_MODEL_PROVIDER",
+            "OA_HEAVY_MODEL",
+            "OA_FAST_MODEL",
             "OA_EMBEDDING_PROVIDER",
-            "OA_RECONCILE_INFERENCE_PROVIDER",
+            "OA_EMBEDDING_MODEL",
+            "OA_EMBEDDING_DIMENSIONS",
             "OA_INFERENCE_MODE",
             "OA_OPENAI_API_KEY",
             "OA_OPENAI_BASE_URL",
             "OA_OPENAI_MAX_OUTPUT_TOKENS",
+            "OA_OPENAI_REPAIR_MAX_OUTPUT_TOKENS",
             "OA_OPENAI_REASONING_EFFORT",
-            "OA_OPENAI_STANDARD_MODEL",
-            "OA_OPENAI_QUALITY_MODEL",
-            "OA_OPENAI_RECONCILE_STANDARD_MODEL",
-            "OA_OPENAI_RECONCILE_QUALITY_MODEL",
-            "OA_OPENAI_EMBEDDING_MODEL",
-            "OA_OPENAI_EMBEDDING_DIMENSIONS",
             "OA_STUB_EMBEDDING_MODEL",
             "OA_STUB_EMBEDDING_DIMENSIONS",
             "OA_GEMINI_API_KEY",
             "OA_GEMINI_BASE_URL",
             "OA_GEMINI_MAX_OUTPUT_TOKENS",
             "OA_GEMINI_REPAIR_MAX_OUTPUT_TOKENS",
-            "OA_GEMINI_STANDARD_MODEL",
-            "OA_GEMINI_QUALITY_MODEL",
-            "OA_GEMINI_RECONCILE_STANDARD_MODEL",
-            "OA_GEMINI_RECONCILE_QUALITY_MODEL",
             "OA_ANTHROPIC_API_KEY",
             "OA_ANTHROPIC_BASE_URL",
             "OA_ANTHROPIC_MAX_OUTPUT_TOKENS",
-            "OA_ANTHROPIC_STANDARD_MODEL",
-            "OA_ANTHROPIC_QUALITY_MODEL",
-            "OA_ANTHROPIC_RECONCILE_STANDARD_MODEL",
-            "OA_ANTHROPIC_RECONCILE_QUALITY_MODEL",
             "OA_GROK_API_KEY",
             "OA_GROK_BASE_URL",
             "OA_GROK_MAX_OUTPUT_TOKENS",
             "OA_GROK_REPAIR_MAX_OUTPUT_TOKENS",
-            "OA_GROK_STANDARD_MODEL",
-            "OA_GROK_QUALITY_MODEL",
-            "OA_GROK_RECONCILE_STANDARD_MODEL",
-            "OA_GROK_RECONCILE_QUALITY_MODEL",
+            "OA_OCI_REGION",
+            "OA_OCI_COMPARTMENT_ID",
+            "OA_OCI_CLI_PATH",
+            "OA_OCI_PROFILE",
+            "OA_OCI_MAX_OUTPUT_TOKENS",
+            "OA_OCI_REPAIR_MAX_OUTPUT_TOKENS",
             "OA_ORACLE_CONNECT_STRING",
             "OA_ORACLE_USERNAME",
             "OA_ORACLE_PASSWORD",
@@ -828,15 +838,63 @@ mod tests {
             "OA_HTTP_BIND",
             "OA_HTTP_REQUEST_WORKERS",
             "OA_ENRICHMENT_WORKERS",
-            "OA_EMBEDDING_WORKERS",
+            "OA_DIRECT_EXTRACT_WORKERS",
+            "OA_DIRECT_RECONCILE_WORKERS",
+            "OA_DIRECT_EMBEDDING_WORKERS",
+            "OA_BATCH_EXTRACT_WORKERS",
+            "OA_BATCH_RECONCILE_WORKERS",
+            "OA_BATCH_EMBEDDING_WORKERS",
+            "OA_BATCH_EXTRACT_BATCH_SIZE",
+            "OA_BATCH_EXTRACT_MAX_CONCURRENT",
+            "OA_BATCH_RECONCILE_BATCH_SIZE",
+            "OA_BATCH_RECONCILE_MAX_CONCURRENT",
             "OA_ENRICHMENT_POLL_INTERVAL_MS",
             "OA_EXTRACT_CHUNK_SEGMENTS",
             "OA_EXTRACT_CHUNK_OVERLAP",
             "OA_EXTRACT_CHUNK_MAX_CHARS",
-            "OA_EXTRACT_MIN_COVERAGE_PERCENT",
-            "OA_EXTRACT_MAX_GAP_FILL_PASSES",
+            "OA_GEMINI_BATCH_ENABLED",
+            "OA_GEMINI_BATCH_MAX_JOBS",
+            "OA_GEMINI_BATCH_MAX_BYTES",
+            "OA_GEMINI_BATCH_POLL_INTERVAL_MS",
             "OA_POSTGRES_URL",
+            "OA_OPENAI_REPAIR_MAX_OUTPUT_TOKENS",
+            "OA_OBJECT_STORE_ROOT",
             "DATABASE_URL",
+            "OA_INFERENCE_PROVIDER",
+            "OA_RECONCILE_INFERENCE_PROVIDER",
+            "OA_OPENAI_STANDARD_MODEL",
+            "OA_OPENAI_QUALITY_MODEL",
+            "OA_OPENAI_RECONCILE_STANDARD_MODEL",
+            "OA_OPENAI_RECONCILE_QUALITY_MODEL",
+            "OA_OPENAI_EMBEDDING_MODEL",
+            "OA_OPENAI_EMBEDDING_DIMENSIONS",
+            "OA_GEMINI_STANDARD_MODEL",
+            "OA_GEMINI_QUALITY_MODEL",
+            "OA_GEMINI_FORMAT_STANDARD_MODEL",
+            "OA_GEMINI_FORMAT_QUALITY_MODEL",
+            "OA_GEMINI_RECONCILE_STANDARD_MODEL",
+            "OA_GEMINI_RECONCILE_QUALITY_MODEL",
+            "OA_GEMINI_EMBEDDING_MODEL",
+            "OA_GEMINI_EMBEDDING_DIMENSIONS",
+            "OA_ANTHROPIC_STANDARD_MODEL",
+            "OA_ANTHROPIC_QUALITY_MODEL",
+            "OA_ANTHROPIC_RECONCILE_STANDARD_MODEL",
+            "OA_ANTHROPIC_RECONCILE_QUALITY_MODEL",
+            "OA_GROK_STANDARD_MODEL",
+            "OA_GROK_QUALITY_MODEL",
+            "OA_GROK_RECONCILE_STANDARD_MODEL",
+            "OA_GROK_RECONCILE_QUALITY_MODEL",
+            "OA_OCI_STANDARD_MODEL",
+            "OA_OCI_QUALITY_MODEL",
+            "OA_OCI_RECONCILE_STANDARD_MODEL",
+            "OA_OCI_RECONCILE_QUALITY_MODEL",
+            "OA_EXTRACT_WORKERS",
+            "OA_EXTRACT_BATCH_SIZE",
+            "OA_EXTRACT_MAX_CONCURRENT",
+            "OA_RECONCILE_WORKERS",
+            "OA_RECONCILE_BATCH_SIZE",
+            "OA_RECONCILE_MAX_CONCURRENT",
+            "OA_EMBEDDING_WORKERS",
         ] {
             std::env::remove_var(key);
         }
@@ -860,7 +918,6 @@ mod tests {
         assert!(matches!(config.object_store, ObjectStoreConfig::LocalFs(_)));
         assert_eq!(config.inference, InferenceConfig::Stub);
         assert_eq!(config.embeddings, EmbeddingConfig::Disabled);
-        assert_eq!(config.reconcile_inference, None);
         assert_eq!(config.inference_mode, InferenceExecutionMode::Batch);
     }
 
@@ -961,10 +1018,11 @@ mod tests {
             "OA_POSTGRES_URL",
             "postgres://test:test@localhost/open_archive",
         );
-        std::env::set_var("OA_INFERENCE_PROVIDER", "openai");
+        std::env::set_var("OA_MODEL_PROVIDER", "openai");
         std::env::set_var("OA_OPENAI_API_KEY", "test-key");
         std::env::set_var("OA_OPENAI_REASONING_EFFORT", "none");
-        std::env::set_var("OA_OPENAI_STANDARD_MODEL", "gpt-4.1-mini");
+        std::env::set_var("OA_HEAVY_MODEL", "gpt-4.1");
+        std::env::set_var("OA_FAST_MODEL", "gpt-4.1-mini");
 
         let config = AppConfig::from_env().expect("openai inference provider should load");
         let InferenceConfig::OpenAi(config) = config.inference else {
@@ -979,10 +1037,8 @@ mod tests {
         );
         assert_eq!(config.max_output_tokens, 4000);
         assert_eq!(config.repair_max_output_tokens, 8000);
-        assert_eq!(config.standard_model, "gpt-4.1-mini");
-        assert_eq!(config.quality_model, None);
-        assert_eq!(config.reconcile_standard_model, "gpt-4.1-mini");
-        assert_eq!(config.reconcile_quality_model, None);
+        assert_eq!(config.heavy_model, "gpt-4.1");
+        assert_eq!(config.fast_model, "gpt-4.1-mini");
     }
 
     #[test]
@@ -995,6 +1051,8 @@ mod tests {
         );
         std::env::set_var("OA_EMBEDDING_PROVIDER", "openai");
         std::env::set_var("OA_OPENAI_API_KEY", "test-key");
+        std::env::set_var("OA_EMBEDDING_MODEL", "text-embedding-3-small");
+        std::env::set_var("OA_EMBEDDING_DIMENSIONS", "1536");
 
         let config = AppConfig::from_env().expect("embedding config should load");
         let EmbeddingConfig::OpenAi(config) = config.embeddings else {
@@ -1005,6 +1063,33 @@ mod tests {
         assert_eq!(config.base_url, "https://api.openai.com/v1");
         assert_eq!(config.embedding_model, "text-embedding-3-small");
         assert_eq!(config.embedding_dimensions, 1536);
+    }
+
+    #[test]
+    fn gemini_embedding_provider_loads_when_configured() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
+        std::env::set_var("OA_EMBEDDING_PROVIDER", "gemini");
+        std::env::set_var("OA_GEMINI_API_KEY", "test-key");
+        std::env::set_var("OA_EMBEDDING_MODEL", "gemini-embedding-001");
+        std::env::set_var("OA_EMBEDDING_DIMENSIONS", "3072");
+
+        let config = AppConfig::from_env().expect("embedding config should load");
+        let EmbeddingConfig::Gemini(config) = config.embeddings else {
+            panic!("expected gemini embedding config");
+        };
+
+        assert_eq!(config.api_key, "test-key");
+        assert_eq!(
+            config.base_url,
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
+        assert_eq!(config.embedding_model, "gemini-embedding-001");
+        assert_eq!(config.embedding_dimensions, 3072);
     }
 
     #[test]
@@ -1022,9 +1107,42 @@ mod tests {
         assert_eq!(config.chunking.max_segments_per_chunk, 20);
         assert_eq!(config.chunking.chunk_overlap_segments, 4);
         assert_eq!(config.chunking.max_chars_per_chunk, 25_000);
-        assert_eq!(config.extract_min_coverage_percent, 60);
-        assert_eq!(config.extract_max_gap_fill_passes, 1);
-        assert_eq!(config.embedding_workers, 1);
+        assert_eq!(config.direct.embedding_workers, 1);
+        assert_eq!(config.batch.embedding_workers, 1);
+    }
+
+    #[test]
+    fn enrichment_pipeline_supports_mode_specific_worker_overrides() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
+        std::env::set_var("OA_DIRECT_EXTRACT_WORKERS", "7");
+        std::env::set_var("OA_DIRECT_RECONCILE_WORKERS", "6");
+        std::env::set_var("OA_DIRECT_EMBEDDING_WORKERS", "4");
+        std::env::set_var("OA_BATCH_EXTRACT_WORKERS", "1");
+        std::env::set_var("OA_BATCH_EXTRACT_BATCH_SIZE", "1");
+        std::env::set_var("OA_BATCH_EXTRACT_MAX_CONCURRENT", "60");
+        std::env::set_var("OA_BATCH_RECONCILE_WORKERS", "1");
+        std::env::set_var("OA_BATCH_RECONCILE_BATCH_SIZE", "1");
+        std::env::set_var("OA_BATCH_RECONCILE_MAX_CONCURRENT", "60");
+        std::env::set_var("OA_BATCH_EMBEDDING_WORKERS", "9");
+
+        let config =
+            EnrichmentPipelineConfig::from_env().expect("pipeline config should load overrides");
+
+        assert_eq!(config.direct.extract_workers, 7);
+        assert_eq!(config.direct.reconcile_workers, 6);
+        assert_eq!(config.direct.embedding_workers, 4);
+        assert_eq!(config.batch.extract_workers, 1);
+        assert_eq!(config.batch.extract.batch_size, 1);
+        assert_eq!(config.batch.extract.max_concurrent_batches, 60);
+        assert_eq!(config.batch.reconcile_workers, 1);
+        assert_eq!(config.batch.reconcile.batch_size, 1);
+        assert_eq!(config.batch.reconcile.max_concurrent_batches, 60);
+        assert_eq!(config.batch.embedding_workers, 9);
     }
 
     #[test]
@@ -1049,9 +1167,10 @@ mod tests {
             "OA_POSTGRES_URL",
             "postgres://test:test@localhost/open_archive",
         );
-        std::env::set_var("OA_INFERENCE_PROVIDER", "gemini");
+        std::env::set_var("OA_MODEL_PROVIDER", "gemini");
         std::env::set_var("OA_GEMINI_API_KEY", "test-key");
-        std::env::set_var("OA_GEMINI_STANDARD_MODEL", "gemini-2.5-flash-lite");
+        std::env::set_var("OA_HEAVY_MODEL", "gemini-3-flash-preview");
+        std::env::set_var("OA_FAST_MODEL", "gemini-2.5-flash-lite");
 
         let config = AppConfig::from_env().expect("gemini inference provider should load");
         let InferenceConfig::Gemini(config) = config.inference else {
@@ -1065,10 +1184,8 @@ mod tests {
         );
         assert_eq!(config.max_output_tokens, 4000);
         assert_eq!(config.repair_max_output_tokens, 8000);
-        assert_eq!(config.standard_model, "gemini-2.5-flash-lite");
-        assert_eq!(config.quality_model, None);
-        assert_eq!(config.reconcile_standard_model, "gemini-2.5-flash-lite");
-        assert_eq!(config.reconcile_quality_model, None);
+        assert_eq!(config.heavy_model, "gemini-3-flash-preview");
+        assert_eq!(config.fast_model, "gemini-2.5-flash-lite");
     }
 
     #[test]
@@ -1079,9 +1196,10 @@ mod tests {
             "OA_POSTGRES_URL",
             "postgres://test:test@localhost/open_archive",
         );
-        std::env::set_var("OA_INFERENCE_PROVIDER", "anthropic");
+        std::env::set_var("OA_MODEL_PROVIDER", "anthropic");
         std::env::set_var("OA_ANTHROPIC_API_KEY", "test-key");
-        std::env::set_var("OA_ANTHROPIC_STANDARD_MODEL", "claude-sonnet-4-20250514");
+        std::env::set_var("OA_HEAVY_MODEL", "claude-sonnet-4-20250514");
+        std::env::set_var("OA_FAST_MODEL", "claude-haiku-4-5");
 
         let config = AppConfig::from_env().expect("anthropic inference provider should load");
         let InferenceConfig::Anthropic(config) = config.inference else {
@@ -1091,10 +1209,8 @@ mod tests {
         assert_eq!(config.api_key, "test-key");
         assert_eq!(config.base_url, "https://api.anthropic.com/v1");
         assert_eq!(config.max_output_tokens, 4000);
-        assert_eq!(config.standard_model, "claude-sonnet-4-20250514");
-        assert_eq!(config.quality_model, None);
-        assert_eq!(config.reconcile_standard_model, "claude-sonnet-4-20250514");
-        assert_eq!(config.reconcile_quality_model, None);
+        assert_eq!(config.heavy_model, "claude-sonnet-4-20250514");
+        assert_eq!(config.fast_model, "claude-haiku-4-5");
     }
 
     #[test]
@@ -1105,9 +1221,10 @@ mod tests {
             "OA_POSTGRES_URL",
             "postgres://test:test@localhost/open_archive",
         );
-        std::env::set_var("OA_INFERENCE_PROVIDER", "grok");
+        std::env::set_var("OA_MODEL_PROVIDER", "grok");
         std::env::set_var("OA_GROK_API_KEY", "test-key");
-        std::env::set_var("OA_GROK_STANDARD_MODEL", "grok-4-fast-reasoning");
+        std::env::set_var("OA_HEAVY_MODEL", "grok-4-fast-reasoning");
+        std::env::set_var("OA_FAST_MODEL", "grok-4-fast-non-reasoning");
 
         let config = AppConfig::from_env().expect("grok inference provider should load");
         let InferenceConfig::Grok(config) = config.inference else {
@@ -1118,63 +1235,117 @@ mod tests {
         assert_eq!(config.base_url, "https://api.x.ai/v1");
         assert_eq!(config.max_output_tokens, 4000);
         assert_eq!(config.repair_max_output_tokens, 8000);
-        assert_eq!(config.standard_model, "grok-4-fast-reasoning");
-        assert_eq!(config.quality_model, None);
-        assert_eq!(config.reconcile_standard_model, "grok-4-fast-reasoning");
-        assert_eq!(config.reconcile_quality_model, None);
+        assert_eq!(config.heavy_model, "grok-4-fast-reasoning");
+        assert_eq!(config.fast_model, "grok-4-fast-non-reasoning");
     }
 
     #[test]
-    fn reconcile_inference_provider_loads_when_configured() {
+    fn oci_inference_provider_loads_when_configured() {
         let _guard = env_lock();
         clear_test_env();
         std::env::set_var(
             "OA_POSTGRES_URL",
             "postgres://test:test@localhost/open_archive",
         );
-        std::env::set_var("OA_INFERENCE_PROVIDER", "grok");
-        std::env::set_var("OA_GROK_API_KEY", "test-key");
-        std::env::set_var("OA_GROK_STANDARD_MODEL", "grok-4-fast");
-        std::env::set_var("OA_RECONCILE_INFERENCE_PROVIDER", "gemini");
-        std::env::set_var("OA_GEMINI_API_KEY", "gemini-key");
-        std::env::set_var("OA_GEMINI_STANDARD_MODEL", "gemini-2.5-flash-lite");
+        std::env::set_var("OA_MODEL_PROVIDER", "oci");
+        std::env::set_var("OA_OCI_REGION", "us-chicago-1");
+        std::env::set_var("OA_OCI_COMPARTMENT_ID", "ocid1.compartment.oc1..example");
+        std::env::set_var("OA_HEAVY_MODEL", "meta.llama-3.3-70b-instruct");
+        std::env::set_var("OA_FAST_MODEL", "cohere.command-a-03-2025");
 
-        let config = AppConfig::from_env().expect("config should load reconcile override");
-
-        assert!(matches!(config.inference, InferenceConfig::Grok(_)));
-        let Some(InferenceConfig::Gemini(reconcile)) = config.reconcile_inference else {
-            panic!("expected gemini reconcile override");
+        let config = AppConfig::from_env().expect("oci inference provider should load");
+        let InferenceConfig::Oci(config) = config.inference else {
+            panic!("expected oci config");
         };
-        assert_eq!(reconcile.api_key, "gemini-key");
-        assert_eq!(reconcile.standard_model, "gemini-2.5-flash-lite");
-        assert_eq!(reconcile.reconcile_standard_model, "gemini-2.5-flash-lite");
+
+        assert_eq!(config.region, "us-chicago-1");
+        assert_eq!(config.compartment_id, "ocid1.compartment.oc1..example");
+        assert_eq!(config.cli_path, "oci");
+        assert_eq!(config.profile, None);
+        assert_eq!(config.max_output_tokens, 4000);
+        assert_eq!(config.repair_max_output_tokens, 8000);
+        assert_eq!(config.heavy_model, "meta.llama-3.3-70b-instruct");
+        assert_eq!(config.fast_model, "cohere.command-a-03-2025");
     }
 
     #[test]
-    fn provider_reconcile_model_override_loads_when_configured() {
+    fn oci_output_tokens_preserve_requested_values() {
         let _guard = env_lock();
         clear_test_env();
         std::env::set_var(
             "OA_POSTGRES_URL",
             "postgres://test:test@localhost/open_archive",
         );
-        std::env::set_var("OA_INFERENCE_PROVIDER", "gemini");
+        std::env::set_var("OA_MODEL_PROVIDER", "oci");
+        std::env::set_var("OA_OCI_REGION", "us-chicago-1");
+        std::env::set_var("OA_OCI_COMPARTMENT_ID", "ocid1.compartment.oc1..example");
+        std::env::set_var("OA_HEAVY_MODEL", "meta.llama-3.3-70b-instruct");
+        std::env::set_var("OA_FAST_MODEL", "cohere.command-a-03-2025");
+        std::env::set_var("OA_OCI_MAX_OUTPUT_TOKENS", "9000");
+        std::env::set_var("OA_OCI_REPAIR_MAX_OUTPUT_TOKENS", "12000");
+
+        let config = AppConfig::from_env().expect("oci config should load with requested tokens");
+        let InferenceConfig::Oci(config) = config.inference else {
+            panic!("expected oci config");
+        };
+
+        assert_eq!(config.max_output_tokens, 9000);
+        assert_eq!(config.repair_max_output_tokens, 12000);
+    }
+
+    #[test]
+    fn legacy_worker_envs_are_ignored() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
+        std::env::set_var("OA_ENRICHMENT_WORKERS", "2");
+        std::env::set_var("OA_EXTRACT_WORKERS", "9");
+        std::env::set_var("OA_RECONCILE_WORKERS", "8");
+        std::env::set_var("OA_EMBEDDING_WORKERS", "6");
+        std::env::set_var("OA_EXTRACT_BATCH_SIZE", "5");
+        std::env::set_var("OA_EXTRACT_MAX_CONCURRENT", "4");
+
+        let config = EnrichmentPipelineConfig::from_env()
+            .expect("pipeline config should ignore legacy envs");
+
+        assert_eq!(config.direct.extract_workers, 2);
+        assert_eq!(config.direct.reconcile_workers, 2);
+        assert_eq!(config.direct.embedding_workers, 1);
+        assert_eq!(config.batch.extract_workers, 2);
+        assert_eq!(config.batch.extract.batch_size, 5);
+        assert_eq!(config.batch.extract.max_concurrent_batches, 3);
+        assert_eq!(config.batch.reconcile_workers, 2);
+        assert_eq!(config.batch.reconcile.batch_size, 5);
+        assert_eq!(config.batch.reconcile.max_concurrent_batches, 2);
+        assert_eq!(config.batch.embedding_workers, 1);
+    }
+
+    #[test]
+    fn legacy_model_envs_do_not_satisfy_new_contract() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
+        std::env::set_var("OA_MODEL_PROVIDER", "gemini");
         std::env::set_var("OA_GEMINI_API_KEY", "gemini-key");
         std::env::set_var("OA_GEMINI_STANDARD_MODEL", "gemini-3-flash-preview");
         std::env::set_var(
-            "OA_GEMINI_RECONCILE_STANDARD_MODEL",
+            "OA_GEMINI_FORMAT_STANDARD_MODEL",
             "gemini-3.1-flash-lite-preview",
         );
 
-        let config = AppConfig::from_env().expect("config should load reconcile model override");
-        let InferenceConfig::Gemini(config) = config.inference else {
-            panic!("expected gemini config");
-        };
+        let error = AppConfig::from_env().expect_err("legacy model envs should not be accepted");
 
-        assert_eq!(config.standard_model, "gemini-3-flash-preview");
-        assert_eq!(
-            config.reconcile_standard_model,
-            "gemini-3.1-flash-lite-preview"
-        );
+        assert!(matches!(
+            error,
+            ConfigError::MissingEnv {
+                key: "OA_HEAVY_MODEL"
+            }
+        ));
     }
 }

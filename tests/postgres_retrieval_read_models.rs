@@ -7,7 +7,7 @@ use open_archive::config::PostgresConfig;
 use open_archive::migrations;
 use open_archive::storage::{
     ArchiveSearchReadStore, ArtifactContextPackReadStore, ArtifactDetailReadStore,
-    ImportWriteStore, PostgresImportWriteStore, PostgresRetrievalReadStore,
+    ImportWriteStore, PostgresImportWriteStore, PostgresRetrievalReadStore, SearchCandidateKind,
 };
 use postgres::NoTls;
 use std::sync::OnceLock;
@@ -119,5 +119,38 @@ fn postgres_retrieval_read_models_load_search_detail_and_context_material() {
         .expect("context material should exist");
     assert_eq!(context.artifact.artifact_id, artifact_id);
     assert!(!context.derived_objects.is_empty());
-    assert!(!context.evidence_links.is_empty());
+}
+
+#[test]
+#[ignore = "requires local Postgres; set OA_POSTGRES_INTEGRATION_TESTS=1 and OA_ALLOW_SCHEMA_RESET=1"]
+fn postgres_archive_search_prefers_derived_object_matches_over_title_matches() {
+    let Some(harness) = harness() else { return };
+    let _guard = fixtures::lock_live_test();
+    harness.reset_schema();
+
+    let mut fixture = fixtures::make_test_import_fixture(&fixtures::unique_suffix("retpg"));
+    fixture.write_set.artifact_sets[0].artifact.title = Some("Summary note".to_string());
+    let artifact_id = fixture.artifact_id.clone();
+    let job_id = fixture.job_id.clone();
+    let segment_ids = fixture.segment_ids.clone();
+
+    PostgresImportWriteStore::new(harness.0.clone())
+        .write_import(fixture.write_set)
+        .expect("seed import should succeed");
+    fixtures::seed_postgres_stub_derivations(&harness.0, &artifact_id, &job_id, &segment_ids);
+
+    let read_store = PostgresRetrievalReadStore::new(harness.0.clone());
+    let search_hits = read_store
+        .search_candidates(
+            "summary",
+            10,
+            &open_archive::storage::SearchFilters::default(),
+        )
+        .expect("search should succeed");
+
+    assert!(!search_hits.is_empty());
+    assert!(matches!(
+        search_hits[0].match_kind,
+        SearchCandidateKind::DerivedObject { .. }
+    ));
 }

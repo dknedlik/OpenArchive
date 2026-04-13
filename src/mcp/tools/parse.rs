@@ -4,9 +4,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand::random;
 use serde_json::Value;
 
-use crate::storage::writeback_store::NewAgentEvidenceLink;
-use crate::storage::{EvidenceRole, SupportStrength};
-
 use super::result::tool_error;
 
 pub(in crate::mcp::tools) fn parse_optional_enum<T>(
@@ -68,60 +65,6 @@ pub(in crate::mcp::tools) fn parse_enum_array<T>(
         parsed.push(value);
     }
     Ok(Some(parsed))
-}
-
-pub(in crate::mcp::tools) fn parse_evidence_array(
-    arguments: &Value,
-) -> std::result::Result<Vec<NewAgentEvidenceLink>, Value> {
-    let items = match arguments.get("evidence").and_then(Value::as_array) {
-        Some(arr) => arr,
-        None => return Ok(vec![]),
-    };
-    let mut evidence = Vec::with_capacity(items.len());
-    for item in items {
-        let segment_id = match item.get("segment_id").and_then(Value::as_str) {
-            Some(v) => v.to_string(),
-            None => {
-                return Err(tool_error(
-                    "invalid_params",
-                    "evidence item requires segment_id",
-                ))
-            }
-        };
-        let evidence_role = match item
-            .get("evidence_role")
-            .and_then(Value::as_str)
-            .and_then(EvidenceRole::parse)
-        {
-            Some(v) => v,
-            None => {
-                return Err(tool_error(
-                    "invalid_params",
-                    "evidence item requires valid evidence_role",
-                ))
-            }
-        };
-        let support_strength = match item
-            .get("support_strength")
-            .and_then(Value::as_str)
-            .and_then(SupportStrength::parse)
-        {
-            Some(v) => v,
-            None => {
-                return Err(tool_error(
-                    "invalid_params",
-                    "evidence item requires valid support_strength",
-                ))
-            }
-        };
-        evidence.push(NewAgentEvidenceLink {
-            evidence_link_id: new_id("elink"),
-            segment_id,
-            evidence_role,
-            support_strength,
-        });
-    }
-    Ok(evidence)
 }
 
 pub(in crate::mcp::tools) fn new_id(prefix: &str) -> String {

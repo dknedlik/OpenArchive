@@ -7,10 +7,10 @@ use crate::storage::derivation_store::{
     DerivationWriteResult, DerivedMetadataWriteStore, WriteDerivationAttempt,
 };
 use crate::storage::enrichment_state_store::EnrichmentStateStore;
-use crate::storage::types::{ArtifactExtractionResult, ReconciliationDecision, RetrievalResultSet};
+use crate::storage::types::{ArtifactExtractionResult, ReconciliationDecision};
 
-use super::derivation;
 use super::tx::{begin_transaction, commit_transaction, rollback_transaction, storage_db_error};
+use super::{artifact_link, derivation};
 
 pub struct PostgresDerivedMetadataStore {
     config: PostgresConfig,
@@ -88,47 +88,6 @@ impl EnrichmentStateStore for PostgresDerivedMetadataStore {
         )
     }
 
-    fn save_retrieval_result_set(&self, result_set: &RetrievalResultSet) -> StorageResult<()> {
-        let mut client = postgres_db::connect(&self.config)?;
-        client
-            .execute(
-                "INSERT INTO oa_retrieval_result_set
-                 (retrieval_result_set_id, artifact_id, job_id, extraction_result_id, pipeline_name, pipeline_version, result_json)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb)
-                 ON CONFLICT (retrieval_result_set_id) DO UPDATE
-                 SET result_json = EXCLUDED.result_json,
-                     pipeline_name = EXCLUDED.pipeline_name,
-                     pipeline_version = EXCLUDED.pipeline_version",
-                &[
-                    &result_set.retrieval_result_set_id,
-                    &result_set.artifact_id,
-                    &result_set.job_id,
-                    &result_set.extraction_result_id,
-                    &result_set.pipeline_name,
-                    &result_set.pipeline_version,
-                    &serde_json::to_string(result_set).expect("retrieval result set serializable"),
-                ],
-            )
-            .map_err(|source| storage_db_error(&self.config.connection_string, source))?;
-        Ok(())
-    }
-
-    fn load_retrieval_result_set(
-        &self,
-        retrieval_result_set_id: &str,
-    ) -> StorageResult<Option<RetrievalResultSet>> {
-        let mut client = postgres_db::connect(&self.config)?;
-        load_json_record(
-            &mut client,
-            &self.config.connection_string,
-            "SELECT result_json::text
-             FROM oa_retrieval_result_set
-             WHERE retrieval_result_set_id = $1",
-            retrieval_result_set_id,
-            "retrieval result set",
-        )
-    }
-
     fn save_reconciliation_decisions(
         &self,
         decisions: &[ReconciliationDecision],
@@ -138,10 +97,10 @@ impl EnrichmentStateStore for PostgresDerivedMetadataStore {
             client
                 .execute(
                     "INSERT INTO oa_reconciliation_decision
-                     (reconciliation_decision_id, artifact_id, job_id, extraction_result_id, retrieval_result_set_id,
+                     (reconciliation_decision_id, artifact_id, job_id, extraction_result_id,
                       pipeline_name, pipeline_version, decision_kind, target_kind, target_key, matched_object_id,
-                      rationale, evidence_segment_ids_json, decision_json)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text::jsonb, $9, $10, $11, $12, $13::text::jsonb, $14::text::jsonb)
+                      rationale, decision_json)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb, $8, $9, $10, $11, $12::text::jsonb)
                      ON CONFLICT (reconciliation_decision_id) DO UPDATE
                      SET decision_json = EXCLUDED.decision_json,
                          rationale = EXCLUDED.rationale",
@@ -150,7 +109,6 @@ impl EnrichmentStateStore for PostgresDerivedMetadataStore {
                         &decision.artifact_id,
                         &decision.job_id,
                         &decision.extraction_result_id,
-                        &decision.retrieval_result_set_id,
                         &decision.pipeline_name,
                         &decision.pipeline_version,
                         &serde_json::to_string(&decision.decision_kind)
@@ -159,8 +117,6 @@ impl EnrichmentStateStore for PostgresDerivedMetadataStore {
                         &decision.target_key,
                         &decision.matched_object_id,
                         &decision.rationale,
-                        &serde_json::to_string(&decision.evidence_segment_ids)
-                            .expect("evidence ids serializable"),
                         &serde_json::to_string(decision).expect("decision serializable"),
                     ],
                 )
@@ -222,7 +178,6 @@ impl DerivedMetadataWriteStore for PostgresDerivedMetadataStore {
             )?;
 
             let mut derived_object_ids = Vec::with_capacity(attempt.objects.len());
-            let mut evidence_links_written = 0usize;
             for object_write in &attempt.objects {
                 derivation::insert_derived_object(
                     &mut client,
@@ -230,21 +185,20 @@ impl DerivedMetadataWriteStore for PostgresDerivedMetadataStore {
                     &object_write.object,
                 )?;
                 derived_object_ids.push(object_write.object.derived_object_id.clone());
-
-                for link in &object_write.evidence_links {
-                    derivation::insert_evidence_link(
-                        &mut client,
-                        &self.config.connection_string,
-                        link,
-                    )?;
-                    evidence_links_written += 1;
-                }
             }
+
+            for link in &attempt.archive_links {
+                derivation::insert_archive_link(&mut client, &self.config.connection_string, link)?;
+            }
+            artifact_link::sync_reconcile_links_for_archive_links(
+                &mut client,
+                &self.config.connection_string,
+                &attempt.archive_links,
+            )?;
 
             Ok(DerivationWriteResult {
                 derivation_run_id: attempt.run.derivation_run_id.clone(),
                 derived_object_ids,
-                evidence_links_written,
             })
         })();
 

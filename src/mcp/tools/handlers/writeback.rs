@@ -6,7 +6,7 @@ use crate::storage::writeback_store::{
 };
 use crate::storage::ObjectStatus;
 
-use super::super::parse::{new_id, parse_evidence_array};
+use super::super::parse::new_id;
 use super::super::result::{tool_error, tool_success};
 
 pub(in crate::mcp::tools) fn handle_store_memory(
@@ -46,10 +46,6 @@ pub(in crate::mcp::tools) fn handle_store_memory(
         .get("contributed_by")
         .and_then(Value::as_str)
         .map(|s| s.to_string());
-    let evidence = match parse_evidence_array(arguments) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
 
     let derived_object_id = new_id("dobj");
     let memory = NewAgentMemory {
@@ -60,7 +56,6 @@ pub(in crate::mcp::tools) fn handle_store_memory(
         memory_type: memory_type.to_string(),
         candidate_key,
         contributed_by,
-        evidence,
     };
     match service.store_memory(memory) {
         Ok(id) => tool_success(json!({ "stored": true, "derived_object_id": id })),
@@ -204,10 +199,6 @@ pub(in crate::mcp::tools) fn handle_store_entity(
         .get("contributed_by")
         .and_then(Value::as_str)
         .map(|s| s.to_string());
-    let evidence = match parse_evidence_array(arguments) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
     let derived_object_id = new_id("dobj");
     let entity = NewAgentEntity {
         derived_object_id: derived_object_id.clone(),
@@ -217,7 +208,6 @@ pub(in crate::mcp::tools) fn handle_store_entity(
         entity_type: entity_type.to_string(),
         candidate_key,
         contributed_by,
-        evidence,
     };
     match service.store_entity(entity) {
         Ok(id) => tool_success(json!({ "stored": true, "derived_object_id": id })),

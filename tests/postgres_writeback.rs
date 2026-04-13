@@ -101,7 +101,6 @@ fn postgres_writeback_store_persists_agent_memory_with_derivation_run() {
             memory_type: "fact".to_string(),
             candidate_key: Some("agent-memory".to_string()),
             contributed_by: Some("test-agent".to_string()),
-            evidence: vec![],
         })
         .expect("agent memory write should succeed");
 
@@ -174,7 +173,6 @@ fn postgres_writeback_link_upsert_keeps_one_canonical_row() {
             memory_type: "fact".to_string(),
             candidate_key: Some("shared-topic-a".to_string()),
             contributed_by: Some("writer-a".to_string()),
-            evidence: vec![],
         })
         .expect("source memory write should succeed");
     store
@@ -186,7 +184,6 @@ fn postgres_writeback_link_upsert_keeps_one_canonical_row() {
             memory_type: "fact".to_string(),
             candidate_key: Some("shared-topic-b".to_string()),
             contributed_by: Some("writer-b".to_string()),
-            evidence: vec![],
         })
         .expect("target memory write should succeed");
 

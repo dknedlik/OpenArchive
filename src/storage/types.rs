@@ -234,6 +234,36 @@ impl ImportedNoteLinkResolutionStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactLinkType {
+    Wikilink,
+    SharedTag,
+    Alias,
+    ReconciledObject,
+}
+
+impl ArtifactLinkType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Wikilink => "wikilink",
+            Self::SharedTag => "shared_tag",
+            Self::Alias => "alias",
+            Self::ReconciledObject => "reconciled_object",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "wikilink" => Some(Self::Wikilink),
+            "shared_tag" => Some(Self::SharedTag),
+            "alias" => Some(Self::Alias),
+            "reconciled_object" => Some(Self::ReconciledObject),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportStatus {
     Pending,
@@ -374,7 +404,6 @@ impl SegmentType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobType {
     ArtifactExtract,
-    ArtifactRetrieveContext,
     ArtifactReconcile,
     DerivedObjectEmbed,
 }
@@ -383,7 +412,6 @@ impl JobType {
     pub fn as_str(&self) -> &'static str {
         match self {
             JobType::ArtifactExtract => "artifact_extract",
-            JobType::ArtifactRetrieveContext => "artifact_retrieve_context",
             JobType::ArtifactReconcile => "artifact_reconcile",
             JobType::DerivedObjectEmbed => "derived_object_embed",
         }
@@ -394,7 +422,6 @@ impl JobType {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "artifact_extract" => Some(Self::ArtifactExtract),
-            "artifact_retrieve_context" => Some(Self::ArtifactRetrieveContext),
             "artifact_reconcile" => Some(Self::ArtifactReconcile),
             "derived_object_embed" => Some(Self::DerivedObjectEmbed),
             _ => None,
@@ -427,22 +454,19 @@ impl JobStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnrichmentTier {
-    Standard,
-    Quality,
+    Default,
 }
 
 impl EnrichmentTier {
     pub fn as_str(&self) -> &'static str {
         match self {
-            EnrichmentTier::Standard => "standard",
-            EnrichmentTier::Quality => "quality",
+            EnrichmentTier::Default => "default",
         }
     }
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
-            "standard" => Some(Self::Standard),
-            "quality" => Some(Self::Quality),
+            "default" => Some(Self::Default),
             _ => None,
         }
     }
@@ -631,60 +655,6 @@ impl ScopeType {
         match value {
             "artifact" => Some(Self::Artifact),
             "segment" => Some(Self::Segment),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EvidenceRole {
-    PrimarySupport,
-    SecondarySupport,
-    ReductionInput,
-}
-
-impl EvidenceRole {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            EvidenceRole::PrimarySupport => "primary_support",
-            EvidenceRole::SecondarySupport => "secondary_support",
-            EvidenceRole::ReductionInput => "reduction_input",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "primary_support" => Some(Self::PrimarySupport),
-            "secondary_support" => Some(Self::SecondarySupport),
-            "reduction_input" => Some(Self::ReductionInput),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SupportStrength {
-    Strong,
-    Medium,
-    Weak,
-}
-
-impl SupportStrength {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            SupportStrength::Strong => "strong",
-            SupportStrength::Medium => "medium",
-            SupportStrength::Weak => "weak",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "strong" => Some(Self::Strong),
-            "medium" => Some(Self::Medium),
-            "weak" => Some(Self::Weak),
             _ => None,
         }
     }
@@ -1092,22 +1062,11 @@ pub struct NewDerivedObjectEmbedding {
     pub embedding: Vec<f32>,
 }
 
-/// Data required to create one oa_evidence_link row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewEvidenceLink {
-    pub evidence_link_id: String,
-    pub derived_object_id: String,
-    pub segment_id: String,
-    pub evidence_role: EvidenceRole,
-    pub evidence_rank: i64,
-    pub support_strength: SupportStrength,
-}
-
 // ---------------------------------------------------------------------------
 // Job payload contract
 // ---------------------------------------------------------------------------
 
-/// Segment-scoped work unit for extraction chunking and coverage repair.
+/// Sequence-scoped work unit for extraction chunking.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ConversationWindowRef {
     pub window_id: String,
@@ -1175,47 +1134,12 @@ impl ArtifactExtractPayload {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct ArtifactRetrieveContextPayload {
-    pub schema_version: String,
-    pub artifact_id: String,
-    pub import_id: String,
-    pub source_type: String,
-    pub extraction_result_id: String,
-}
-
-impl ArtifactRetrieveContextPayload {
-    pub fn new_v1(
-        artifact_id: &str,
-        import_id: &str,
-        source_type: SourceType,
-        extraction_result_id: &str,
-    ) -> Self {
-        Self {
-            schema_version: "1".to_string(),
-            artifact_id: artifact_id.to_string(),
-            import_id: import_id.to_string(),
-            source_type: source_type.as_str().to_string(),
-            extraction_result_id: extraction_result_id.to_string(),
-        }
-    }
-
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).expect("ArtifactRetrieveContextPayload is always serializable")
-    }
-
-    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ArtifactReconcilePayload {
     pub schema_version: String,
     pub artifact_id: String,
     pub import_id: String,
     pub source_type: String,
     pub extraction_result_id: String,
-    pub retrieval_result_set_id: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1271,7 +1195,6 @@ impl ArtifactReconcilePayload {
         import_id: &str,
         source_type: SourceType,
         extraction_result_id: &str,
-        retrieval_result_set_id: &str,
     ) -> Self {
         Self {
             schema_version: "1".to_string(),
@@ -1279,7 +1202,6 @@ impl ArtifactReconcilePayload {
             import_id: import_id.to_string(),
             source_type: source_type.as_str().to_string(),
             extraction_result_id: extraction_result_id.to_string(),
-            retrieval_result_set_id: retrieval_result_set_id.to_string(),
         }
     }
 
@@ -1443,6 +1365,19 @@ pub struct ImportedNoteMetadata {
     pub outbound_links: Vec<ImportedNoteLinkRecord>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ArtifactLinkRecord {
+    pub artifact_link_id: String,
+    pub source_artifact_id: String,
+    pub source_title: Option<String>,
+    pub source_note_path: Option<String>,
+    pub target_artifact_id: String,
+    pub target_title: Option<String>,
+    pub target_note_path: Option<String>,
+    pub link_type: ArtifactLinkType,
+    pub link_value: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct LoadedArtifactForEnrichment {
     pub artifact: LoadedArtifactRecord,
@@ -1456,7 +1391,6 @@ pub struct CandidateEntity {
     pub entity_key: String,
     pub display_name: String,
     pub entity_type: String,
-    pub evidence_segment_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1467,7 +1401,6 @@ pub struct CandidateRelationship {
     pub title: Option<String>,
     pub body_text: String,
     pub confidence_label: String,
-    pub evidence_segment_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1476,7 +1409,6 @@ pub struct ExtractedClassification {
     pub body_text: Option<String>,
     pub classification_type: String,
     pub classification_value: String,
-    pub evidence_segment_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1488,7 +1420,6 @@ pub struct ExtractedMemory {
     pub memory_type: String,
     pub memory_scope: ScopeType,
     pub memory_scope_value: String,
-    pub evidence_segment_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1497,7 +1428,6 @@ pub struct RetrievalIntent {
     pub question: String,
     pub query_text: String,
     pub intent_type: String,
-    pub evidence_segment_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1509,12 +1439,10 @@ pub struct ArtifactExtractionResult {
     pub pipeline_version: String,
     pub summary_title: Option<String>,
     pub summary_body_text: String,
-    pub summary_evidence_segment_ids: Vec<String>,
     pub classifications: Vec<ExtractedClassification>,
     pub memories: Vec<ExtractedMemory>,
     pub entities: Vec<CandidateEntity>,
     pub relationships: Vec<CandidateRelationship>,
-    pub retrieval_intents: Vec<RetrievalIntent>,
     pub status: String,
     pub error_message: Option<String>,
 }
@@ -1532,26 +1460,12 @@ pub struct RetrievedContextItem {
     pub rank_score: i32,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct RetrievalResultSet {
-    pub retrieval_result_set_id: String,
-    pub artifact_id: String,
-    pub job_id: String,
-    pub extraction_result_id: String,
-    pub pipeline_name: String,
-    pub pipeline_version: String,
-    pub intents: Vec<RetrievalIntent>,
-    pub results: Vec<RetrievedContextItem>,
-    pub status: String,
-    pub error_message: Option<String>,
-}
-
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReconciliationDecisionKind {
     CreateNew,
+    #[serde(alias = "strengthen_existing")]
     AttachToExisting,
-    StrengthenExisting,
     SupersedeExisting,
     ContradictsExisting,
     InsufficientEvidence,
@@ -1563,7 +1477,6 @@ pub struct ReconciliationDecision {
     pub artifact_id: String,
     pub job_id: String,
     pub extraction_result_id: String,
-    pub retrieval_result_set_id: String,
     pub pipeline_name: String,
     pub pipeline_version: String,
     pub decision_kind: ReconciliationDecisionKind,
@@ -1571,7 +1484,6 @@ pub struct ReconciliationDecision {
     pub target_key: String,
     pub matched_object_id: Option<String>,
     pub rationale: String,
-    pub evidence_segment_ids: Vec<String>,
     pub status: String,
     pub error_message: Option<String>,
 }

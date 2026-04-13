@@ -1,13 +1,5 @@
 use crate::error::StorageResult;
-use crate::storage::types::{EvidenceRole, ObjectStatus, SupportStrength};
-
-#[derive(Debug, Clone)]
-pub struct NewAgentEvidenceLink {
-    pub evidence_link_id: String,
-    pub segment_id: String,
-    pub evidence_role: EvidenceRole,
-    pub support_strength: SupportStrength,
-}
+use crate::storage::types::ObjectStatus;
 
 #[derive(Debug, Clone)]
 pub struct UpdateObjectStatus {
@@ -26,7 +18,6 @@ pub struct NewAgentEntity {
     pub entity_type: String,
     pub candidate_key: Option<String>,
     pub contributed_by: Option<String>,
-    pub evidence: Vec<NewAgentEvidenceLink>,
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +29,6 @@ pub struct NewAgentMemory {
     pub memory_type: String,
     pub candidate_key: Option<String>,
     pub contributed_by: Option<String>,
-    pub evidence: Vec<NewAgentEvidenceLink>,
 }
 
 #[derive(Debug, Clone)]

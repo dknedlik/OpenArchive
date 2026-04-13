@@ -6,12 +6,12 @@ use crate::storage::retrieval_read_store::{
     ArchiveSearchCandidate, ArchiveSearchReadStore, ArtifactContextPackMaterial,
     ArtifactContextPackReadStore, ArtifactDetailReadStore, ArtifactDetailView,
     CrossArtifactReadStore, DerivedObjectSearchResult, DerivedObjectSearchStore, GraphRelatedEntry,
-    ObjectSearchFilters, RelatedDerivedObject, SearchFilters,
+    ObjectSearchFilters, RelatedDerivedObject, RelatedDerivedObjectEmbeddingMatch, SearchFilters,
 };
 use crate::storage::review_read_store::{
     NewReviewDecision, ReviewCandidate, ReviewQueueFilters, ReviewReadStore, ReviewWriteStore,
 };
-use crate::storage::types::{RetrievalIntent, RetrievedContextItem};
+use crate::storage::types::{DerivedObjectType, RetrievalIntent, RetrievedContextItem};
 
 use super::{retrieval, review};
 
@@ -177,6 +177,25 @@ impl CrossArtifactReadStore for PostgresRetrievalReadStore {
                 self.client.connection_string(),
                 artifact_id,
                 candidate_keys,
+                limit,
+            )
+        })
+    }
+
+    fn find_related_by_embedding(
+        &self,
+        artifact_id: &str,
+        derived_object_type: DerivedObjectType,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> StorageResult<Vec<RelatedDerivedObjectEmbeddingMatch>> {
+        self.client.with_client(|client| {
+            retrieval::find_related_by_embedding(
+                client,
+                self.client.connection_string(),
+                artifact_id,
+                derived_object_type,
+                query_embedding,
                 limit,
             )
         })

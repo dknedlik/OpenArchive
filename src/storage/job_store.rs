@@ -75,8 +75,7 @@ pub trait EnrichmentJobLifecycleStore: Sync + Send {
     /// small batch of same-stage work.
     ///
     /// When `enrichment_tier` is `Some`, only jobs of that tier are claimed.
-    /// When `None`, jobs of any tier are eligible (useful for tier-agnostic
-    /// stages like retrieve_context).
+    /// When `None`, jobs of any tier are eligible for the selected stage.
     fn claim_jobs_by_type(
         &self,
         worker_id: &str,

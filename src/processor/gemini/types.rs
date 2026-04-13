@@ -72,8 +72,10 @@ pub(super) struct GeminiTextPart {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct GeminiGenerationConfig {
-    pub(super) response_mime_type: String,
-    pub(super) response_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) response_mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) response_schema: Option<serde_json::Value>,
     pub(super) max_output_tokens: u32,
 }
 
@@ -185,7 +187,6 @@ pub(super) struct GeminiBatchRequestMetadata {
 pub(crate) struct GeminiBatchResult {
     pub(super) key: String,
     pub(super) output_text: String,
-    pub(super) usage: Option<InferenceUsage>,
 }
 
 impl GeminiBatchJob {
@@ -225,20 +226,13 @@ impl GeminiBatchJob {
                         .ok_or_else(|| super::ProcessorError::Message {
                             message: format!("Gemini batch response {key} missing output"),
                         })?;
-                let output_text =
-                    response
-                        .flatten_text()
-                        .ok_or_else(|| super::ProcessorError::Message {
-                            message: format!("Gemini batch response {key} returned empty content"),
-                        })?;
-                Ok(GeminiBatchResult {
-                    key,
-                    output_text,
-                    usage: response
-                        .usage_metadata
-                        .clone()
-                        .and_then(InferenceUsage::from_gemini_usage),
-                })
+                let output_text = response.flatten_text().ok_or_else(|| {
+                    super::ProcessorError::EmptyInferenceContent {
+                        provider: "Gemini batch",
+                        detail: format!(" (request_key={key})"),
+                    }
+                })?;
+                Ok(GeminiBatchResult { key, output_text })
             })
             .collect()
     }

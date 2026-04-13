@@ -60,6 +60,12 @@ pub enum ProcessorError {
     #[error("invalid model output: {detail}")]
     InvalidModelOutput { detail: String },
 
+    #[error("{provider} returned empty content{detail}")]
+    EmptyInferenceContent {
+        provider: &'static str,
+        detail: String,
+    },
+
     #[error("{message}")]
     Message { message: String },
 }
@@ -71,6 +77,9 @@ impl ProcessorError {
                 format!("response was not valid JSON; preview: {body_preview}")
             }
             ProcessorError::InvalidModelOutput { detail } => detail.clone(),
+            ProcessorError::EmptyInferenceContent { provider, detail } => {
+                format!("{provider} returned empty content{detail}")
+            }
             other => other.to_string(),
         }
     }
@@ -79,7 +88,8 @@ impl ProcessorError {
         match self {
             ProcessorError::SendInferenceRequest { .. }
             | ProcessorError::ReadInferenceResponse { .. }
-            | ProcessorError::ParseInferenceResponse { .. } => true,
+            | ProcessorError::ParseInferenceResponse { .. }
+            | ProcessorError::EmptyInferenceContent { .. } => true,
             ProcessorError::InferenceHttpStatus { status, .. } => {
                 matches!(*status, 408 | 409 | 425 | 429 | 500..=599)
             }
@@ -172,5 +182,17 @@ mod tests {
         assert_eq!(err.retry_after_seconds(), Some(123));
         assert_eq!(err.recommended_retry_after_seconds(), 123);
         assert_eq!(err.recommended_stage_backoff_seconds(0), Some(123));
+    }
+
+    #[test]
+    fn empty_content_errors_are_retryable() {
+        let err = ProcessorError::EmptyInferenceContent {
+            provider: "Gemini",
+            detail: " (finish_reason=STOP)".to_string(),
+        };
+
+        assert!(err.is_retryable());
+        assert!(!err.should_reschedule_without_attempt());
+        assert_eq!(err.recommended_retry_after_seconds(), 60);
     }
 }

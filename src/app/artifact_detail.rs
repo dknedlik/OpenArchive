@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::error::{OpenArchiveError, Result};
 use crate::storage::{
-    ArtifactDetailReadStore, DerivedObjectType, EnrichmentStatus, ImportedNoteLinkRecord,
-    ImportedNoteMetadata, ParticipantRole, SourceType,
+    ArtifactDetailReadStore, ArtifactLinkRecord, DerivedObjectType, EnrichmentStatus,
+    ImportedNoteLinkRecord, ImportedNoteMetadata, ParticipantRole, SourceType,
 };
 
 pub const DEFAULT_SEGMENT_LIMIT: usize = 50;
@@ -43,6 +43,7 @@ pub struct ArtifactDetailResponse {
     pub enrichment_status: EnrichmentStatus,
     pub imported_note_metadata: ImportedNoteMetadata,
     pub inbound_note_links: Vec<ImportedNoteLinkRecord>,
+    pub artifact_links: Vec<ArtifactLinkRecord>,
     pub segment_count: usize,
     pub segment_offset: usize,
     pub segment_limit: usize,
@@ -94,6 +95,7 @@ impl ArtifactDetailService {
             enrichment_status: detail.artifact.enrichment_status,
             imported_note_metadata: detail.imported_note_metadata,
             inbound_note_links: detail.inbound_note_links,
+            artifact_links: detail.artifact_links,
             segment_count: total_segments,
             segment_offset,
             segment_limit,
@@ -199,6 +201,7 @@ mod tests {
             }],
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
+            artifact_links: Vec::new(),
         }));
 
         let response = service.get(request()).unwrap().unwrap();
@@ -232,6 +235,7 @@ mod tests {
             }],
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
+            artifact_links: Vec::new(),
             derived_objects: Vec::new(),
         }));
 
@@ -277,6 +281,7 @@ mod tests {
             ],
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
+            artifact_links: Vec::new(),
             derived_objects: vec![],
         }));
 
