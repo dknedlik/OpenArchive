@@ -1,7 +1,7 @@
 use crate::error::StorageResult;
 use crate::storage::types::{
-    DerivedObjectType, EnrichmentStatus, ImportedNoteLinkRecord, ImportedNoteMetadata, ScopeType,
-    SourceType,
+    ArtifactLinkRecord, DerivedObjectType, EnrichmentStatus, ImportedNoteLinkRecord,
+    ImportedNoteMetadata, ScopeType, SourceType,
 };
 use crate::ParticipantRole;
 
@@ -76,6 +76,7 @@ pub struct ArtifactDetailView {
     pub segments: Vec<ArtifactDetailSegment>,
     pub imported_note_metadata: ImportedNoteMetadata,
     pub inbound_note_links: Vec<ImportedNoteLinkRecord>,
+    pub artifact_links: Vec<ArtifactLinkRecord>,
     pub derived_objects: Vec<ArtifactDetailDerivedObject>,
 }
 
@@ -100,6 +101,7 @@ pub struct ArtifactContextPackMaterial {
     pub segments: Vec<ArtifactDetailSegment>,
     pub imported_note_metadata: ImportedNoteMetadata,
     pub inbound_note_links: Vec<ImportedNoteLinkRecord>,
+    pub artifact_links: Vec<ArtifactLinkRecord>,
     pub derived_objects: Vec<ArtifactContextDerivedObject>,
 }
 
@@ -174,7 +176,7 @@ impl<T> MvpRetrievalReadStore for T where
 {
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
 pub struct RelatedDerivedObject {
     pub derived_object_id: String,
     pub artifact_id: String,
@@ -185,7 +187,7 @@ pub struct RelatedDerivedObject {
     pub confidence_score: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
 pub struct RelatedDerivedObjectEmbeddingMatch {
     pub derived_object_id: String,
     pub artifact_id: String,

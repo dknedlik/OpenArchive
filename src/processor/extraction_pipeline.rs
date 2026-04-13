@@ -8,7 +8,8 @@ use crate::domain::ParticipantRole;
 use crate::storage::types::ScopeType;
 
 use super::pipeline::{
-    canonicalize_entity_type, normalize_candidate_key_text, normalize_optional_text,
+    canonicalize_entity_type, cleanup_artifact_processor_output, normalize_candidate_key_text,
+    normalize_optional_text,
 };
 use super::*;
 
@@ -102,6 +103,7 @@ impl ExtractionPipelineProcessor {
         };
         let output = parse_extraction_pipeline_output(input, &stage2_result.output_text)
             .map_err(|err| attach_output_preview(err, &stage2_result.output_text))?;
+        let output = cleanup_artifact_processor_output(output);
 
         Ok(ArtifactProcessorOutput {
             pipeline_name: self.pipeline_name.to_string(),
@@ -384,11 +386,15 @@ Formatting rules by section:
   - subject: ... | relationship_type: ... | object: ... | note: ...
   Do not create multiple relationship bullets that restate the same underlying connection.
 
+For product documentation, settings guides, and similar reference notes:
+- Do not emit menu labels, settings panes, folders, directory names, CSS snippets, translation options, or license options as entities unless they are clearly durable named systems or the primary subject of the artifact.
+- Prefer product-level and feature-level entities over UI labels and one-off configuration terms.
+
 Never treat the following as entities unless they are clearly proper names of real retained things:
 - file paths
 - directory names
 - commands
-- role labels like User or Assistant
+- role labels and speaker placeholders like User, Assistant, Human, Claude User, ChatGPT User, or AI Assistant
 - abstract concepts like lineage, supersession, queue, architecture, system, project
 - section names, list headings, or pipeline stages"
 }
@@ -426,6 +432,7 @@ Formatting rules:
 - Use only explicit entity bullets to create entities.
 - Use only explicit relationship bullets to create relationships.
 - Do not create entities, relationships, or classifications from the summary paragraph.
+- Omit entity bullets that are obviously file paths, directories, menu labels, settings panes, abstract placeholder concepts, or speaker labels like User, Assistant, Human, or Claude User.
 - Keep classification_type short and consistent.
 
 Extraction notes:
@@ -684,35 +691,26 @@ fn parse_extraction_pipeline_output(
             .relationships
             .into_iter()
             .filter(|relationship| !relationship.relationship_type.trim().is_empty())
-            .map(|relationship| {
+            .filter_map(|relationship| {
                 let subject_key = entity_name_lookup
                     .get(&normalize_candidate_key_text(&relationship.subject_name))
-                    .cloned()
-                    .ok_or_else(|| ProcessorError::InvalidModelOutput {
-                        detail: format!(
-                            "relationship subject {:?} does not match an emitted entity",
-                            relationship.subject_name
-                        ),
-                    })?;
+                    .cloned();
                 let object_key = entity_name_lookup
                     .get(&normalize_candidate_key_text(&relationship.object_name))
-                    .cloned()
-                    .ok_or_else(|| ProcessorError::InvalidModelOutput {
-                        detail: format!(
-                            "relationship object {:?} does not match an emitted entity",
-                            relationship.object_name
-                        ),
-                    })?;
-                Ok(RelationshipOutput {
-                    relationship_type: relationship.relationship_type.trim().to_string(),
-                    subject_key,
-                    object_key,
-                    title: normalize_optional_text(relationship.title),
-                    body_text: relationship.body_text.trim().to_string(),
-                    confidence_label: "high".to_string(),
-                })
+                    .cloned();
+                match (subject_key, object_key) {
+                    (Some(subject_key), Some(object_key)) => Some(RelationshipOutput {
+                        relationship_type: relationship.relationship_type.trim().to_string(),
+                        subject_key,
+                        object_key,
+                        title: normalize_optional_text(relationship.title),
+                        body_text: relationship.body_text.trim().to_string(),
+                        confidence_label: "high".to_string(),
+                    }),
+                    _ => None,
+                }
             })
-            .collect::<Result<Vec<_>, _>>()?,
+            .collect(),
     );
 
     Ok(ArtifactProcessorOutput {
@@ -863,5 +861,40 @@ mod tests {
             output.relationships[0].object_key,
             output.entities[1].entity_key
         );
+    }
+
+    #[test]
+    fn parse_extraction_pipeline_output_drops_relationships_with_missing_entities() {
+        let output = parse_extraction_pipeline_output(
+            &sample_input(),
+            &json!({
+                "summary": {
+                    "title": "Open Settings",
+                    "body_text": "Settings configure Obsidian features."
+                },
+                "classifications": [],
+                "memories": [],
+                "entities": [
+                    {
+                        "display_name": "Obsidian",
+                        "entity_type": "software"
+                    }
+                ],
+                "relationships": [
+                    {
+                        "relationship_type": "contains",
+                        "subject_name": "Obsidian",
+                        "object_name": ".obsidian/snippets/",
+                        "title": "Contains snippet folder",
+                        "body_text": "Obsidian settings reference the snippets folder."
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("extraction pipeline output should parse");
+
+        assert_eq!(output.entities.len(), 1);
+        assert!(output.relationships.is_empty());
     }
 }

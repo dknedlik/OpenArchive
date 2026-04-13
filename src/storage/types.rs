@@ -234,6 +234,36 @@ impl ImportedNoteLinkResolutionStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactLinkType {
+    Wikilink,
+    SharedTag,
+    Alias,
+    ReconciledObject,
+}
+
+impl ArtifactLinkType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Wikilink => "wikilink",
+            Self::SharedTag => "shared_tag",
+            Self::Alias => "alias",
+            Self::ReconciledObject => "reconciled_object",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "wikilink" => Some(Self::Wikilink),
+            "shared_tag" => Some(Self::SharedTag),
+            "alias" => Some(Self::Alias),
+            "reconciled_object" => Some(Self::ReconciledObject),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportStatus {
     Pending,
@@ -1335,6 +1365,19 @@ pub struct ImportedNoteMetadata {
     pub outbound_links: Vec<ImportedNoteLinkRecord>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ArtifactLinkRecord {
+    pub artifact_link_id: String,
+    pub source_artifact_id: String,
+    pub source_title: Option<String>,
+    pub source_note_path: Option<String>,
+    pub target_artifact_id: String,
+    pub target_title: Option<String>,
+    pub target_note_path: Option<String>,
+    pub link_type: ArtifactLinkType,
+    pub link_value: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct LoadedArtifactForEnrichment {
     pub artifact: LoadedArtifactRecord,
@@ -1421,8 +1464,8 @@ pub struct RetrievedContextItem {
 #[serde(rename_all = "snake_case")]
 pub enum ReconciliationDecisionKind {
     CreateNew,
+    #[serde(alias = "strengthen_existing")]
     AttachToExisting,
-    StrengthenExisting,
     SupersedeExisting,
     ContradictsExisting,
     InsufficientEvidence,

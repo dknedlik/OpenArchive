@@ -21,13 +21,13 @@ use crate::storage::{
     ExtractedClassification, ExtractedMemory, InputScopeType, JobStatus, MemoryObjectJson,
     NewArchiveLink, NewDerivationRun, NewDerivedObject, NewDerivedObjectEmbedding,
     NewEnrichmentJob, ObjectStatus, OriginKind, ReconciliationDecision, ReconciliationDecisionKind,
-    RelationshipObjectJson, ScopeType, SummaryObjectJson, WriteDerivationAttempt,
-    WriteDerivedObject,
+    RelatedDerivedObject, RelatedDerivedObjectEmbeddingMatch, RelationshipObjectJson, ScopeType,
+    SummaryObjectJson, WriteDerivationAttempt, WriteDerivedObject,
 };
 use log::{debug, error, info, warn};
 use rand::random;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -35,7 +35,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RETRYABLE_INFERENCE_BACKOFF_SECONDS: i64 = 60;
 const RECONCILE_EMBEDDING_DETERMINISTIC_THRESHOLD: f32 = 0.90;
-const RECONCILE_EMBEDDING_AMBIGUOUS_THRESHOLD: f32 = 0.70;
+const RECONCILE_EMBEDDING_AMBIGUOUS_THRESHOLD: f32 = 0.77;
 const RECONCILE_EMBEDDING_LOOKUP_LIMIT: usize = 3;
 
 fn has_reconciliation_candidates(extraction_result: &ArtifactExtractionResult) -> bool {
@@ -1423,6 +1423,22 @@ pub(crate) fn build_reconciliation_input(
     )
 }
 
+pub fn build_reconciliation_input_from_processor_output(
+    artifact_id: &str,
+    source_type: crate::storage::SourceType,
+    output: &ArtifactProcessorOutput,
+) -> std::result::Result<ReconciliationProcessorInput, serde_json::Error> {
+    build_reconciliation_input_from_outputs(
+        artifact_id,
+        source_type,
+        output.summary.clone(),
+        output.memories.clone(),
+        output.entities.clone(),
+        output.relationships.clone(),
+        "[]".to_string(),
+    )
+}
+
 fn build_reconciliation_input_from_outputs(
     artifact_id: &str,
     source_type: crate::storage::SourceType,
@@ -1501,6 +1517,38 @@ struct PreparedReconciliationWork {
     ambiguous_input: Option<ReconciliationProcessorInput>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationCandidateDisposition {
+    ExactCandidateKeyMatch,
+    FallbackWithoutEmbeddingProvider,
+    FallbackWithoutCrossArtifactStore,
+    NoEmbeddingMatches,
+    DeterministicEmbeddingMatch,
+    LowSimilarityCreateNew,
+    AmbiguousEmbeddingMatch,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReconciliationCandidateTrace {
+    pub target_kind: String,
+    pub target_key: String,
+    pub derived_object_type: DerivedObjectType,
+    pub title: Option<String>,
+    pub body_text: String,
+    pub disposition: ReconciliationCandidateDisposition,
+    pub exact_matches: Vec<RelatedDerivedObject>,
+    pub embedding_matches: Vec<RelatedDerivedObjectEmbeddingMatch>,
+    pub deterministic_output: Option<crate::processor::ReconciliationDecisionOutput>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReconciliationPreparationReport {
+    pub deterministic_outputs: Vec<crate::processor::ReconciliationDecisionOutput>,
+    pub ambiguous_input: Option<ReconciliationProcessorInput>,
+    pub candidate_traces: Vec<ReconciliationCandidateTrace>,
+}
+
 #[derive(serde::Serialize)]
 struct AmbiguousReconcileMatch {
     object_id: String,
@@ -1541,6 +1589,26 @@ fn build_reconciliation_candidates(
                 .map(ReconcileCandidate::Relationship),
         )
         .collect()
+}
+
+fn build_candidate_trace(
+    candidate: &ReconcileCandidate,
+    disposition: ReconciliationCandidateDisposition,
+    exact_matches: Vec<RelatedDerivedObject>,
+    embedding_matches: Vec<RelatedDerivedObjectEmbeddingMatch>,
+    deterministic_output: Option<crate::processor::ReconciliationDecisionOutput>,
+) -> ReconciliationCandidateTrace {
+    ReconciliationCandidateTrace {
+        target_kind: candidate.target_kind().to_string(),
+        target_key: candidate.target_key(),
+        derived_object_type: candidate.derived_object_type(),
+        title: candidate.title(),
+        body_text: candidate.body_text(),
+        disposition,
+        exact_matches,
+        embedding_matches,
+        deterministic_output,
+    }
 }
 
 fn build_reconciliation_input_for_candidates(
@@ -1597,21 +1665,50 @@ fn attach_existing_output(
     }
 }
 
-fn prepare_reconciliation_work(
+fn build_ambiguous_reconcile_cases(
+    traces: &[ReconciliationCandidateTrace],
+) -> Vec<AmbiguousReconcileCase> {
+    traces
+        .iter()
+        .filter(|trace| {
+            trace.disposition == ReconciliationCandidateDisposition::AmbiguousEmbeddingMatch
+        })
+        .map(|trace| AmbiguousReconcileCase {
+            target_kind: trace.target_kind.clone(),
+            target_key: trace.target_key.clone(),
+            embedding_matches: trace
+                .embedding_matches
+                .iter()
+                .map(|matched| AmbiguousReconcileMatch {
+                    object_id: matched.derived_object_id.clone(),
+                    artifact_id: matched.artifact_id.clone(),
+                    similarity_score: matched.similarity_score,
+                    candidate_key: matched.candidate_key.clone(),
+                    title: matched.title.clone(),
+                    body_text: matched.body_text.clone(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+pub fn inspect_reconciliation_work(
     input: &ReconciliationProcessorInput,
     cross_artifact_store: Option<&(dyn CrossArtifactReadStore + Send + Sync)>,
     embedding_provider: Option<&dyn EmbeddingProvider>,
-) -> std::result::Result<PreparedReconciliationWork, String> {
+) -> std::result::Result<ReconciliationPreparationReport, String> {
     let candidates = build_reconciliation_candidates(input);
     if candidates.is_empty() {
-        return Ok(PreparedReconciliationWork {
+        return Ok(ReconciliationPreparationReport {
             deterministic_outputs: Vec::new(),
             ambiguous_input: None,
+            candidate_traces: Vec::new(),
         });
     }
 
     let mut deterministic_outputs = Vec::new();
     let mut unresolved = candidates.clone();
+    let mut candidate_traces = Vec::with_capacity(candidates.len());
 
     if let Some(cross_artifact_store) = cross_artifact_store {
         let candidate_keys: Vec<String> = unresolved
@@ -1627,21 +1724,33 @@ fn prepare_reconciliation_work(
             .map_err(|err| format!("failed to load exact cross-artifact matches: {err}"))?;
         let mut still_unresolved = Vec::new();
         for candidate in unresolved {
-            let maybe_exact = exact_matches.iter().find(|existing| {
-                existing.derived_object_type == candidate.derived_object_type()
-                    && existing
-                        .candidate_key
-                        .as_deref()
-                        .map(str::trim)
-                        .unwrap_or_default()
-                        == candidate.target_key()
-            });
-            if let Some(existing) = maybe_exact {
-                deterministic_outputs.push(attach_existing_output(
+            let matching_exact = exact_matches
+                .iter()
+                .filter(|existing| {
+                    existing.derived_object_type == candidate.derived_object_type()
+                        && existing
+                            .candidate_key
+                            .as_deref()
+                            .map(str::trim)
+                            .unwrap_or_default()
+                            == candidate.target_key()
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if let Some(existing) = matching_exact.first() {
+                let output = attach_existing_output(
                     &candidate,
                     &existing.derived_object_id,
                     "Deterministic exact candidate_key match against an existing active derived object."
                         .to_string(),
+                );
+                deterministic_outputs.push(output.clone());
+                candidate_traces.push(build_candidate_trace(
+                    &candidate,
+                    ReconciliationCandidateDisposition::ExactCandidateKeyMatch,
+                    matching_exact,
+                    Vec::new(),
+                    Some(output),
                 ));
             } else {
                 still_unresolved.push(candidate);
@@ -1651,36 +1760,59 @@ fn prepare_reconciliation_work(
     }
 
     if unresolved.is_empty() {
-        return Ok(PreparedReconciliationWork {
+        return Ok(ReconciliationPreparationReport {
             deterministic_outputs,
             ambiguous_input: None,
+            candidate_traces,
         });
     }
 
     let Some(embedding_provider) = embedding_provider else {
-        return Ok(PreparedReconciliationWork {
+        let ambiguous_input = Some(
+            build_reconciliation_input_for_candidates(
+                input,
+                unresolved.clone(),
+                input.retrieval_results_json.clone(),
+            )
+            .map_err(|err| format!("failed to build fallback reconciliation input: {err}"))?,
+        );
+        for candidate in unresolved {
+            candidate_traces.push(build_candidate_trace(
+                &candidate,
+                ReconciliationCandidateDisposition::FallbackWithoutEmbeddingProvider,
+                Vec::new(),
+                Vec::new(),
+                None,
+            ));
+        }
+        return Ok(ReconciliationPreparationReport {
             deterministic_outputs,
-            ambiguous_input: Some(
-                build_reconciliation_input_for_candidates(
-                    input,
-                    unresolved,
-                    input.retrieval_results_json.clone(),
-                )
-                .map_err(|err| format!("failed to build fallback reconciliation input: {err}"))?,
-            ),
+            ambiguous_input,
+            candidate_traces,
         });
     };
     let Some(cross_artifact_store) = cross_artifact_store else {
-        return Ok(PreparedReconciliationWork {
+        let ambiguous_input = Some(
+            build_reconciliation_input_for_candidates(
+                input,
+                unresolved.clone(),
+                input.retrieval_results_json.clone(),
+            )
+            .map_err(|err| format!("failed to build fallback reconciliation input: {err}"))?,
+        );
+        for candidate in unresolved {
+            candidate_traces.push(build_candidate_trace(
+                &candidate,
+                ReconciliationCandidateDisposition::FallbackWithoutCrossArtifactStore,
+                Vec::new(),
+                Vec::new(),
+                None,
+            ));
+        }
+        return Ok(ReconciliationPreparationReport {
             deterministic_outputs,
-            ambiguous_input: Some(
-                build_reconciliation_input_for_candidates(
-                    input,
-                    unresolved,
-                    input.retrieval_results_json.clone(),
-                )
-                .map_err(|err| format!("failed to build fallback reconciliation input: {err}"))?,
-            ),
+            ambiguous_input,
+            candidate_traces,
         });
     };
 
@@ -1698,7 +1830,6 @@ fn prepare_reconciliation_work(
         .map_err(|err| format!("failed to embed reconciliation candidates: {err}"))?;
 
     let mut ambiguous_candidates = Vec::new();
-    let mut ambiguous_cases = Vec::new();
 
     for (candidate, vector) in unresolved.into_iter().zip(vectors.into_iter()) {
         let matches = cross_artifact_store
@@ -1710,47 +1841,64 @@ fn prepare_reconciliation_work(
             )
             .map_err(|err| format!("failed to load embedding reconciliation matches: {err}"))?;
         let Some(top_match) = matches.first() else {
-            deterministic_outputs.push(create_new_output(&candidate));
+            let output = create_new_output(&candidate);
+            deterministic_outputs.push(output.clone());
+            candidate_traces.push(build_candidate_trace(
+                &candidate,
+                ReconciliationCandidateDisposition::NoEmbeddingMatches,
+                Vec::new(),
+                Vec::new(),
+                Some(output),
+            ));
             continue;
         };
         if top_match.similarity_score >= RECONCILE_EMBEDDING_DETERMINISTIC_THRESHOLD {
-            deterministic_outputs.push(attach_existing_output(
+            let output = attach_existing_output(
                 &candidate,
                 &top_match.derived_object_id,
                 format!(
                     "Deterministic embedding match against an existing active derived object (similarity {:.3}).",
                     top_match.similarity_score
                 ),
+            );
+            deterministic_outputs.push(output.clone());
+            candidate_traces.push(build_candidate_trace(
+                &candidate,
+                ReconciliationCandidateDisposition::DeterministicEmbeddingMatch,
+                Vec::new(),
+                matches,
+                Some(output),
             ));
             continue;
         }
         if top_match.similarity_score < RECONCILE_EMBEDDING_AMBIGUOUS_THRESHOLD {
-            deterministic_outputs.push(create_new_output(&candidate));
+            let output = create_new_output(&candidate);
+            deterministic_outputs.push(output.clone());
+            candidate_traces.push(build_candidate_trace(
+                &candidate,
+                ReconciliationCandidateDisposition::LowSimilarityCreateNew,
+                Vec::new(),
+                matches,
+                Some(output),
+            ));
             continue;
         }
-
-        ambiguous_cases.push(AmbiguousReconcileCase {
-            target_kind: candidate.target_kind().to_string(),
-            target_key: candidate.target_key(),
-            embedding_matches: matches
-                .iter()
-                .map(|matched| AmbiguousReconcileMatch {
-                    object_id: matched.derived_object_id.clone(),
-                    artifact_id: matched.artifact_id.clone(),
-                    similarity_score: matched.similarity_score,
-                    candidate_key: matched.candidate_key.clone(),
-                    title: matched.title.clone(),
-                    body_text: matched.body_text.clone(),
-                })
-                .collect(),
-        });
-
         ambiguous_candidates.push(candidate);
+        candidate_traces.push(build_candidate_trace(
+            ambiguous_candidates
+                .last()
+                .expect("candidate was just pushed for ambiguity handling"),
+            ReconciliationCandidateDisposition::AmbiguousEmbeddingMatch,
+            Vec::new(),
+            matches,
+            None,
+        ));
     }
 
     let ambiguous_input = if ambiguous_candidates.is_empty() {
         None
     } else {
+        let ambiguous_cases = build_ambiguous_reconcile_cases(&candidate_traces);
         Some(
             build_reconciliation_input_for_candidates(
                 input,
@@ -1763,9 +1911,22 @@ fn prepare_reconciliation_work(
         )
     };
 
-    Ok(PreparedReconciliationWork {
+    Ok(ReconciliationPreparationReport {
         deterministic_outputs,
         ambiguous_input,
+        candidate_traces,
+    })
+}
+
+fn prepare_reconciliation_work(
+    input: &ReconciliationProcessorInput,
+    cross_artifact_store: Option<&(dyn CrossArtifactReadStore + Send + Sync)>,
+    embedding_provider: Option<&dyn EmbeddingProvider>,
+) -> std::result::Result<PreparedReconciliationWork, String> {
+    let report = inspect_reconciliation_work(input, cross_artifact_store, embedding_provider)?;
+    Ok(PreparedReconciliationWork {
+        deterministic_outputs: report.deterministic_outputs,
+        ambiguous_input: report.ambiguous_input,
     })
 }
 
@@ -1955,21 +2116,19 @@ pub(crate) fn build_derivation_attempt(
     }
 
     let mut attached_existing = HashSet::new();
+    let mut candidate_object_ids = HashMap::new();
     for memory in &extraction_result.memories {
-        let decision = decisions.iter().find(|decision| {
-            decision.target_kind == "memory" && decision.target_key == memory_target_key(memory)
-        });
-        if let Some(decision) = decision {
-            if matches!(
+        let target_key = memory_target_key(memory);
+        let decision = decisions
+            .iter()
+            .find(|decision| decision.target_kind == "memory" && decision.target_key == target_key);
+        if decision.is_some_and(|decision| {
+            matches!(
                 decision.decision_kind,
-                ReconciliationDecisionKind::AttachToExisting
-                    | ReconciliationDecisionKind::StrengthenExisting
-            ) {
-                if let Some(existing_id) = &decision.matched_object_id {
-                    attached_existing.insert(existing_id.clone());
-                }
-                continue;
-            }
+                ReconciliationDecisionKind::InsufficientEvidence
+            )
+        }) {
+            continue;
         }
 
         let derived_object_id = new_id("dobj");
@@ -1981,6 +2140,14 @@ pub(crate) fn build_derivation_attempt(
             .then(|| decision.matched_object_id.clone())
             .flatten()
         });
+        if let Some(existing_id) = decision.and_then(|decision| decision.matched_object_id.as_ref())
+        {
+            attached_existing.insert(existing_id.clone());
+        }
+        candidate_object_ids.insert(
+            ("memory".to_string(), target_key.clone()),
+            derived_object_id.clone(),
+        );
         objects.push(WriteDerivedObject {
             object: NewDerivedObject {
                 derived_object_id: derived_object_id.clone(),
@@ -1997,7 +2164,7 @@ pub(crate) fn build_derivation_attempt(
                     title: memory.title.clone(),
                     body_text: memory.body_text.clone(),
                     object_json: MemoryObjectJson {
-                        candidate_key: memory_target_key(memory),
+                        candidate_key: target_key,
                         memory_type: memory.memory_type.clone(),
                         memory_scope: memory.memory_scope,
                         memory_scope_value: memory.memory_scope_value.clone(),
@@ -2008,21 +2175,17 @@ pub(crate) fn build_derivation_attempt(
     }
 
     for entity in &extraction_result.entities {
-        let decision = decisions.iter().find(|decision| {
-            decision.target_kind == "entity" && decision.target_key == entity_target_key(entity)
-        });
-        if let Some(decision) = decision {
-            if matches!(
+        let target_key = entity_target_key(entity);
+        let decision = decisions
+            .iter()
+            .find(|decision| decision.target_kind == "entity" && decision.target_key == target_key);
+        if decision.is_some_and(|decision| {
+            matches!(
                 decision.decision_kind,
-                ReconciliationDecisionKind::AttachToExisting
-                    | ReconciliationDecisionKind::StrengthenExisting
-                    | ReconciliationDecisionKind::InsufficientEvidence
-            ) {
-                if let Some(existing_id) = &decision.matched_object_id {
-                    attached_existing.insert(existing_id.clone());
-                }
-                continue;
-            }
+                ReconciliationDecisionKind::InsufficientEvidence
+            )
+        }) {
+            continue;
         }
 
         let derived_object_id = new_id("dobj");
@@ -2034,6 +2197,14 @@ pub(crate) fn build_derivation_attempt(
             .then(|| decision.matched_object_id.clone())
             .flatten()
         });
+        if let Some(existing_id) = decision.and_then(|decision| decision.matched_object_id.as_ref())
+        {
+            attached_existing.insert(existing_id.clone());
+        }
+        candidate_object_ids.insert(
+            ("entity".to_string(), target_key.clone()),
+            derived_object_id.clone(),
+        );
         objects.push(WriteDerivedObject {
             object: NewDerivedObject {
                 derived_object_id: derived_object_id.clone(),
@@ -2054,7 +2225,7 @@ pub(crate) fn build_derivation_attempt(
                     ),
                     object_json: EntityObjectJson {
                         entity_type: entity.entity_type.clone(),
-                        candidate_key: entity_target_key(entity),
+                        candidate_key: target_key,
                     },
                 },
             },
@@ -2071,16 +2242,12 @@ pub(crate) fn build_derivation_attempt(
         };
         if matches!(
             decision.decision_kind,
-            ReconciliationDecisionKind::AttachToExisting
-                | ReconciliationDecisionKind::StrengthenExisting
-                | ReconciliationDecisionKind::InsufficientEvidence
+            ReconciliationDecisionKind::InsufficientEvidence
         ) {
-            if let Some(existing_id) = &decision.matched_object_id {
-                attached_existing.insert(existing_id.clone());
-            }
             continue;
         }
 
+        let target_key = relationship_target_key(relationship);
         let derived_object_id = new_id("dobj");
         let supersedes_derived_object_id = matches!(
             decision.decision_kind,
@@ -2094,6 +2261,13 @@ pub(crate) fn build_derivation_attempt(
         )
         .then(|| decision.matched_object_id.clone())
         .flatten();
+        if let Some(existing_id) = decision.matched_object_id.as_ref() {
+            attached_existing.insert(existing_id.clone());
+        }
+        candidate_object_ids.insert(
+            ("relationship".to_string(), target_key),
+            derived_object_id.clone(),
+        );
         objects.push(WriteDerivedObject {
             object: NewDerivedObject {
                 derived_object_id: derived_object_id.clone(),
@@ -2130,7 +2304,7 @@ pub(crate) fn build_derivation_attempt(
     })
     .to_string();
     let archive_links = build_reconciliation_archive_links(
-        &summary_object_id,
+        &candidate_object_ids,
         decisions,
         "artifact_reconciliation",
     );
@@ -2159,7 +2333,7 @@ pub(crate) fn build_derivation_attempt(
 }
 
 fn build_reconciliation_archive_links(
-    summary_object_id: &str,
+    candidate_object_ids: &HashMap<(String, String), String>,
     decisions: &[ReconciliationDecision],
     contributed_by: &str,
 ) -> Vec<NewArchiveLink> {
@@ -2167,22 +2341,24 @@ fn build_reconciliation_archive_links(
     let mut links = Vec::new();
 
     for decision in decisions {
-        if !matches!(
-            decision.decision_kind,
-            ReconciliationDecisionKind::AttachToExisting
-                | ReconciliationDecisionKind::StrengthenExisting
-        ) {
+        let Some(link_type) = reconciliation_link_type(decision.decision_kind) else {
             continue;
-        }
+        };
 
         let Some(target_object_id) = decision.matched_object_id.as_ref() else {
             continue;
         };
+        let Some(source_object_id) = candidate_object_ids
+            .get(&(decision.target_kind.clone(), decision.target_key.clone()))
+            .cloned()
+        else {
+            continue;
+        };
 
         let edge = (
-            summary_object_id.to_string(),
+            source_object_id,
             target_object_id.clone(),
-            "refers_to".to_string(),
+            link_type.to_string(),
         );
         if !seen.insert(edge.clone()) {
             continue;
@@ -2202,123 +2378,13 @@ fn build_reconciliation_archive_links(
     links
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::embedding::StubEmbeddingProvider;
-    use crate::error::StorageResult;
-    use crate::storage::{RelatedDerivedObject, RelatedDerivedObjectEmbeddingMatch, SourceType};
-
-    struct MockCrossArtifactReadStore {
-        exact_matches: Vec<RelatedDerivedObject>,
-        embedding_matches: Vec<RelatedDerivedObjectEmbeddingMatch>,
-    }
-
-    impl CrossArtifactReadStore for MockCrossArtifactReadStore {
-        fn find_related_by_candidate_keys(
-            &self,
-            _artifact_id: &str,
-            _candidate_keys: &[String],
-            _limit: usize,
-        ) -> StorageResult<Vec<RelatedDerivedObject>> {
-            Ok(self.exact_matches.clone())
-        }
-
-        fn find_related_by_embedding(
-            &self,
-            _artifact_id: &str,
-            _derived_object_type: DerivedObjectType,
-            _query_embedding: &[f32],
-            _limit: usize,
-        ) -> StorageResult<Vec<RelatedDerivedObjectEmbeddingMatch>> {
-            Ok(self.embedding_matches.clone())
-        }
-    }
-
-    fn sample_reconciliation_input() -> ReconciliationProcessorInput {
-        ReconciliationProcessorInput {
-            artifact_id: "artifact-1".to_string(),
-            source_type: SourceType::TextFile,
-            summary: SummaryOutput {
-                title: Some("Summary".to_string()),
-                body_text: "Summary body".to_string(),
-            },
-            memories: vec![MemoryOutput {
-                candidate_key: "memory-key".to_string(),
-                title: Some("Memory".to_string()),
-                body_text: "Memory body".to_string(),
-                memory_type: "project_fact".to_string(),
-                memory_scope: ScopeType::Artifact,
-                memory_scope_value: "artifact-1".to_string(),
-            }],
-            entities: Vec::new(),
-            relationships: Vec::new(),
-            retrieval_results_json: "[]".to_string(),
-        }
-    }
-
-    #[test]
-    fn prepare_reconciliation_work_attaches_exact_candidate_key_matches() {
-        let input = sample_reconciliation_input();
-        let cross_store = MockCrossArtifactReadStore {
-            exact_matches: vec![RelatedDerivedObject {
-                derived_object_id: "dobj-9".to_string(),
-                artifact_id: "artifact-2".to_string(),
-                derived_object_type: DerivedObjectType::Memory,
-                title: Some("Existing".to_string()),
-                body_text: Some("Existing body".to_string()),
-                candidate_key: Some("memory-key".to_string()),
-                confidence_score: None,
-            }],
-            embedding_matches: Vec::new(),
-        };
-
-        let prepared = prepare_reconciliation_work(&input, Some(&cross_store), None)
-            .expect("prepare work should succeed");
-
-        assert_eq!(prepared.deterministic_outputs.len(), 1);
-        assert!(prepared.ambiguous_input.is_none());
-        let output = &prepared.deterministic_outputs[0];
-        assert_eq!(
-            output.decision_kind,
-            ReconciliationDecisionKind::AttachToExisting
-        );
-        assert_eq!(output.target_key, "memory-key");
-        assert_eq!(output.matched_object_id.as_deref(), Some("dobj-9"));
-    }
-
-    #[test]
-    fn prepare_reconciliation_work_limits_model_fallback_to_ambiguous_embedding_matches() {
-        let input = sample_reconciliation_input();
-        let cross_store = MockCrossArtifactReadStore {
-            exact_matches: Vec::new(),
-            embedding_matches: vec![RelatedDerivedObjectEmbeddingMatch {
-                derived_object_id: "dobj-7".to_string(),
-                artifact_id: "artifact-2".to_string(),
-                derived_object_type: DerivedObjectType::Memory,
-                title: Some("Possible match".to_string()),
-                body_text: Some("Possible body".to_string()),
-                candidate_key: Some("other-key".to_string()),
-                confidence_score: None,
-                similarity_score: 0.82,
-            }],
-        };
-        let embedding_provider = StubEmbeddingProvider::new("stub".to_string(), 8);
-
-        let prepared =
-            prepare_reconciliation_work(&input, Some(&cross_store), Some(&embedding_provider))
-                .expect("prepare work should succeed");
-
-        assert!(prepared.deterministic_outputs.is_empty());
-        let ambiguous_input = prepared
-            .ambiguous_input
-            .expect("ambiguous candidate should remain for model fallback");
-        assert_eq!(ambiguous_input.memories.len(), 1);
-        assert!(ambiguous_input.entities.is_empty());
-        assert!(ambiguous_input.relationships.is_empty());
-        assert!(ambiguous_input
-            .retrieval_results_json
-            .contains("\"object_id\": \"dobj-7\""));
+fn reconciliation_link_type(kind: ReconciliationDecisionKind) -> Option<&'static str> {
+    match kind {
+        ReconciliationDecisionKind::AttachToExisting => Some("same_as"),
+        ReconciliationDecisionKind::SupersedeExisting => Some("continues"),
+        ReconciliationDecisionKind::ContradictsExisting => Some("contradicts"),
+        ReconciliationDecisionKind::CreateNew
+        | ReconciliationDecisionKind::InsufficientEvidence => None,
     }
 }
 
@@ -2977,5 +3043,202 @@ fn embedding_worker_loop(
                 thread::sleep(poll_interval);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embedding::StubEmbeddingProvider;
+    use crate::error::StorageResult;
+    use crate::storage::{RelatedDerivedObject, RelatedDerivedObjectEmbeddingMatch, SourceType};
+
+    struct MockCrossArtifactReadStore {
+        exact_matches: Vec<RelatedDerivedObject>,
+        embedding_matches: Vec<RelatedDerivedObjectEmbeddingMatch>,
+    }
+
+    impl CrossArtifactReadStore for MockCrossArtifactReadStore {
+        fn find_related_by_candidate_keys(
+            &self,
+            _artifact_id: &str,
+            _candidate_keys: &[String],
+            _limit: usize,
+        ) -> StorageResult<Vec<RelatedDerivedObject>> {
+            Ok(self.exact_matches.clone())
+        }
+
+        fn find_related_by_embedding(
+            &self,
+            _artifact_id: &str,
+            _derived_object_type: DerivedObjectType,
+            _query_embedding: &[f32],
+            _limit: usize,
+        ) -> StorageResult<Vec<RelatedDerivedObjectEmbeddingMatch>> {
+            Ok(self.embedding_matches.clone())
+        }
+    }
+
+    fn sample_reconciliation_input() -> ReconciliationProcessorInput {
+        ReconciliationProcessorInput {
+            artifact_id: "artifact-1".to_string(),
+            source_type: SourceType::TextFile,
+            summary: SummaryOutput {
+                title: Some("Summary".to_string()),
+                body_text: "Summary body".to_string(),
+            },
+            memories: vec![MemoryOutput {
+                candidate_key: "memory-key".to_string(),
+                title: Some("Memory".to_string()),
+                body_text: "Memory body".to_string(),
+                memory_type: "project_fact".to_string(),
+                memory_scope: ScopeType::Artifact,
+                memory_scope_value: "artifact-1".to_string(),
+            }],
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            retrieval_results_json: "[]".to_string(),
+        }
+    }
+
+    #[test]
+    fn prepare_reconciliation_work_attaches_exact_candidate_key_matches() {
+        let input = sample_reconciliation_input();
+        let cross_store = MockCrossArtifactReadStore {
+            exact_matches: vec![RelatedDerivedObject {
+                derived_object_id: "dobj-9".to_string(),
+                artifact_id: "artifact-2".to_string(),
+                derived_object_type: DerivedObjectType::Memory,
+                title: Some("Existing".to_string()),
+                body_text: Some("Existing body".to_string()),
+                candidate_key: Some("memory-key".to_string()),
+                confidence_score: None,
+            }],
+            embedding_matches: Vec::new(),
+        };
+
+        let prepared = prepare_reconciliation_work(&input, Some(&cross_store), None)
+            .expect("prepare work should succeed");
+
+        assert_eq!(prepared.deterministic_outputs.len(), 1);
+        assert!(prepared.ambiguous_input.is_none());
+        let output = &prepared.deterministic_outputs[0];
+        assert_eq!(
+            output.decision_kind,
+            ReconciliationDecisionKind::AttachToExisting
+        );
+        assert_eq!(output.target_key, "memory-key");
+        assert_eq!(output.matched_object_id.as_deref(), Some("dobj-9"));
+    }
+
+    #[test]
+    fn prepare_reconciliation_work_limits_model_fallback_to_ambiguous_embedding_matches() {
+        let input = sample_reconciliation_input();
+        let cross_store = MockCrossArtifactReadStore {
+            exact_matches: Vec::new(),
+            embedding_matches: vec![RelatedDerivedObjectEmbeddingMatch {
+                derived_object_id: "dobj-7".to_string(),
+                artifact_id: "artifact-2".to_string(),
+                derived_object_type: DerivedObjectType::Memory,
+                title: Some("Possible match".to_string()),
+                body_text: Some("Possible body".to_string()),
+                candidate_key: Some("other-key".to_string()),
+                confidence_score: None,
+                similarity_score: 0.82,
+            }],
+        };
+        let embedding_provider = StubEmbeddingProvider::new("stub".to_string(), 8);
+
+        let prepared =
+            prepare_reconciliation_work(&input, Some(&cross_store), Some(&embedding_provider))
+                .expect("prepare work should succeed");
+
+        assert!(prepared.deterministic_outputs.is_empty());
+        let ambiguous_input = prepared
+            .ambiguous_input
+            .expect("ambiguous candidate should remain for model fallback");
+        assert_eq!(ambiguous_input.memories.len(), 1);
+        assert!(ambiguous_input.entities.is_empty());
+        assert!(ambiguous_input.relationships.is_empty());
+        assert!(ambiguous_input
+            .retrieval_results_json
+            .contains("\"object_id\": \"dobj-7\""));
+    }
+
+    fn sample_claimed_job() -> ClaimedJob {
+        ClaimedJob {
+            job_id: "job-1".to_string(),
+            artifact_id: "artifact-1".to_string(),
+            job_type: JobType::ArtifactReconcile,
+            enrichment_tier: EnrichmentTier::Default,
+            spawned_by_job_id: None,
+            attempt_count: 1,
+            max_attempts: 3,
+            required_capabilities: vec!["text".to_string()],
+            payload_json: "{}".to_string(),
+        }
+    }
+
+    fn sample_extraction_result() -> ArtifactExtractionResult {
+        ArtifactExtractionResult {
+            extraction_result_id: "extract-1".to_string(),
+            artifact_id: "artifact-1".to_string(),
+            job_id: "job-1".to_string(),
+            pipeline_name: "artifact_extraction".to_string(),
+            pipeline_version: "v1".to_string(),
+            summary_title: Some("Summary".to_string()),
+            summary_body_text: "Summary body".to_string(),
+            classifications: Vec::new(),
+            memories: vec![ExtractedMemory {
+                title: Some("Memory".to_string()),
+                body_text: "Memory body".to_string(),
+                memory_type: "project_fact".to_string(),
+                memory_scope: ScopeType::Artifact,
+                memory_scope_value: "artifact-1".to_string(),
+                candidate_key: "memory-key".to_string(),
+            }],
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            status: "completed".to_string(),
+            error_message: None,
+        }
+    }
+
+    #[test]
+    fn build_derivation_attempt_persists_attached_candidates_and_links_them_directly() {
+        let attempt = build_derivation_attempt(
+            &sample_claimed_job(),
+            "artifact-1",
+            &sample_extraction_result(),
+            &[ReconciliationDecision {
+                reconciliation_decision_id: "reconcile-1".to_string(),
+                artifact_id: "artifact-1".to_string(),
+                job_id: "job-1".to_string(),
+                extraction_result_id: "extract-1".to_string(),
+                pipeline_name: "artifact_reconciliation".to_string(),
+                pipeline_version: "v1".to_string(),
+                decision_kind: ReconciliationDecisionKind::AttachToExisting,
+                target_kind: "memory".to_string(),
+                target_key: "memory-key".to_string(),
+                matched_object_id: Some("existing-1".to_string()),
+                rationale: "same underlying memory".to_string(),
+                status: "completed".to_string(),
+                error_message: None,
+            }],
+        );
+
+        assert_eq!(attempt.objects.len(), 2);
+        let memory_object = attempt
+            .objects
+            .iter()
+            .find(|object| object.object.payload.derived_object_type() == DerivedObjectType::Memory)
+            .expect("attached memory should still be persisted");
+        assert_eq!(attempt.archive_links.len(), 1);
+        assert_eq!(
+            attempt.archive_links[0].source_object_id,
+            memory_object.object.derived_object_id
+        );
+        assert_eq!(attempt.archive_links[0].target_object_id, "existing-1");
+        assert_eq!(attempt.archive_links[0].link_type, "same_as");
     }
 }

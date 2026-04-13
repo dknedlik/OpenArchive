@@ -242,18 +242,6 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_vector_dimensions;
-
-    #[test]
-    fn parses_vector_dimensions_from_postgres_type_name() {
-        assert_eq!(parse_vector_dimensions("vector(3072)"), Some(3072));
-        assert_eq!(parse_vector_dimensions(" vector(1536) "), Some(1536));
-        assert_eq!(parse_vector_dimensions("text"), None);
-    }
-}
-
 /// Helper for Oracle-specific maintenance commands.
 pub fn require_oracle_db_config(config: &AppConfig) -> ConfigResult<&crate::config::OracleConfig> {
     config
@@ -264,4 +252,16 @@ pub fn require_oracle_db_config(config: &AppConfig) -> ConfigResult<&crate::conf
             value: "unknown".to_string(),
             expected: "oracle",
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_vector_dimensions;
+
+    #[test]
+    fn parses_vector_dimensions_from_postgres_type_name() {
+        assert_eq!(parse_vector_dimensions("vector(3072)"), Some(3072));
+        assert_eq!(parse_vector_dimensions(" vector(1536) "), Some(1536));
+        assert_eq!(parse_vector_dimensions("text"), None);
+    }
 }

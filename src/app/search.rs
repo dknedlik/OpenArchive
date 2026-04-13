@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use log::warn;
+
 use crate::embedding::EmbeddingProvider;
 use crate::error::{OpenArchiveError, Result};
 use crate::storage::{
@@ -157,9 +159,18 @@ impl ObjectSearchService {
             return Ok(truncate_results(lexical, limit));
         };
 
-        let mut query_vectors = provider
-            .embed_texts(&[query])
-            .map_err(OpenArchiveError::from)?;
+        let mut query_vectors = match provider.embed_texts(&[query]) {
+            Ok(vectors) => vectors,
+            Err(err) => {
+                warn!(
+                    "object semantic search falling back to lexical results after embedding failure from provider={} model={}: {}",
+                    provider.provider_name(),
+                    provider.model_name(),
+                    err
+                );
+                return Ok(truncate_results(lexical, limit));
+            }
+        };
         let query_vector = query_vectors.pop().unwrap_or_default();
         if query_vector.is_empty() {
             return Ok(truncate_results(lexical, limit));
@@ -267,8 +278,8 @@ fn normalize_lexical_score(score: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::embedding::StubEmbeddingProvider;
-    use crate::error::StorageResult;
+    use crate::embedding::{EmbeddingProvider, StubEmbeddingProvider};
+    use crate::error::{EmbeddingError, EmbeddingResult, StorageResult};
     use crate::storage::retrieval_read_store::GraphRelatedEntry;
     use crate::storage::{
         ArchiveSearchCandidate, ArchiveSearchReadStore, DerivedObjectSearchStore,
@@ -333,6 +344,29 @@ mod tests {
             _limit: usize,
         ) -> StorageResult<Vec<GraphRelatedEntry>> {
             Ok(Vec::new())
+        }
+    }
+
+    struct FailingEmbeddingProvider;
+
+    impl EmbeddingProvider for FailingEmbeddingProvider {
+        fn provider_name(&self) -> &'static str {
+            "failing"
+        }
+
+        fn model_name(&self) -> &str {
+            "failing-model"
+        }
+
+        fn dimensions(&self) -> usize {
+            3072
+        }
+
+        fn embed_texts(&self, _texts: &[String]) -> EmbeddingResult<Vec<Vec<f32>>> {
+            Err(EmbeddingError::HttpStatus {
+                status: 404,
+                body_preview: "not found".to_string(),
+            })
         }
     }
 
@@ -502,5 +536,29 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].derived_object_id, "obj-1");
         assert!(results[0].score.unwrap_or_default() > 0.0);
+    }
+
+    #[test]
+    fn object_search_falls_back_to_lexical_results_when_query_embedding_fails() {
+        let service = ObjectSearchService::new(
+            Arc::new(MockObjectSearchStore),
+            Some(Arc::new(FailingEmbeddingProvider)),
+        );
+
+        let results = service
+            .search(
+                ObjectSearchFilters {
+                    query: Some("memory".to_string()),
+                    object_type: None,
+                    candidate_key: None,
+                    artifact_id: None,
+                },
+                10,
+            )
+            .expect("object search should fall back to lexical results");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].derived_object_id, "obj-1");
+        assert_eq!(results[0].title.as_deref(), Some("Lexical"));
     }
 }

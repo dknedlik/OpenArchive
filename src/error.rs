@@ -407,6 +407,17 @@ pub enum StorageError {
         source: Box<dyn StdError + Send + Sync>,
     },
 
+    #[error(
+        "failed to insert artifact link from {source_artifact_id} to {target_artifact_id} ({link_type})"
+    )]
+    InsertArtifactLink {
+        source_artifact_id: String,
+        target_artifact_id: String,
+        link_type: String,
+        #[source]
+        source: Box<dyn StdError + Send + Sync>,
+    },
+
     #[error("failed to insert derivation run {derivation_run_id} for artifact {artifact_id}")]
     InsertDerivationRun {
         derivation_run_id: String,
@@ -521,6 +532,9 @@ pub enum StorageError {
 
     #[error("invalid derived_object_type '{value}' while loading context for {artifact_id}")]
     InvalidDerivedObjectType { artifact_id: String, value: String },
+
+    #[error("invalid artifact_link_type '{value}' while loading context for {artifact_id}")]
+    InvalidArtifactLinkType { artifact_id: String, value: String },
 
     #[error("invalid scope_type '{value}' while loading context for {artifact_id}")]
     InvalidScopeType { artifact_id: String, value: String },

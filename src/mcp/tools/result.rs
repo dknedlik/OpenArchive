@@ -164,9 +164,13 @@ fn summarize_tool_result(value: &Value) -> String {
             .get("inbound_note_links")
             .and_then(Value::as_array)
             .map_or(0, Vec::len);
+        let artifact_links = note
+            .get("artifact_links")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
         return format!(
-            "note: {} properties, {} tags, {} aliases, {} outbound links, {} inbound links",
-            properties, tags, aliases, outbound_links, inbound_links
+            "note: {} properties, {} tags, {} aliases, {} outbound links, {} inbound links, {} artifact links",
+            properties, tags, aliases, outbound_links, inbound_links, artifact_links
         );
     }
 

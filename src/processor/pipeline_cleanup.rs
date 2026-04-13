@@ -6,9 +6,18 @@ pub(crate) fn cleanup_artifact_processor_output(
     mut output: ArtifactProcessorOutput,
 ) -> ArtifactProcessorOutput {
     output.memories = dedupe_memory_outputs(output.memories);
-    output.entities = dedupe_entity_outputs(output.entities);
+    output.entities = sanitize_entity_outputs(output.entities);
     output.relationships = sanitize_relationship_outputs(output.relationships, &output.entities);
     output
+}
+
+fn sanitize_entity_outputs(entities: Vec<EntityOutput>) -> Vec<EntityOutput> {
+    dedupe_entity_outputs(
+        entities
+            .into_iter()
+            .filter(should_keep_entity_output)
+            .collect(),
+    )
 }
 
 fn dedupe_memory_outputs(memories: Vec<MemoryOutput>) -> Vec<MemoryOutput> {
@@ -39,6 +48,108 @@ fn dedupe_entity_outputs(entities: Vec<EntityOutput>) -> Vec<EntityOutput> {
         }
     }
     deduped
+}
+
+fn should_keep_entity_output(entity: &EntityOutput) -> bool {
+    let normalized_name = normalize_candidate_key_text(&entity.display_name);
+    if normalized_name.is_empty() {
+        return false;
+    }
+    if is_path_like_entity_name(entity.display_name.trim()) {
+        return false;
+    }
+    if is_generic_non_entity_label(&normalized_name) {
+        return false;
+    }
+    if is_speaker_label_entity(&normalized_name, &entity.entity_type) {
+        return false;
+    }
+    if is_abstract_placeholder_entity(&normalized_name, &entity.entity_type) {
+        return false;
+    }
+    true
+}
+
+fn is_path_like_entity_name(display_name: &str) -> bool {
+    display_name.starts_with('.')
+        || display_name.contains('/')
+        || display_name.contains('\\')
+        || display_name.contains("://")
+}
+
+fn is_generic_non_entity_label(normalized_name: &str) -> bool {
+    matches!(
+        normalized_name,
+        "user"
+            | "assistant"
+            | "human"
+            | "lineage"
+            | "supersession"
+            | "queue"
+            | "architecture"
+            | "system"
+            | "project"
+    )
+}
+
+fn is_speaker_label_entity(normalized_name: &str, entity_type: &str) -> bool {
+    let normalized_type = normalize_candidate_key_text(entity_type);
+    let person_like = matches!(normalized_type.as_str(), "person" | "entity");
+    if !person_like {
+        return false;
+    }
+
+    if matches!(
+        normalized_name,
+        "the user"
+            | "the assistant"
+            | "claude user"
+            | "chatgpt user"
+            | "gemini user"
+            | "grok user"
+            | "claude assistant"
+            | "chatgpt assistant"
+            | "gemini assistant"
+            | "grok assistant"
+            | "ai assistant"
+    ) {
+        return true;
+    }
+
+    if let Some(prefix) = normalized_name.strip_suffix(" user") {
+        return matches!(
+            prefix.trim(),
+            "" | "claude" | "chatgpt" | "gemini" | "grok" | "ai" | "llm" | "model"
+        );
+    }
+
+    if let Some(prefix) = normalized_name.strip_suffix(" assistant") {
+        return matches!(
+            prefix.trim(),
+            "" | "claude" | "chatgpt" | "gemini" | "grok" | "ai" | "llm" | "model"
+        );
+    }
+
+    false
+}
+
+fn is_abstract_placeholder_entity(normalized_name: &str, entity_type: &str) -> bool {
+    let normalized_type = normalize_candidate_key_text(entity_type);
+    if !matches!(normalized_type.as_str(), "concept" | "entity") {
+        return false;
+    }
+
+    matches!(
+        normalized_name,
+        "translation"
+            | "translations"
+            | "language setting"
+            | "language settings"
+            | "color scheme"
+            | "desktop"
+            | "general"
+            | "settings"
+    )
 }
 
 fn sanitize_relationship_outputs(

@@ -414,13 +414,25 @@ fn test_entity_only_reconciliation_runs_processor() {
     assert_eq!(saved[0].target_key, "enceladus");
     assert_eq!(
         saved[0].decision_kind,
-        ReconciliationDecisionKind::StrengthenExisting
+        ReconciliationDecisionKind::AttachToExisting
     );
     let attempts = derived_store.attempts.lock().unwrap();
     assert_eq!(attempts.len(), 1);
-    assert_eq!(attempts[0].objects.len(), 1);
+    assert_eq!(attempts[0].objects.len(), 2);
+    let attached_entity = attempts[0]
+        .objects
+        .iter()
+        .find(|object| {
+            object.object.payload.derived_object_type()
+                == open_archive::storage::types::DerivedObjectType::Entity
+        })
+        .expect("attached entity should be persisted directly");
     assert_eq!(attempts[0].archive_links.len(), 1);
-    assert_eq!(attempts[0].archive_links[0].link_type, "refers_to");
+    assert_eq!(
+        attempts[0].archive_links[0].source_object_id,
+        attached_entity.object.derived_object_id
+    );
+    assert_eq!(attempts[0].archive_links[0].link_type, "same_as");
     assert_eq!(attempts[0].archive_links[0].target_object_id, "entity-1");
     assert_eq!(
         attempts[0].archive_links[0].contributed_by.as_deref(),
@@ -1042,7 +1054,7 @@ impl ReconciliationProcessor for EntityOnlyReconciliationProcessor {
         assert_eq!(input.entities.len(), 1);
         assert_eq!(input.entities[0].entity_key, "enceladus");
         Ok(vec![ReconciliationDecisionOutput {
-            decision_kind: ReconciliationDecisionKind::StrengthenExisting,
+            decision_kind: ReconciliationDecisionKind::AttachToExisting,
             target_kind: "entity".to_string(),
             target_key: "enceladus".to_string(),
             matched_object_id: Some("entity-1".to_string()),

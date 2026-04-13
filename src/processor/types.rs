@@ -75,7 +75,7 @@ pub struct ArtifactProcessorOutput {
     pub importance_score: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReconciliationProcessorInput {
     pub artifact_id: String,
     pub source_type: SourceType,
@@ -86,7 +86,7 @@ pub struct ReconciliationProcessorInput {
     pub retrieval_results_json: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReconciliationDecisionOutput {
     pub decision_kind: ReconciliationDecisionKind,
     pub target_kind: String,

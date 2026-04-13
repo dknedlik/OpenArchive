@@ -721,7 +721,7 @@ fn derive_artifact_enrichment_status(snapshot: ArtifactEnrichmentSnapshot) -> En
         || snapshot.completed_derivation_runs > 0;
     let is_fully_derived = snapshot.completed_derivation_runs > 0;
 
-    if is_fully_derived && !has_running && !has_pending && !has_failed {
+    if is_fully_derived && !has_running && !has_pending {
         return EnrichmentStatus::Completed;
     }
     if has_running {

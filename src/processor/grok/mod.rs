@@ -246,8 +246,9 @@ impl GrokClient {
             .and_then(InferenceUsage::from_openrouter_usage);
         let content = parsed.flatten_text();
         if content.trim().is_empty() {
-            return Err(ProcessorError::Message {
-                message: "Grok responses returned empty content".to_string(),
+            return Err(ProcessorError::EmptyInferenceContent {
+                provider: "Grok",
+                detail: String::new(),
             });
         }
 

@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use crate::error::{OpenArchiveError, Result};
 use crate::storage::{
-    ArtifactContextPackReadStore, CrossArtifactReadStore, DerivedObjectType, EnrichmentStatus,
-    ImportedNoteLinkRecord, ImportedNoteMetadata, ScopeType, SourceType,
+    ArtifactContextPackReadStore, ArtifactLinkRecord, CrossArtifactReadStore, DerivedObjectType,
+    EnrichmentStatus, ImportedNoteLinkRecord, ImportedNoteMetadata, ScopeType, SourceType,
 };
 
 // ---------------------------------------------------------------------------
@@ -69,6 +69,7 @@ pub struct ContextPackResponse {
     pub source_type: SourceType,
     pub imported_note_metadata: ImportedNoteMetadata,
     pub inbound_note_links: Vec<ImportedNoteLinkRecord>,
+    pub artifact_links: Vec<ArtifactLinkRecord>,
     pub readiness: ContextPackReadiness,
     pub summaries: Vec<ContextDerivedEntry>,
     pub classifications: Vec<ContextDerivedEntry>,
@@ -216,6 +217,7 @@ impl ContextPackService {
             source_type: material.artifact.source_type,
             imported_note_metadata: material.imported_note_metadata,
             inbound_note_links: material.inbound_note_links,
+            artifact_links: material.artifact_links,
             readiness,
             summaries,
             classifications,
@@ -430,6 +432,7 @@ mod tests {
             segments: vec![make_segment("seg-1", "hello")],
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
+            artifact_links: Vec::new(),
             derived_objects: vec![],
         }));
 
@@ -450,6 +453,7 @@ mod tests {
             ],
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
+            artifact_links: Vec::new(),
             derived_objects: vec![],
         }));
 
@@ -465,6 +469,7 @@ mod tests {
             segments: vec![make_segment("seg-1", "hello")],
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
+            artifact_links: Vec::new(),
             derived_objects: vec![],
         }));
 
@@ -480,6 +485,7 @@ mod tests {
             segments: vec![make_segment("seg-1", "hello")],
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
+            artifact_links: Vec::new(),
             derived_objects: vec![make_derived_object(
                 "cls-1",
                 DerivedObjectType::Classification,
@@ -499,6 +505,7 @@ mod tests {
             segments: vec![make_segment("seg-1", "hello")],
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
+            artifact_links: Vec::new(),
             derived_objects: vec![make_derived_object("sum-1", DerivedObjectType::Summary)],
         }));
 
@@ -517,6 +524,7 @@ mod tests {
             ],
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
+            artifact_links: Vec::new(),
             derived_objects: vec![
                 make_derived_object("sum-1", DerivedObjectType::Summary),
                 make_derived_object("mem-1", DerivedObjectType::Memory),
@@ -538,6 +546,7 @@ mod tests {
             segments: vec![make_segment("seg-1", "text")],
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
+            artifact_links: Vec::new(),
             derived_objects: vec![
                 make_derived_object("sum-1", DerivedObjectType::Summary),
                 make_derived_object("cls-1", DerivedObjectType::Classification),
@@ -564,6 +573,7 @@ mod tests {
             segments: vec![make_segment("seg-1", "text")],
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
+            artifact_links: Vec::new(),
             derived_objects: vec![make_derived_object("mem-1", DerivedObjectType::Memory)],
         }));
 
@@ -578,6 +588,7 @@ mod tests {
             segments: vec![make_segment("seg-1", "text")],
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
+            artifact_links: Vec::new(),
             derived_objects: vec![],
         }));
 
@@ -592,6 +603,7 @@ mod tests {
             segments: vec![make_segment("seg-1", "text")],
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
+            artifact_links: Vec::new(),
             derived_objects: vec![
                 ArtifactContextDerivedObject {
                     derived_object_id: "mem-1".to_string(),
@@ -677,6 +689,17 @@ mod tests {
                 resolution_status: crate::storage::ImportedNoteLinkResolutionStatus::Resolved,
                 locator_json: None,
             }],
+            artifact_links: vec![crate::storage::ArtifactLinkRecord {
+                artifact_link_id: "artlink-1".to_string(),
+                source_artifact_id: "art-1".to_string(),
+                source_title: Some("Inbox".to_string()),
+                source_note_path: Some("Inbox.md".to_string()),
+                target_artifact_id: "art-2".to_string(),
+                target_title: Some("Acme".to_string()),
+                target_note_path: Some("Projects/Acme.md".to_string()),
+                link_type: crate::storage::ArtifactLinkType::Wikilink,
+                link_value: "Projects/Acme.md".to_string(),
+            }],
             derived_objects: vec![],
         }));
 
@@ -686,5 +709,6 @@ mod tests {
         assert_eq!(pack.imported_note_metadata.aliases.len(), 1);
         assert_eq!(pack.imported_note_metadata.outbound_links.len(), 1);
         assert_eq!(pack.inbound_note_links.len(), 1);
+        assert_eq!(pack.artifact_links.len(), 1);
     }
 }

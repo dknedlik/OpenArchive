@@ -461,8 +461,9 @@ impl OpenAiClient {
             .and_then(InferenceUsage::from_openrouter_usage);
         let content = parsed.flatten_text();
         if content.trim().is_empty() {
-            return Err(ProcessorError::Message {
-                message: "OpenAI responses returned empty content".to_string(),
+            return Err(ProcessorError::EmptyInferenceContent {
+                provider: "OpenAI",
+                detail: String::new(),
             });
         }
 

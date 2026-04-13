@@ -10,8 +10,8 @@ use crate::storage::enrichment_state_store::EnrichmentStateStore;
 use crate::storage::types::{ArtifactExtractionResult, ReconciliationDecision};
 use crate::storage::StorageTx;
 
-use super::derivation;
 use super::tx::{begin_storage_tx, commit_connection, rollback_connection};
+use super::{artifact_link, derivation};
 
 pub struct OracleDerivedMetadataStore {
     config: OracleConfig,
@@ -72,6 +72,10 @@ impl DerivedMetadataWriteStore for OracleDerivedMetadataStore {
             for link in &attempt.archive_links {
                 derivation::insert_archive_link(&tx.conn, link)?;
             }
+            artifact_link::sync_reconcile_links_for_archive_links(
+                &tx.conn,
+                &attempt.archive_links,
+            )?;
 
             Ok(DerivationWriteResult {
                 derivation_run_id: attempt.run.derivation_run_id.clone(),

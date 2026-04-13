@@ -106,8 +106,7 @@ impl ReconciliationBatchProcessor for GeminiReconciliationBatchProcessor {
                         .ok_or_else(|| ProcessorError::Message {
                             message: format!("Gemini batch returned unknown key {}", result.key),
                         })?;
-                    parsed.validate_against(input)?;
-                    Ok(parsed.into_outputs())
+                    parsed.into_validated_outputs(input)
                 })
                 .collect(),
             Err(err) => {

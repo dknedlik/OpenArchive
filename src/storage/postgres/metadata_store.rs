@@ -9,8 +9,8 @@ use crate::storage::derivation_store::{
 use crate::storage::enrichment_state_store::EnrichmentStateStore;
 use crate::storage::types::{ArtifactExtractionResult, ReconciliationDecision};
 
-use super::derivation;
 use super::tx::{begin_transaction, commit_transaction, rollback_transaction, storage_db_error};
+use super::{artifact_link, derivation};
 
 pub struct PostgresDerivedMetadataStore {
     config: PostgresConfig,
@@ -190,6 +190,11 @@ impl DerivedMetadataWriteStore for PostgresDerivedMetadataStore {
             for link in &attempt.archive_links {
                 derivation::insert_archive_link(&mut client, &self.config.connection_string, link)?;
             }
+            artifact_link::sync_reconcile_links_for_archive_links(
+                &mut client,
+                &self.config.connection_string,
+                &attempt.archive_links,
+            )?;
 
             Ok(DerivationWriteResult {
                 derivation_run_id: attempt.run.derivation_run_id.clone(),

@@ -174,7 +174,8 @@ pub(in crate::mcp::tools) fn handle_get_note_metadata(
                 "enrichment_status": response.enrichment_status,
                 "note_path": response.note_path,
                 "imported_note_metadata": response.imported_note_metadata,
-                "inbound_note_links": response.inbound_note_links
+                "inbound_note_links": response.inbound_note_links,
+                "artifact_links": response.artifact_links
             }
         })),
         Ok(None) => tool_success(json!({ "found": false })),

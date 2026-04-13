@@ -216,17 +216,21 @@ impl GeminiClient {
                 }
             })?;
 
-        let output_text = parsed
-            .flatten_text()
-            .ok_or_else(|| ProcessorError::Message {
-                message: format!(
-                    "Gemini generateContent returned empty content{}",
-                    parsed
-                        .primary_finish_reason()
-                        .map(|reason| format!(" (finish_reason={reason})"))
-                        .unwrap_or_default()
-                ),
-            })?;
+        let output_text =
+            parsed
+                .flatten_text()
+                .ok_or_else(|| ProcessorError::EmptyInferenceContent {
+                    provider: "Gemini",
+                    detail: format!(
+                        "Gemini generateContent returned empty content{}",
+                        parsed
+                            .primary_finish_reason()
+                            .map(|reason| format!(" (finish_reason={reason})"))
+                            .unwrap_or_default()
+                    )
+                    .trim_start_matches("Gemini generateContent returned empty content")
+                    .to_string(),
+                })?;
 
         Ok(InferenceResult {
             output_text,
@@ -318,17 +322,21 @@ impl GeminiClient {
                 }
             })?;
 
-        let output_text = parsed
-            .flatten_text()
-            .ok_or_else(|| ProcessorError::Message {
-                message: format!(
-                    "Gemini generateContent returned empty content{}",
-                    parsed
-                        .primary_finish_reason()
-                        .map(|reason| format!(" (finish_reason={reason})"))
-                        .unwrap_or_default()
-                ),
-            })?;
+        let output_text =
+            parsed
+                .flatten_text()
+                .ok_or_else(|| ProcessorError::EmptyInferenceContent {
+                    provider: "Gemini",
+                    detail: format!(
+                        "Gemini generateContent returned empty content{}",
+                        parsed
+                            .primary_finish_reason()
+                            .map(|reason| format!(" (finish_reason={reason})"))
+                            .unwrap_or_default()
+                    )
+                    .trim_start_matches("Gemini generateContent returned empty content")
+                    .to_string(),
+                })?;
 
         Ok(InferenceResult {
             output_text,

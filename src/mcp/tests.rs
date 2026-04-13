@@ -237,7 +237,7 @@ fn get_note_metadata_returns_note_focused_payload() {
     assert_eq!(response["isError"], Value::Bool(false));
     let text = response["content"][0]["text"].as_str().expect("note text");
     assert!(text
-        .starts_with("note: 1 properties, 1 tags, 1 aliases, 1 outbound links, 1 inbound links"));
+        .starts_with("note: 1 properties, 1 tags, 1 aliases, 1 outbound links, 1 inbound links, 1 artifact links"));
     assert!(text.contains("\"note_path\": \"Inbox.md\""));
     assert_eq!(
         response["structuredContent"]["note"]["note_path"],
@@ -251,6 +251,12 @@ fn get_note_metadata_returns_note_focused_payload() {
     );
     assert_eq!(
         response["structuredContent"]["note"]["inbound_note_links"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        response["structuredContent"]["note"]["artifact_links"]
             .as_array()
             .map(Vec::len),
         Some(1)
@@ -460,6 +466,17 @@ impl crate::storage::ArtifactDetailReadStore for MockArtifactDetailStore {
                 resolution_status: crate::storage::ImportedNoteLinkResolutionStatus::Resolved,
                 locator_json: None,
             }],
+            artifact_links: vec![crate::storage::ArtifactLinkRecord {
+                artifact_link_id: "artlink-1".to_string(),
+                source_artifact_id: artifact_id.to_string(),
+                source_title: Some("Artifact".to_string()),
+                source_note_path: Some("Inbox.md".to_string()),
+                target_artifact_id: "artifact-2".to_string(),
+                target_title: Some("Acme".to_string()),
+                target_note_path: Some("Projects/Acme.md".to_string()),
+                link_type: crate::storage::ArtifactLinkType::Wikilink,
+                link_value: "Projects/Acme.md".to_string(),
+            }],
         }))
     }
 }
@@ -510,6 +527,17 @@ impl crate::storage::ArtifactContextPackReadStore for MockContextPackStore {
                 resolved_artifact_id: Some(artifact_id.to_string()),
                 resolution_status: crate::storage::ImportedNoteLinkResolutionStatus::Resolved,
                 locator_json: None,
+            }],
+            artifact_links: vec![crate::storage::ArtifactLinkRecord {
+                artifact_link_id: "artlink-1".to_string(),
+                source_artifact_id: artifact_id.to_string(),
+                source_title: Some("Artifact".to_string()),
+                source_note_path: Some("Inbox.md".to_string()),
+                target_artifact_id: "artifact-2".to_string(),
+                target_title: Some("Acme".to_string()),
+                target_note_path: Some("Projects/Acme.md".to_string()),
+                link_type: crate::storage::ArtifactLinkType::SharedTag,
+                link_value: "inbox".to_string(),
             }],
             derived_objects: vec![],
         }))

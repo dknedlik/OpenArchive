@@ -27,7 +27,6 @@ pub(crate) fn reconciliation_output_schema() -> serde_json::Value {
                             "enum": [
                                 "create_new",
                                 "attach_to_existing",
-                                "strengthen_existing",
                                 "supersede_existing",
                                 "contradicts_existing",
                                 "insufficient_evidence"

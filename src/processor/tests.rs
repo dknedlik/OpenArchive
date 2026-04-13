@@ -429,6 +429,21 @@ fn cleanup_dedupes_and_sanitizes_outputs_generically() {
                 display_name: "Worker".to_string(),
                 entity_type: "system".to_string(),
             },
+            EntityOutput {
+                entity_key: "entity-c".to_string(),
+                display_name: ".obsidian/snippets/".to_string(),
+                entity_type: "technology".to_string(),
+            },
+            EntityOutput {
+                entity_key: "entity-d".to_string(),
+                display_name: "Translations".to_string(),
+                entity_type: "concept".to_string(),
+            },
+            EntityOutput {
+                entity_key: "entity-e".to_string(),
+                display_name: "Claude User".to_string(),
+                entity_type: "person".to_string(),
+            },
         ],
         relationships: vec![
             RelationshipOutput {
@@ -463,6 +478,30 @@ fn cleanup_dedupes_and_sanitizes_outputs_generically() {
                 body_text: "Invalid missing relationship.".to_string(),
                 confidence_label: "high".to_string(),
             },
+            RelationshipOutput {
+                relationship_type: "contains".to_string(),
+                subject_key: "entity-b".to_string(),
+                object_key: "entity-c".to_string(),
+                title: Some("Path label".to_string()),
+                body_text: "Worker references a path-like label.".to_string(),
+                confidence_label: "high".to_string(),
+            },
+            RelationshipOutput {
+                relationship_type: "supports".to_string(),
+                subject_key: "entity-b".to_string(),
+                object_key: "entity-d".to_string(),
+                title: Some("Abstract concept".to_string()),
+                body_text: "Worker references a concept placeholder.".to_string(),
+                confidence_label: "high".to_string(),
+            },
+            RelationshipOutput {
+                relationship_type: "reported_by".to_string(),
+                subject_key: "entity-e".to_string(),
+                object_key: "entity-a".to_string(),
+                title: Some("Speaker label".to_string()),
+                body_text: "Claude User referenced Alice.".to_string(),
+                confidence_label: "high".to_string(),
+            },
         ],
         importance_score: 3,
     });
@@ -475,6 +514,8 @@ fn cleanup_dedupes_and_sanitizes_outputs_generically() {
     assert_eq!(output.entities.len(), 2);
     assert_eq!(output.relationships.len(), 1);
     assert_eq!(output.relationships[0].confidence_label, "high");
+    assert_eq!(output.entities[0].display_name, "Alice");
+    assert_eq!(output.entities[1].display_name, "Worker");
 }
 
 fn sample_reconciliation_input() -> ReconciliationProcessorInput {
@@ -499,17 +540,118 @@ fn sample_reconciliation_input() -> ReconciliationProcessorInput {
             entity_type: "system".to_string(),
         }],
         relationships: Vec::new(),
-        retrieval_results_json: serde_json::json!({
-            "objects": [
-                {
-                    "object_id": "obj-1",
-                    "title": "Silent fallback rule",
-                    "body_text": "The worker should not silently fall back."
-                }
-            ]
-        })
+        retrieval_results_json: serde_json::json!([
+            {
+                "target_kind": "memory",
+                "target_key": "memory_1",
+                "embedding_matches": [
+                    {
+                        "object_id": "obj-1",
+                        "artifact_id": "artifact-2",
+                        "similarity_score": 0.82,
+                        "title": "Silent fallback rule",
+                        "body_text": "The worker should not silently fall back."
+                    }
+                ]
+            },
+            {
+                "target_kind": "entity",
+                "target_key": "worker",
+                "embedding_matches": [
+                ]
+            },
+            {
+                "target_kind": "relationship",
+                "target_key": "unused:unused:unused",
+                "embedding_matches": [
+                    {
+                        "object_id": "obj-99",
+                        "artifact_id": "artifact-9",
+                        "similarity_score": 0.75
+                    }
+                ]
+            }
+        ])
         .to_string(),
     }
+}
+
+#[test]
+fn reconciliation_normalizes_hallucinated_existing_id_to_create_new() {
+    let input = sample_reconciliation_input();
+    let output = ModelReconciliationOutput {
+        decisions: vec![
+            ModelReconciliationDecision {
+                decision_kind: ReconciliationDecisionKind::AttachToExisting,
+                target_kind: "memory".to_string(),
+                target_key: "memory_1".to_string(),
+                matched_object_id: Some("obj-hallucinated".to_string()),
+                rationale: "This looks like the same memory.".to_string(),
+            },
+            ModelReconciliationDecision {
+                decision_kind: ReconciliationDecisionKind::CreateNew,
+                target_kind: "entity".to_string(),
+                target_key: "worker".to_string(),
+                matched_object_id: None,
+                rationale: "This entity should remain distinct.".to_string(),
+            },
+        ],
+    };
+
+    let decisions = output
+        .into_validated_outputs(&input)
+        .expect("hallucinated id should downgrade to create_new");
+
+    assert_eq!(decisions.len(), 2);
+    assert_eq!(
+        decisions[0].decision_kind,
+        ReconciliationDecisionKind::CreateNew
+    );
+    assert_eq!(decisions[0].matched_object_id, None);
+}
+
+#[test]
+fn reconciliation_accepts_legacy_flat_match_options() {
+    let mut input = sample_reconciliation_input();
+    input.retrieval_results_json = serde_json::json!({
+        "objects": [
+            {
+                "object_id": "obj-1",
+                "title": "Silent fallback rule",
+                "body_text": "The worker should not silently fall back."
+            }
+        ]
+    })
+    .to_string();
+
+    let output = ModelReconciliationOutput {
+        decisions: vec![
+            ModelReconciliationDecision {
+                decision_kind: ReconciliationDecisionKind::AttachToExisting,
+                target_kind: "memory".to_string(),
+                target_key: "memory_1".to_string(),
+                matched_object_id: Some("obj-1".to_string()),
+                rationale: "This clearly matches the prior memory.".to_string(),
+            },
+            ModelReconciliationDecision {
+                decision_kind: ReconciliationDecisionKind::CreateNew,
+                target_kind: "entity".to_string(),
+                target_key: "worker".to_string(),
+                matched_object_id: None,
+                rationale: "This entity should remain distinct.".to_string(),
+            },
+        ],
+    };
+
+    let decisions = output
+        .into_validated_outputs(&input)
+        .expect("legacy flat match options should remain valid");
+
+    assert_eq!(
+        decisions[0].decision_kind,
+        ReconciliationDecisionKind::AttachToExisting
+    );
+    assert_eq!(decisions[0].matched_object_id.as_deref(), Some("obj-1"));
 }
 
 #[test]
@@ -530,7 +672,7 @@ fn reconciliation_normalizes_ungrounded_existing_decision_to_create_new() {
     let output = ModelReconciliationOutput {
         decisions: vec![
             ModelReconciliationDecision {
-                decision_kind: ReconciliationDecisionKind::StrengthenExisting,
+                decision_kind: ReconciliationDecisionKind::AttachToExisting,
                 target_kind: "memory".to_string(),
                 target_key: "memory_1".to_string(),
                 matched_object_id: None,
@@ -564,7 +706,7 @@ fn reconciliation_requires_id_for_existing_object_decisions_after_normalization(
     let output = ModelReconciliationOutput {
         decisions: vec![
             ModelReconciliationDecision {
-                decision_kind: ReconciliationDecisionKind::StrengthenExisting,
+                decision_kind: ReconciliationDecisionKind::AttachToExisting,
                 target_kind: "memory".to_string(),
                 target_key: "memory_1".to_string(),
                 matched_object_id: Some("obj-1".to_string()),
@@ -587,7 +729,43 @@ fn reconciliation_requires_id_for_existing_object_decisions_after_normalization(
     assert_eq!(decisions.len(), 2);
     assert_eq!(
         decisions[0].decision_kind,
-        ReconciliationDecisionKind::StrengthenExisting
+        ReconciliationDecisionKind::AttachToExisting
+    );
+    assert_eq!(decisions[0].matched_object_id.as_deref(), Some("obj-1"));
+}
+
+#[test]
+fn reconciliation_accepts_legacy_strengthen_existing_as_attach() {
+    let input = sample_reconciliation_input();
+    let output: ModelReconciliationOutput = serde_json::from_str(
+        r#"{
+            "decisions": [
+                {
+                    "decision_kind": "strengthen_existing",
+                    "target_kind": "memory",
+                    "target_key": "memory_1",
+                    "matched_object_id": "obj-1",
+                    "rationale": "Existing memory already captures this better."
+                },
+                {
+                    "decision_kind": "create_new",
+                    "target_kind": "entity",
+                    "target_key": "worker",
+                    "matched_object_id": null,
+                    "rationale": "This entity should remain distinct."
+                }
+            ]
+        }"#,
+    )
+    .expect("legacy output should deserialize");
+
+    let decisions = output
+        .into_validated_outputs(&input)
+        .expect("legacy strengthen should normalize to attach");
+
+    assert_eq!(
+        decisions[0].decision_kind,
+        ReconciliationDecisionKind::AttachToExisting
     );
     assert_eq!(decisions[0].matched_object_id.as_deref(), Some("obj-1"));
 }

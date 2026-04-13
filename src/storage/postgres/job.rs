@@ -911,7 +911,7 @@ fn derive_artifact_enrichment_status(snapshot: ArtifactEnrichmentSnapshot) -> En
         || snapshot.completed_derivation_runs > 0;
     let is_fully_derived = snapshot.completed_derivation_runs > 0;
 
-    if is_fully_derived && !has_running && !has_pending && !has_failed {
+    if is_fully_derived && !has_running && !has_pending {
         return EnrichmentStatus::Completed;
     }
     if has_running {
@@ -1041,6 +1041,22 @@ mod tests {
     fn artifact_status_is_completed_after_successful_derivation() {
         let snapshot = ArtifactEnrichmentSnapshot {
             completed_jobs: 4,
+            extraction_results: 1,
+            reconciliation_decisions: 2,
+            completed_derivation_runs: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            derive_artifact_enrichment_status(snapshot),
+            EnrichmentStatus::Completed
+        );
+    }
+
+    #[test]
+    fn artifact_status_is_completed_after_successful_retry_even_with_old_failed_jobs() {
+        let snapshot = ArtifactEnrichmentSnapshot {
+            completed_jobs: 5,
+            failed_jobs: 1,
             extraction_results: 1,
             reconciliation_decisions: 2,
             completed_derivation_runs: 1,

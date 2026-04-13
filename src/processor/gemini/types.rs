@@ -226,12 +226,12 @@ impl GeminiBatchJob {
                         .ok_or_else(|| super::ProcessorError::Message {
                             message: format!("Gemini batch response {key} missing output"),
                         })?;
-                let output_text =
-                    response
-                        .flatten_text()
-                        .ok_or_else(|| super::ProcessorError::Message {
-                            message: format!("Gemini batch response {key} returned empty content"),
-                        })?;
+                let output_text = response.flatten_text().ok_or_else(|| {
+                    super::ProcessorError::EmptyInferenceContent {
+                        provider: "Gemini batch",
+                        detail: format!(" (request_key={key})"),
+                    }
+                })?;
                 Ok(GeminiBatchResult { key, output_text })
             })
             .collect()

@@ -10,7 +10,7 @@ use crate::storage::{
 };
 
 use super::tx::{begin_storage_tx, commit_connection};
-use super::{artifact, import, imported_note, job, segment};
+use super::{artifact, artifact_link, import, imported_note, job, segment};
 
 pub struct OracleImportWriteStore {
     config: OracleConfig,
@@ -63,6 +63,7 @@ impl ImportWriteStore for OracleImportWriteStore {
         let mut artifact_errors: Vec<String> = Vec::new();
         let mut planned_to_actual_artifact_ids: HashMap<String, String> = HashMap::new();
         let mut deferred_links: Vec<(String, Vec<NewImportedNoteLink>)> = Vec::new();
+        let mut created_artifact_ids: Vec<String> = Vec::new();
 
         for artifact_set in import_set.artifact_sets {
             let planned_artifact_id = artifact_set.artifact.artifact_id.clone();
@@ -122,6 +123,7 @@ impl ImportWriteStore for OracleImportWriteStore {
                         planned_artifact_id.clone(),
                         artifact_set.imported_note_metadata.links,
                     ));
+                    created_artifact_ids.push(planned_artifact_id.clone());
                     artifacts.push(ImportedArtifact {
                         artifact_id: planned_artifact_id,
                         enrichment_status: artifact_set.artifact.enrichment_status,
@@ -176,6 +178,27 @@ impl ImportWriteStore for OracleImportWriteStore {
                         })?;
                     count_failed += 1;
                     artifact_errors.push(format!("artifact {}: {error:#}", artifact_id));
+                }
+            }
+        }
+
+        for artifact_id in &created_artifact_ids {
+            match artifact_link::sync_structural_links_for_artifact(&tx.conn, artifact_id) {
+                Ok(()) => {
+                    tx.commit()?;
+                }
+                Err(error) => {
+                    tx.conn
+                        .rollback()
+                        .map_err(|source| StorageError::Rollback {
+                            operation: format!("failed structural links for {artifact_id}"),
+                            source: Box::new(source),
+                        })?;
+                    count_failed += 1;
+                    artifact_errors.push(format!(
+                        "artifact {} structural links: {error:#}",
+                        artifact_id
+                    ));
                 }
             }
         }

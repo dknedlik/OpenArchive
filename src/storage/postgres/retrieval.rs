@@ -1,7 +1,7 @@
 use postgres::Client;
 
 use crate::error::{StorageError, StorageResult};
-use crate::storage::postgres::{embedding::vector_literal, imported_note};
+use crate::storage::postgres::{artifact_link, embedding::vector_literal, imported_note};
 use crate::storage::retrieval_read_store::{
     ArchiveSearchCandidate, ArtifactContextDerivedObject, ArtifactContextPackMaterial,
     ArtifactDetailDerivedObject, ArtifactDetailRecord, ArtifactDetailSegment, ArtifactDetailView,
@@ -491,6 +491,7 @@ pub fn load_artifact_detail(
             connection_string,
             artifact_id,
         )?,
+        artifact_links: artifact_link::load_artifact_links(client, connection_string, artifact_id)?,
         segments: load_artifact_segments(client, connection_string, artifact_id)?,
         artifact,
         derived_objects: load_artifact_detail_derived_objects(
@@ -525,6 +526,7 @@ pub fn load_artifact_context_pack_material(
             connection_string,
             artifact_id,
         )?,
+        artifact_links: artifact_link::load_artifact_links(client, connection_string, artifact_id)?,
         derived_objects: load_artifact_context_derived_objects(
             client,
             connection_string,

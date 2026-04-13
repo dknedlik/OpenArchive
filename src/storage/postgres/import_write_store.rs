@@ -8,7 +8,7 @@ use crate::storage::{
 use std::collections::HashMap;
 
 use super::tx::{begin_storage_tx, begin_transaction, rollback_transaction};
-use super::{artifact, import, imported_note, job, segment};
+use super::{artifact, artifact_link, import, imported_note, job, segment};
 
 pub struct PostgresImportWriteStore {
     config: PostgresConfig,
@@ -46,6 +46,7 @@ impl ImportWriteStore for PostgresImportWriteStore {
         let mut artifact_errors: Vec<String> = Vec::new();
         let mut planned_to_actual_artifact_ids: HashMap<String, String> = HashMap::new();
         let mut deferred_links: Vec<(String, Vec<NewImportedNoteLink>)> = Vec::new();
+        let mut created_artifact_ids: Vec<String> = Vec::new();
 
         for artifact_set in import_set.artifact_sets {
             let planned_artifact_id = artifact_set.artifact.artifact_id.clone();
@@ -108,6 +109,7 @@ impl ImportWriteStore for PostgresImportWriteStore {
                         planned_artifact_id.clone(),
                         artifact_set.imported_note_metadata.links,
                     ));
+                    created_artifact_ids.push(planned_artifact_id.clone());
                     artifacts.push(ImportedArtifact {
                         artifact_id: planned_artifact_id,
                         enrichment_status: artifact_set.artifact.enrichment_status,
@@ -152,6 +154,28 @@ impl ImportWriteStore for PostgresImportWriteStore {
                     rollback_transaction(&mut tx.client, &self.config.connection_string)?;
                     count_failed += 1;
                     artifact_errors.push(format!("artifact {}: {error:#}", artifact_id));
+                }
+            }
+        }
+
+        for artifact_id in &created_artifact_ids {
+            begin_transaction(&mut tx.client, &self.config.connection_string)?;
+
+            let link_result = artifact_link::sync_structural_links_for_artifact(
+                &mut tx.client,
+                &self.config.connection_string,
+                artifact_id,
+            );
+
+            match link_result {
+                Ok(()) => tx.commit()?,
+                Err(error) => {
+                    rollback_transaction(&mut tx.client, &self.config.connection_string)?;
+                    count_failed += 1;
+                    artifact_errors.push(format!(
+                        "artifact {} structural links: {error:#}",
+                        artifact_id
+                    ));
                 }
             }
         }
