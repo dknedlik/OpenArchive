@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use crate::app::{ArchiveApplication, ArchiveApplicationDeps};
-use crate::config::{AppConfig, InferenceConfig, ObjectStoreConfig, RelationalStoreConfig};
+use crate::config::{
+    AppConfig, InferenceConfig, ObjectStoreConfig, RelationalStoreConfig, VectorStoreConfig,
+};
 use crate::embedding::{build_embedding_provider, EmbeddingProvider};
 use crate::error::{ConfigError, ConfigResult};
 use crate::object_store::{LocalFsObjectStore, ObjectStore, S3CompatibleObjectStore};
@@ -16,13 +18,17 @@ use crate::processor::{
     GrokProcessorFactory, OciProcessorFactory, OpenAiProcessorFactory, StubProcessorFactory,
 };
 use crate::storage::{
-    ArchiveRetrievalStore, ArchiveSearchReadStore, ArtifactReadStore, EnrichmentJobLifecycleStore,
-    EnrichmentStateStore, ImportWriteStore, OracleArchiveRetrievalStore, OracleArtifactReadStore,
+    ArchiveRetrievalStore, ArchiveSearchReadStore, ArtifactReadStore,
+    CompositeDerivedObjectSearchStore, EnrichmentJobLifecycleStore, EnrichmentStateStore,
+    ImportWriteStore, OracleArchiveRetrievalStore, OracleArtifactReadStore,
     OracleDerivedMetadataStore, OracleEnrichmentJobStore, OracleImportWriteStore,
     PostgresArtifactReadStore, PostgresDerivedMetadataStore, PostgresDerivedObjectEmbeddingStore,
     PostgresEnrichmentJobStore, PostgresImportWriteStore, PostgresRetrievalReadStore,
-    PostgresWritebackStore,
+    PostgresWritebackStore, SqliteArtifactReadStore, SqliteDerivedMetadataStore,
+    SqliteEnrichmentJobStore, SqliteImportWriteStore, SqliteRetrievalReadStore,
+    SqliteWritebackStore,
 };
+use crate::vector::QdrantVectorStore;
 
 pub struct ServiceBundle {
     pub app: Arc<ArchiveApplication>,
@@ -131,8 +137,12 @@ fn parse_vector_dimensions(type_name: &str) -> Option<usize> {
 }
 
 pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
-    let embedding_provider = build_embedding_provider(&config.embeddings)
+    let configured_embedding_provider = build_embedding_provider(&config.embeddings)
         .map_err(|message| ConfigError::InvalidEmbeddingConfig { message })?;
+    let embedding_provider = match config.vector_store {
+        VectorStoreConfig::Disabled => None,
+        _ => configured_embedding_provider.clone(),
+    };
     let object_store: Arc<dyn ObjectStore + Send + Sync> = match &config.object_store {
         ObjectStoreConfig::LocalFs(local_fs) => {
             Arc::new(LocalFsObjectStore::new(local_fs.root.clone()))
@@ -148,7 +158,9 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
 
     match &config.relational_store {
         RelationalStoreConfig::Postgres(pg_config) => {
-            validate_postgres_embedding_schema(pg_config, embedding_provider.as_ref())?;
+            if matches!(config.vector_store, VectorStoreConfig::PostgresPgVector) {
+                validate_postgres_embedding_schema(pg_config, embedding_provider.as_ref())?;
+            }
             let import_store: Arc<dyn ImportWriteStore + Send + Sync> =
                 Arc::new(PostgresImportWriteStore::new(pg_config.clone()));
             let read_store: Arc<dyn ArtifactReadStore + Send + Sync> =
@@ -165,18 +177,50 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
             let context_pack_store: Arc<
                 dyn crate::storage::ArtifactContextPackReadStore + Send + Sync,
             > = retrieval_impl.clone();
-            let cross_artifact_store: Arc<
+            let postgres_cross_artifact_store: Arc<
                 dyn crate::storage::CrossArtifactReadStore + Send + Sync,
             > = retrieval_impl.clone();
-            let object_search_store: Arc<
+            let postgres_object_search_store: Arc<
                 dyn crate::storage::DerivedObjectSearchStore + Send + Sync,
             > = retrieval_impl.clone();
             let review_store: Arc<dyn crate::storage::ReviewStore + Send + Sync> =
                 retrieval_impl.clone();
-            let embedding_store: Arc<dyn crate::storage::DerivedObjectEmbeddingStore> =
-                Arc::new(PostgresDerivedObjectEmbeddingStore::new(pg_config.clone()));
             let writeback_store: Arc<dyn crate::storage::WritebackStore + Send + Sync> =
                 Arc::new(PostgresWritebackStore::new(pg_config.clone()));
+            let lookup_store: Arc<dyn crate::storage::DerivedObjectLookupStore + Send + Sync> =
+                retrieval_impl.clone();
+
+            let (cross_artifact_store, object_search_store, embedding_store): (
+                Arc<dyn crate::storage::CrossArtifactReadStore + Send + Sync>,
+                Arc<dyn crate::storage::DerivedObjectSearchStore + Send + Sync>,
+                Option<Arc<dyn crate::storage::DerivedObjectEmbeddingStore>>,
+            ) = match &config.vector_store {
+                VectorStoreConfig::Disabled => (
+                    postgres_cross_artifact_store,
+                    postgres_object_search_store,
+                    None,
+                ),
+                VectorStoreConfig::PostgresPgVector => (
+                    postgres_cross_artifact_store,
+                    postgres_object_search_store,
+                    Some(Arc::new(PostgresDerivedObjectEmbeddingStore::new(
+                        pg_config.clone(),
+                    ))),
+                ),
+                VectorStoreConfig::Qdrant(qdrant_config) => {
+                    let qdrant_impl = Arc::new(QdrantVectorStore::new(
+                        qdrant_config.clone(),
+                        embedding_provider.as_deref(),
+                    )?);
+                    let composite_impl = Arc::new(CompositeDerivedObjectSearchStore::new(
+                        postgres_object_search_store,
+                        lookup_store,
+                        postgres_cross_artifact_store,
+                        qdrant_impl.clone(),
+                    ));
+                    (composite_impl.clone(), composite_impl, Some(qdrant_impl))
+                }
+            };
             let app = Arc::new(ArchiveApplication::new(ArchiveApplicationDeps {
                 import_store: Arc::clone(&import_store),
                 read_store: Arc::clone(&read_store),
@@ -200,11 +244,108 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 cross_artifact_store: Some(cross_artifact_store),
                 object_search_store: Some(object_search_store),
                 processor_factory,
-                embedding_store: Some(embedding_store),
+                embedding_store,
+                embedding_provider,
+            })
+        }
+        RelationalStoreConfig::Sqlite(sqlite_config) => {
+            if matches!(config.vector_store, VectorStoreConfig::PostgresPgVector) {
+                return Err(ConfigError::InvalidVectorStoreConfig {
+                    message: "sqlite relational storage does not support pgvector".to_string(),
+                });
+            }
+
+            let import_store: Arc<dyn ImportWriteStore + Send + Sync> =
+                Arc::new(SqliteImportWriteStore::new(sqlite_config.clone()));
+            let read_store: Arc<dyn ArtifactReadStore + Send + Sync> =
+                Arc::new(SqliteArtifactReadStore::new(sqlite_config.clone()));
+            let retrieval_impl = Arc::new(SqliteRetrievalReadStore::new(sqlite_config.clone()));
+            let retrieval_store: Arc<dyn ArchiveRetrievalStore + Send + Sync> =
+                retrieval_impl.clone();
+            let search_read_store: Arc<dyn ArchiveSearchReadStore + Send + Sync> =
+                retrieval_impl.clone();
+            let artifact_detail_store: Arc<
+                dyn crate::storage::ArtifactDetailReadStore + Send + Sync,
+            > = retrieval_impl.clone();
+            let context_pack_store: Arc<
+                dyn crate::storage::ArtifactContextPackReadStore + Send + Sync,
+            > = retrieval_impl.clone();
+            let sqlite_cross_artifact_store: Arc<
+                dyn crate::storage::CrossArtifactReadStore + Send + Sync,
+            > = retrieval_impl.clone();
+            let sqlite_object_search_store: Arc<
+                dyn crate::storage::DerivedObjectSearchStore + Send + Sync,
+            > = retrieval_impl.clone();
+            let lookup_store: Arc<dyn crate::storage::DerivedObjectLookupStore + Send + Sync> =
+                retrieval_impl.clone();
+            let review_store: Arc<dyn crate::storage::ReviewStore + Send + Sync> =
+                retrieval_impl.clone();
+            let writeback_store: Arc<dyn crate::storage::WritebackStore + Send + Sync> =
+                Arc::new(SqliteWritebackStore::new(sqlite_config.clone()));
+            let processor_factory = build_processor_factory(&config.inference)?;
+
+            let (cross_artifact_store, object_search_store, embedding_store): (
+                Arc<dyn crate::storage::CrossArtifactReadStore + Send + Sync>,
+                Arc<dyn crate::storage::DerivedObjectSearchStore + Send + Sync>,
+                Option<Arc<dyn crate::storage::DerivedObjectEmbeddingStore>>,
+            ) = match &config.vector_store {
+                VectorStoreConfig::Disabled => (
+                    sqlite_cross_artifact_store,
+                    sqlite_object_search_store,
+                    None,
+                ),
+                VectorStoreConfig::PostgresPgVector => unreachable!("validated above"),
+                VectorStoreConfig::Qdrant(qdrant_config) => {
+                    let qdrant_impl = Arc::new(QdrantVectorStore::new(
+                        qdrant_config.clone(),
+                        embedding_provider.as_deref(),
+                    )?);
+                    let composite_impl = Arc::new(CompositeDerivedObjectSearchStore::new(
+                        sqlite_object_search_store,
+                        lookup_store,
+                        sqlite_cross_artifact_store,
+                        qdrant_impl.clone(),
+                    ));
+                    (composite_impl.clone(), composite_impl, Some(qdrant_impl))
+                }
+            };
+
+            let app = Arc::new(ArchiveApplication::new(ArchiveApplicationDeps {
+                import_store: Arc::clone(&import_store),
+                read_store: Arc::clone(&read_store),
+                retrieval_store,
+                search_read_store: Some(search_read_store),
+                artifact_detail_store: Some(artifact_detail_store),
+                context_pack_store: Some(context_pack_store),
+                cross_artifact_store: Some(cross_artifact_store.clone()),
+                object_search_store: Some(object_search_store.clone()),
+                review_store: Some(review_store),
+                object_search_embedding_provider: embedding_provider.clone(),
+                object_store: Arc::clone(&object_store),
+                writeback_store: Some(writeback_store),
+            }));
+
+            Ok(ServiceBundle {
+                app,
+                read_store,
+                enrichment_store: Arc::new(SqliteEnrichmentJobStore::new(sqlite_config.clone())),
+                state_store: Arc::new(SqliteDerivedMetadataStore::new(sqlite_config.clone())),
+                derived_store: Arc::new(SqliteDerivedMetadataStore::new(sqlite_config.clone())),
+                cross_artifact_store: Some(cross_artifact_store),
+                object_search_store: Some(object_search_store),
+                processor_factory,
+                embedding_store,
                 embedding_provider,
             })
         }
         RelationalStoreConfig::Oracle(db_config) => {
+            if !matches!(config.vector_store, VectorStoreConfig::Disabled) {
+                return Err(ConfigError::InvalidVectorStoreConfig {
+                    message:
+                        "oracle relational storage does not yet support external vector providers"
+                            .to_string(),
+                });
+            }
             let import_store: Arc<dyn ImportWriteStore + Send + Sync> =
                 Arc::new(OracleImportWriteStore::new(db_config.clone()));
             let read_store: Arc<dyn ArtifactReadStore + Send + Sync> =

@@ -199,13 +199,8 @@ fn summarize_tool_result(value: &Value) -> String {
 
     if let Some(artifact) = value.get("artifact").and_then(Value::as_object) {
         let segments = artifact
-            .get("segment_count")
+            .get("returned_segment_count")
             .and_then(Value::as_u64)
-            .or_else(|| {
-                artifact
-                    .get("returned_segment_count")
-                    .and_then(Value::as_u64)
-            })
             .or_else(|| {
                 artifact
                     .get("segments")

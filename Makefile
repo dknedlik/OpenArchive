@@ -19,7 +19,7 @@ endif
 COMPOSE_PROFILES ?= $(DB_PROFILE)
 COMPOSE_RUN = $(if $(COMPOSE_PROFILES),COMPOSE_PROFILES=$(COMPOSE_PROFILES) )OA_ORACLE_IMAGE=$(ORACLE_DB_IMAGE) $(COMPOSE)
 
-.PHONY: ensure-runtime-base build-runtime-base reset-oracle-db up up-ollama up-oracle-db down logs ps rebuild migrate shell status verify test-postgres-integration test-oracle-integration
+.PHONY: ensure-runtime-base build-runtime-base reset-oracle-db up up-ollama up-oracle-db up-qdrant down logs ps rebuild migrate shell status verify test-postgres-integration test-oracle-integration
 
 ensure-runtime-base:
 	@docker image inspect $(ORACLE_RUNTIME_BASE_IMAGE) >/dev/null 2>&1 || $(MAKE) build-runtime-base
@@ -32,6 +32,9 @@ up: ensure-runtime-base
 
 up-ollama: ensure-runtime-base
 	COMPOSE_PROFILES=$(DB_PROFILE),ollama OA_ORACLE_IMAGE=$(ORACLE_DB_IMAGE) $(COMPOSE) up --build
+
+up-qdrant:
+	COMPOSE_PROFILES=qdrant $(COMPOSE) up -d qdrant
 
 up-oracle-db: ensure-runtime-base
 	COMPOSE_PROFILES=oracle OA_ORACLE_IMAGE=$(ORACLE_DB_IMAGE) $(COMPOSE) up --build

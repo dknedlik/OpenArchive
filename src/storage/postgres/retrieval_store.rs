@@ -5,8 +5,9 @@ use crate::storage::archive_retrieval_store::ArchiveRetrievalStore;
 use crate::storage::retrieval_read_store::{
     ArchiveSearchCandidate, ArchiveSearchReadStore, ArtifactContextPackMaterial,
     ArtifactContextPackReadStore, ArtifactDetailReadStore, ArtifactDetailView,
-    CrossArtifactReadStore, DerivedObjectSearchResult, DerivedObjectSearchStore, GraphRelatedEntry,
-    ObjectSearchFilters, RelatedDerivedObject, RelatedDerivedObjectEmbeddingMatch, SearchFilters,
+    CrossArtifactReadStore, DerivedObjectLookupStore, DerivedObjectSearchResult,
+    DerivedObjectSearchStore, GraphRelatedEntry, ObjectSearchFilters, RelatedDerivedObject,
+    RelatedDerivedObjectEmbeddingMatch, SearchFilters,
 };
 use crate::storage::review_read_store::{
     NewReviewDecision, ReviewCandidate, ReviewQueueFilters, ReviewReadStore, ReviewWriteStore,
@@ -159,6 +160,21 @@ impl DerivedObjectSearchStore for PostgresRetrievalReadStore {
                 self.client.connection_string(),
                 derived_object_id,
                 limit,
+            )
+        })
+    }
+}
+
+impl DerivedObjectLookupStore for PostgresRetrievalReadStore {
+    fn load_active_objects_by_ids(
+        &self,
+        derived_object_ids: &[String],
+    ) -> StorageResult<Vec<DerivedObjectSearchResult>> {
+        self.client.with_client(|client| {
+            retrieval::load_active_objects_by_ids(
+                client,
+                self.client.connection_string(),
+                derived_object_ids,
             )
         })
     }

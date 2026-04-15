@@ -153,6 +153,36 @@ pub trait DerivedObjectSearchStore: Send + Sync {
     ) -> StorageResult<Vec<GraphRelatedEntry>>;
 }
 
+pub trait DerivedObjectLookupStore: Send + Sync {
+    fn load_active_objects_by_ids(
+        &self,
+        derived_object_ids: &[String],
+    ) -> StorageResult<Vec<DerivedObjectSearchResult>>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorSearchHit {
+    pub derived_object_id: String,
+    pub score: f32,
+}
+
+pub trait VectorSearchStore: Send + Sync {
+    fn search_by_embedding(
+        &self,
+        filters: &ObjectSearchFilters,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> StorageResult<Vec<VectorSearchHit>>;
+
+    fn find_related_by_embedding(
+        &self,
+        artifact_id: &str,
+        derived_object_type: DerivedObjectType,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> StorageResult<Vec<VectorSearchHit>>;
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct GraphRelatedEntry {
     pub derived_object_id: String,

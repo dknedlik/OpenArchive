@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, OracleConfig, PostgresConfig, RelationalStoreConfig};
+use crate::config::{AppConfig, OracleConfig, PostgresConfig, RelationalStoreConfig, SqliteConfig};
 use crate::db;
 use crate::error::{preview_sql_statement, MigrationsError, MigrationsResult};
 use ::oracle::Connection;
@@ -9,6 +9,7 @@ use std::path::Path;
 pub fn check(config: &AppConfig) -> MigrationsResult<()> {
     match &config.relational_store {
         RelationalStoreConfig::Postgres(pg_config) => postgres::check(pg_config),
+        RelationalStoreConfig::Sqlite(sqlite_config) => sqlite::check(sqlite_config),
         RelationalStoreConfig::Oracle(db_config) => oracle::check(db_config),
     }
 }
@@ -16,6 +17,7 @@ pub fn check(config: &AppConfig) -> MigrationsResult<()> {
 pub fn migrate(config: &AppConfig) -> MigrationsResult<()> {
     match &config.relational_store {
         RelationalStoreConfig::Postgres(pg_config) => postgres::migrate(pg_config),
+        RelationalStoreConfig::Sqlite(sqlite_config) => sqlite::migrate(sqlite_config),
         RelationalStoreConfig::Oracle(db_config) => oracle::migrate(db_config),
     }
 }
@@ -23,6 +25,7 @@ pub fn migrate(config: &AppConfig) -> MigrationsResult<()> {
 pub fn reset(config: &AppConfig) -> MigrationsResult<()> {
     match &config.relational_store {
         RelationalStoreConfig::Postgres(pg_config) => postgres::reset(pg_config),
+        RelationalStoreConfig::Sqlite(sqlite_config) => sqlite::reset(sqlite_config),
         RelationalStoreConfig::Oracle(db_config) => oracle::reset(db_config),
     }
 }
@@ -381,6 +384,199 @@ pub mod postgres {
                 connection_string: "postgres".to_string(),
                 source: Box::new(source),
             }))?;
+        println!("applied {} {}", migration.version, migration.name);
+        Ok(())
+    }
+}
+
+pub mod sqlite {
+    use super::*;
+    use ::rusqlite::{params, Connection};
+
+    pub const MIGRATIONS_DIR: &str = "sql/sqlite/migrations";
+
+    pub fn check(config: &SqliteConfig) -> MigrationsResult<()> {
+        let connection = crate::sqlite_db::connect(config)?;
+        ensure_schema_migration_table(&connection)?;
+        let pending = pending_migrations(&connection)?;
+
+        if pending.is_empty() {
+            println!("schema is current");
+            return Ok(());
+        }
+
+        println!("pending migrations:");
+        for migration in pending {
+            println!("  {} {}", migration.version, migration.name);
+        }
+
+        Err(MigrationsError::DatabaseNotUpToDate)
+    }
+
+    pub fn migrate(config: &SqliteConfig) -> MigrationsResult<()> {
+        let mut connection = crate::sqlite_db::connect(config)?;
+        ensure_schema_migration_table(&connection)?;
+        let pending = pending_migrations(&connection)?;
+
+        if pending.is_empty() {
+            println!("no pending migrations");
+            return Ok(());
+        }
+
+        for migration in pending {
+            apply_migration(&mut connection, &migration)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn reset(config: &SqliteConfig) -> MigrationsResult<()> {
+        let connection = crate::sqlite_db::connect(config)?;
+        reset_schema_objects(&connection)
+    }
+
+    fn ensure_schema_migration_table(connection: &Connection) -> MigrationsResult<()> {
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS oa_schema_migration (
+                    version TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    checksum TEXT NOT NULL,
+                    applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                )",
+            )
+            .map_err(|source| MigrationsError::EnsureSqliteSchemaMigrationTable {
+                source: Box::new(source),
+            })?;
+        Ok(())
+    }
+
+    fn reset_schema_objects(connection: &Connection) -> MigrationsResult<()> {
+        let mut stmt = connection
+            .prepare(
+                "SELECT name, type
+                 FROM sqlite_master
+                 WHERE name LIKE 'oa_%'
+                   AND name <> 'oa_schema_migration'
+                   AND type IN ('table', 'view', 'trigger', 'index')",
+            )
+            .map_err(|source| MigrationsError::ResetSqliteSchemaObjects {
+                source: Box::new(source),
+            })?;
+        let objects = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| MigrationsError::ResetSqliteSchemaObjects {
+                source: Box::new(source),
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| MigrationsError::ResetSqliteSchemaObjects {
+                source: Box::new(source),
+            })?;
+
+        for (name, object_type) in objects {
+            let ddl = match object_type.as_str() {
+                "table" => format!("DROP TABLE IF EXISTS \"{name}\""),
+                "view" => format!("DROP VIEW IF EXISTS \"{name}\""),
+                "trigger" => format!("DROP TRIGGER IF EXISTS \"{name}\""),
+                "index" => format!("DROP INDEX IF EXISTS \"{name}\""),
+                _ => continue,
+            };
+            connection.execute_batch(&ddl).map_err(|source| {
+                MigrationsError::ResetSqliteSchemaObjects {
+                    source: Box::new(source),
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    fn pending_migrations(connection: &Connection) -> MigrationsResult<Vec<Migration>> {
+        let applied = load_applied_migrations(connection)?;
+        let mut pending = Vec::new();
+
+        for migration in load_migrations_from_dir(Path::new(MIGRATIONS_DIR))? {
+            if let Some(existing_checksum) = applied.get(&migration.version) {
+                if existing_checksum != &migration.checksum {
+                    return Err(MigrationsError::ChecksumMismatch {
+                        version: migration.version,
+                        filename: migration.filename,
+                    });
+                }
+                continue;
+            }
+            pending.push(migration);
+        }
+
+        Ok(pending)
+    }
+
+    fn load_applied_migrations(
+        connection: &Connection,
+    ) -> MigrationsResult<std::collections::BTreeMap<String, String>> {
+        let mut map = std::collections::BTreeMap::new();
+        let mut stmt = connection
+            .prepare("SELECT version, checksum FROM oa_schema_migration ORDER BY version")
+            .map_err(|source| MigrationsError::LoadSqliteAppliedMigrations {
+                source: Box::new(source),
+            })?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| MigrationsError::LoadSqliteAppliedMigrations {
+                source: Box::new(source),
+            })?;
+
+        for row in rows {
+            let (version, checksum) =
+                row.map_err(|source| MigrationsError::LoadSqliteAppliedMigrations {
+                    source: Box::new(source),
+                })?;
+            map.insert(version, checksum);
+        }
+
+        Ok(map)
+    }
+
+    fn apply_migration(connection: &mut Connection, migration: &Migration) -> MigrationsResult<()> {
+        println!("applying {} {}", migration.version, migration.name);
+        let tx = connection.transaction().map_err(|source| {
+            MigrationsError::LoadSqliteAppliedMigrations {
+                source: Box::new(source),
+            }
+        })?;
+
+        tx.execute_batch(&migration.sql).map_err(|source| {
+            MigrationsError::ExecuteSqliteMigrationStatement {
+                filename: migration.filename.clone(),
+                statement_preview: preview_sql_statement(&migration.sql),
+                source: Box::new(source),
+            }
+        })?;
+
+        tx.execute(
+            "INSERT INTO oa_schema_migration (version, name, filename, checksum, applied_at)
+             VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            params![
+                migration.version,
+                migration.name,
+                migration.filename,
+                migration.checksum
+            ],
+        )
+        .map_err(|source| MigrationsError::RecordSqliteMigration {
+            filename: migration.filename.clone(),
+            source: Box::new(source),
+        })?;
+        tx.commit()
+            .map_err(|source| MigrationsError::RecordSqliteMigration {
+                filename: migration.filename.clone(),
+                source: Box::new(source),
+            })?;
+
         println!("applied {} {}", migration.version, migration.name);
         Ok(())
     }

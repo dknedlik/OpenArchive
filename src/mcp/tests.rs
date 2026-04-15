@@ -194,8 +194,10 @@ fn get_artifact_summary_text_prefers_payload_shape_over_found_flag() {
     let text = response["content"][0]["text"]
         .as_str()
         .expect("artifact text");
-    assert!(text.starts_with("artifact: 1 summaries, 1 classifications, 1 memories, 1 segments"));
+    assert!(text.starts_with("artifact: 1 summaries, 1 classifications, 1 memories, 0 segments"));
     assert!(text.contains("\"artifact_id\": \"artifact-1\""));
+    assert!(response["structuredContent"]["artifact"]["segments"].is_null());
+    assert!(response["structuredContent"]["artifact"]["returned_segment_count"].is_null());
 }
 
 #[test]

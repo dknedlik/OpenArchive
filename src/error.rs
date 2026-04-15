@@ -157,6 +157,9 @@ pub enum ConfigError {
 
     #[error("invalid embedding configuration: {message}")]
     InvalidEmbeddingConfig { message: String },
+
+    #[error("invalid vector store configuration: {message}")]
+    InvalidVectorStoreConfig { message: String },
 }
 
 #[derive(Debug, Error)]
@@ -192,6 +195,13 @@ pub enum DbError {
         connection_string: String,
         #[source]
         source: Box<postgres::Error>,
+    },
+
+    #[error("failed to use SQLite database at {path}: {source}")]
+    ConnectSqlite {
+        path: String,
+        #[source]
+        source: Box<rusqlite::Error>,
     },
 }
 
@@ -303,6 +313,39 @@ pub enum MigrationsError {
         filename: String,
         #[source]
         source: Box<oracle::Error>,
+    },
+
+    #[error("failed to ensure SQLite migration table")]
+    EnsureSqliteSchemaMigrationTable {
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+
+    #[error("failed to reset SQLite schema objects")]
+    ResetSqliteSchemaObjects {
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+
+    #[error("failed to load applied SQLite migrations")]
+    LoadSqliteAppliedMigrations {
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+
+    #[error("failed to apply SQLite migration {filename}: {statement_preview}")]
+    ExecuteSqliteMigrationStatement {
+        filename: String,
+        statement_preview: String,
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+
+    #[error("failed to record SQLite migration {filename}")]
+    RecordSqliteMigration {
+        filename: String,
+        #[source]
+        source: Box<rusqlite::Error>,
     },
 }
 
@@ -553,6 +596,26 @@ pub enum StorageError {
     UnsupportedOperation {
         store: &'static str,
         operation: &'static str,
+    },
+
+    #[error("failed to send vector-store {operation} request")]
+    VectorStoreRequest {
+        operation: &'static str,
+        #[source]
+        source: Box<reqwest::Error>,
+    },
+
+    #[error("vector-store {operation} returned unexpected HTTP status {status}: {body_preview}")]
+    VectorStoreUnexpectedStatus {
+        operation: &'static str,
+        status: u16,
+        body_preview: String,
+    },
+
+    #[error("failed to parse vector-store {operation} response: {detail}")]
+    VectorStoreParseResponse {
+        operation: &'static str,
+        detail: String,
     },
 }
 

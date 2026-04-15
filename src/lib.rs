@@ -18,7 +18,9 @@ pub mod parser;
 pub mod postgres_db;
 pub mod processor;
 pub mod shutdown;
+pub mod sqlite_db;
 pub mod storage;
+pub mod vector;
 
 pub use domain::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 pub use error::{

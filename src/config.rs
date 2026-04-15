@@ -10,6 +10,7 @@ use std::time::Duration;
 pub struct AppConfig {
     pub http: HttpConfig,
     pub relational_store: RelationalStoreConfig,
+    pub vector_store: VectorStoreConfig,
     pub object_store: ObjectStoreConfig,
     pub inference: InferenceConfig,
     pub embeddings: EmbeddingConfig,
@@ -18,9 +19,11 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn from_env() -> ConfigResult<Self> {
+        let relational_store = RelationalStoreConfig::from_env()?;
         Ok(Self {
             http: HttpConfig::from_env()?,
-            relational_store: RelationalStoreConfig::from_env()?,
+            vector_store: VectorStoreConfig::from_env(&relational_store)?,
+            relational_store,
             object_store: ObjectStoreConfig::from_env()?,
             inference: InferenceConfig::from_env()?,
             embeddings: EmbeddingConfig::from_env()?,
@@ -136,6 +139,7 @@ impl OpenAiEmbeddingConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelationalStoreConfig {
     Postgres(PostgresConfig),
+    Sqlite(SqliteConfig),
     Oracle(OracleConfig),
 }
 
@@ -144,11 +148,12 @@ impl RelationalStoreConfig {
         let provider = env::var("OA_RELATIONAL_STORE").unwrap_or_else(|_| "postgres".to_string());
         match provider.as_str() {
             "postgres" => Ok(Self::Postgres(PostgresConfig::from_env()?)),
+            "sqlite" => Ok(Self::Sqlite(SqliteConfig::from_env()?)),
             "oracle" => Ok(Self::Oracle(OracleConfig::from_env()?)),
             _ => Err(ConfigError::InvalidEnumEnv {
                 key: "OA_RELATIONAL_STORE",
                 value: provider,
-                expected: "postgres, oracle",
+                expected: "postgres, sqlite, oracle",
             }),
         }
     }
@@ -156,8 +161,73 @@ impl RelationalStoreConfig {
     pub fn oracle_config(&self) -> Option<&OracleConfig> {
         match self {
             Self::Postgres(_) => None,
+            Self::Sqlite(_) => None,
             Self::Oracle(config) => Some(config),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SqliteConfig {
+    pub path: PathBuf,
+    pub busy_timeout: Duration,
+}
+
+impl SqliteConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        Ok(Self {
+            path: PathBuf::from(required_env("OA_SQLITE_PATH")?),
+            busy_timeout: optional_duration_env_ms("OA_SQLITE_BUSY_TIMEOUT_MS")?
+                .unwrap_or_else(|| Duration::from_secs(30)),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VectorStoreConfig {
+    Disabled,
+    PostgresPgVector,
+    Qdrant(QdrantConfig),
+}
+
+impl VectorStoreConfig {
+    pub fn from_env(relational_store: &RelationalStoreConfig) -> ConfigResult<Self> {
+        let provider = env::var("OA_VECTOR_STORE").unwrap_or_else(|_| match relational_store {
+            RelationalStoreConfig::Postgres(_) => "postgres".to_string(),
+            RelationalStoreConfig::Sqlite(_) => "qdrant".to_string(),
+            RelationalStoreConfig::Oracle(_) => "disabled".to_string(),
+        });
+        match provider.as_str() {
+            "disabled" => Ok(Self::Disabled),
+            "postgres" => Ok(Self::PostgresPgVector),
+            "qdrant" => Ok(Self::Qdrant(QdrantConfig::from_env()?)),
+            _ => Err(ConfigError::InvalidEnumEnv {
+                key: "OA_VECTOR_STORE",
+                value: provider,
+                expected: "disabled, postgres, qdrant",
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QdrantConfig {
+    pub url: String,
+    pub collection_name: String,
+    pub request_timeout: Duration,
+    pub exact: bool,
+}
+
+impl QdrantConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        Ok(Self {
+            url: env::var("OA_QDRANT_URL").unwrap_or_else(|_| "http://127.0.0.1:6333".to_string()),
+            collection_name: env::var("OA_QDRANT_COLLECTION")
+                .unwrap_or_else(|_| "oa_derived_object_embeddings".to_string()),
+            request_timeout: optional_duration_env_ms("OA_QDRANT_TIMEOUT_MS")?
+                .unwrap_or_else(|| Duration::from_secs(30)),
+            exact: bool_env("OA_QDRANT_EXACT")?.unwrap_or(true),
+        })
     }
 }
 
@@ -649,6 +719,21 @@ fn optional_duration_env_ms(key: &'static str) -> ConfigResult<Option<Duration>>
     }
 }
 
+fn bool_env(key: &'static str) -> ConfigResult<Option<bool>> {
+    match env::var(key) {
+        Ok(raw) => match raw.as_str() {
+            "true" | "1" => Ok(Some(true)),
+            "false" | "0" => Ok(Some(false)),
+            _ => Err(ConfigError::InvalidEnumEnv {
+                key,
+                value: raw,
+                expected: "true, false, 1, 0",
+            }),
+        },
+        Err(_) => Ok(None),
+    }
+}
+
 fn positive_usize_env(key: &'static str) -> ConfigResult<Option<usize>> {
     match env::var(key) {
         Ok(raw) => {
@@ -857,6 +942,13 @@ mod tests {
             "OA_GEMINI_BATCH_MAX_BYTES",
             "OA_GEMINI_BATCH_POLL_INTERVAL_MS",
             "OA_POSTGRES_URL",
+            "OA_SQLITE_PATH",
+            "OA_SQLITE_BUSY_TIMEOUT_MS",
+            "OA_VECTOR_STORE",
+            "OA_QDRANT_URL",
+            "OA_QDRANT_COLLECTION",
+            "OA_QDRANT_TIMEOUT_MS",
+            "OA_QDRANT_EXACT",
             "OA_OPENAI_REPAIR_MAX_OUTPUT_TOKENS",
             "OA_OBJECT_STORE_ROOT",
             "DATABASE_URL",
@@ -915,6 +1007,10 @@ mod tests {
             config.relational_store,
             RelationalStoreConfig::Postgres(_)
         ));
+        assert!(matches!(
+            config.vector_store,
+            VectorStoreConfig::PostgresPgVector
+        ));
         assert!(matches!(config.object_store, ObjectStoreConfig::LocalFs(_)));
         assert_eq!(config.inference, InferenceConfig::Stub);
         assert_eq!(config.embeddings, EmbeddingConfig::Disabled);
@@ -936,6 +1032,23 @@ mod tests {
             config.relational_store,
             RelationalStoreConfig::Postgres(_)
         ));
+    }
+
+    #[test]
+    fn sqlite_provider_loads_when_configured() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var("OA_RELATIONAL_STORE", "sqlite");
+        std::env::set_var("OA_SQLITE_PATH", "/tmp/open_archive.sqlite");
+
+        let config = AppConfig::from_env().expect("sqlite provider should load");
+        let RelationalStoreConfig::Sqlite(sqlite) = config.relational_store else {
+            panic!("expected sqlite config");
+        };
+
+        assert_eq!(sqlite.path, PathBuf::from("/tmp/open_archive.sqlite"));
+        assert_eq!(sqlite.busy_timeout, Duration::from_secs(30));
+        assert!(matches!(config.vector_store, VectorStoreConfig::Qdrant(_)));
     }
 
     #[test]
@@ -966,7 +1079,7 @@ mod tests {
     fn invalid_relational_store_provider_is_rejected() {
         let _guard = env_lock();
         clear_test_env();
-        std::env::set_var("OA_RELATIONAL_STORE", "sqlite");
+        std::env::set_var("OA_RELATIONAL_STORE", "bogus");
         std::env::set_var(
             "OA_POSTGRES_URL",
             "postgres://test:test@localhost/open_archive",
@@ -980,6 +1093,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn qdrant_vector_provider_loads_with_defaults() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var(
+            "OA_POSTGRES_URL",
+            "postgres://test:test@localhost/open_archive",
+        );
+        std::env::set_var("OA_VECTOR_STORE", "qdrant");
+
+        let config = AppConfig::from_env().expect("qdrant vector provider should load");
+        let VectorStoreConfig::Qdrant(qdrant) = config.vector_store else {
+            panic!("expected qdrant vector config");
+        };
+
+        assert_eq!(qdrant.url, "http://127.0.0.1:6333");
+        assert_eq!(qdrant.collection_name, "oa_derived_object_embeddings");
+        assert_eq!(qdrant.request_timeout, Duration::from_secs(30));
+        assert!(qdrant.exact);
     }
 
     #[test]

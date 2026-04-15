@@ -110,7 +110,18 @@ pub(in crate::mcp::tools) fn handle_get_artifact(
         segment_offset,
         segment_limit,
     }) {
-        Ok(Some(response)) => tool_success(json!({ "found": true, "artifact": response })),
+        Ok(Some(response)) => {
+            let mut payload = json!({ "found": true, "artifact": response });
+            if !include_segments {
+                if let Some(artifact) = payload.get_mut("artifact").and_then(Value::as_object_mut) {
+                    artifact.remove("segments");
+                    artifact.remove("segment_offset");
+                    artifact.remove("segment_limit");
+                    artifact.remove("returned_segment_count");
+                }
+            }
+            tool_success(payload)
+        }
         Ok(None) => tool_success(json!({ "found": false })),
         Err(err) => tool_error("internal_error", &err.to_string()),
     }

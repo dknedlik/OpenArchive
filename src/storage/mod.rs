@@ -22,6 +22,7 @@
 
 pub mod archive_retrieval_store;
 pub mod artifact_store;
+mod composite_search_store;
 pub mod derivation_store;
 pub mod embedding_store;
 pub mod enrichment_state_store;
@@ -33,12 +34,14 @@ pub mod postgres;
 pub mod retrieval_read_store;
 pub mod review_read_store;
 pub mod segment_store;
+pub mod sqlite;
 pub mod types;
 pub mod writeback_store;
 
 pub use crate::domain::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 pub use archive_retrieval_store::ArchiveRetrievalStore;
 pub use artifact_store::{ArtifactReadStore, ArtifactStore};
+pub use composite_search_store::CompositeDerivedObjectSearchStore;
 pub use derivation_store::{
     DerivationStore, DerivationWriteResult, DerivedMetadataWriteStore, WriteDerivationAttempt,
     WriteDerivedObject,
@@ -61,15 +64,20 @@ pub use retrieval_read_store::{
     ArchiveSearchCandidate, ArchiveSearchReadStore, ArtifactContextDerivedObject,
     ArtifactContextPackMaterial, ArtifactContextPackReadStore, ArtifactDetailDerivedObject,
     ArtifactDetailReadStore, ArtifactDetailRecord, ArtifactDetailSegment, ArtifactDetailView,
-    CrossArtifactReadStore, DerivedObjectSearchResult, DerivedObjectSearchStore, GraphRelatedEntry,
-    MvpRetrievalReadStore, ObjectSearchFilters, RelatedDerivedObject,
-    RelatedDerivedObjectEmbeddingMatch, SearchCandidateKind, SearchFilters,
+    CrossArtifactReadStore, DerivedObjectLookupStore, DerivedObjectSearchResult,
+    DerivedObjectSearchStore, GraphRelatedEntry, MvpRetrievalReadStore, ObjectSearchFilters,
+    RelatedDerivedObject, RelatedDerivedObjectEmbeddingMatch, SearchCandidateKind, SearchFilters,
+    VectorSearchHit, VectorSearchStore,
 };
 pub use review_read_store::{
     NewReviewDecision, ReviewCandidate, ReviewDecisionStatus, ReviewItemKind, ReviewQueueFilters,
     ReviewReadStore, ReviewStore, ReviewWriteStore,
 };
 pub use segment_store::SegmentStore;
+pub use sqlite::{
+    SqliteArtifactReadStore, SqliteDerivedMetadataStore, SqliteEnrichmentJobStore,
+    SqliteImportWriteStore, SqliteRetrievalReadStore, SqliteWritebackStore,
+};
 pub use types::{
     ArtifactClass, ArtifactExtractPayload, ArtifactExtractionResult, ArtifactIngestResult,
     ArtifactLinkRecord, ArtifactLinkType, ArtifactListFilters, ArtifactListItem,

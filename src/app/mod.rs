@@ -71,7 +71,14 @@ impl ArchiveApplication {
             artifacts: artifacts::ArtifactQueryService::new(read_store),
             imports: imports::ImportApplicationService::new(import_store, object_store),
             retrieval: Arc::new(retrieval::ArchiveRetrievalService::new(retrieval_store)),
-            search: search_read_store.map(search::ArchiveSearchService::new),
+            search: search_read_store.map(|store| match object_search_store.clone() {
+                Some(object_store) => search::ArchiveSearchService::with_semantic_fallback(
+                    store,
+                    object_store,
+                    object_search_embedding_provider.clone(),
+                ),
+                None => search::ArchiveSearchService::new(store),
+            }),
             artifact_detail: artifact_detail_store.map(artifact_detail::ArtifactDetailService::new),
             context_pack,
             object_search: object_search_store.map(|store| {

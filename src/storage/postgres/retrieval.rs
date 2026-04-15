@@ -938,6 +938,58 @@ pub fn search_objects_by_embedding(
     Ok(results)
 }
 
+pub fn load_active_objects_by_ids(
+    client: &mut Client,
+    connection_string: &str,
+    derived_object_ids: &[String],
+) -> StorageResult<Vec<DerivedObjectSearchResult>> {
+    if derived_object_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows = client
+        .query(
+            "SELECT derived_object_id, artifact_id, derived_object_type, title, body_text,
+                    candidate_key, confidence_score::double precision
+             FROM oa_derived_object
+             WHERE object_status = 'active'
+               AND derived_object_id = ANY($1)
+             ORDER BY derived_object_id ASC",
+            &[&derived_object_ids],
+        )
+        .map_err(|source| map_pg_err(connection_string, source))?;
+
+    let mut results = Vec::with_capacity(rows.len());
+    for row in rows {
+        let derived_object_id: String = row.get(0);
+        let artifact_id: String = row.get(1);
+        let derived_object_type_str: String = row.get(2);
+        results.push(DerivedObjectSearchResult {
+            derived_object_id: derived_object_id.clone(),
+            artifact_id: artifact_id.clone(),
+            derived_object_type: DerivedObjectType::parse(&derived_object_type_str).ok_or_else(
+                || StorageError::InvalidDerivedObjectType {
+                    artifact_id: artifact_id.clone(),
+                    value: derived_object_type_str,
+                },
+            )?,
+            title: row.get(3),
+            body_text: row.get(4),
+            candidate_key: row.get(5),
+            confidence_score: row.try_get(6).map_err(|source| {
+                StorageError::ReadDerivedObjectConfidenceScore {
+                    artifact_id: artifact_id.clone(),
+                    derived_object_id: derived_object_id.clone(),
+                    source: Box::new(source),
+                }
+            })?,
+            score: None,
+        });
+    }
+
+    Ok(results)
+}
+
 pub fn find_related_by_candidate_keys(
     client: &mut Client,
     connection_string: &str,

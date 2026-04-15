@@ -13,8 +13,9 @@ httpdate = "1.0"
 log = "0.4"
 oracle = { version = "0.6", features = ["chrono"] }
 postgres = { version = "0.19", features = ["with-chrono-0_4"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 rand = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
 rusty-s3 = { version = "0.8", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

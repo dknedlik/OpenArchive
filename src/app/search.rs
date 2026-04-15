@@ -55,11 +55,29 @@ pub struct ArchiveSearchResponse {
 
 pub struct ArchiveSearchService {
     read_store: Arc<dyn ArchiveSearchReadStore + Send + Sync>,
+    semantic_store: Option<Arc<dyn DerivedObjectSearchStore + Send + Sync>>,
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
 }
 
 impl ArchiveSearchService {
     pub fn new(read_store: Arc<dyn ArchiveSearchReadStore + Send + Sync>) -> Self {
-        Self { read_store }
+        Self {
+            read_store,
+            semantic_store: None,
+            embedding_provider: None,
+        }
+    }
+
+    pub fn with_semantic_fallback(
+        read_store: Arc<dyn ArchiveSearchReadStore + Send + Sync>,
+        semantic_store: Arc<dyn DerivedObjectSearchStore + Send + Sync>,
+        embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    ) -> Self {
+        Self {
+            read_store,
+            semantic_store: Some(semantic_store),
+            embedding_provider,
+        }
     }
 
     pub fn search(&self, request: ArchiveSearchRequest) -> Result<ArchiveSearchResponse> {
@@ -69,9 +87,10 @@ impl ArchiveSearchService {
         }
 
         let limit = request.limit.max(1);
-        let mut hits = self
+        let candidate_limit = expanded_archive_limit(limit);
+        let lexical_hits = self
             .read_store
-            .search_candidates(query_text, limit, &request.filters)
+            .search_candidates(query_text, candidate_limit, &request.filters)
             .map_err(OpenArchiveError::from)?
             .into_iter()
             .map(|candidate| ArchiveSearchHit {
@@ -104,18 +123,152 @@ impl ArchiveSearchService {
                 score: candidate.score_hint as f32 / 100.0,
             })
             .collect::<Vec<_>>();
+        let mut hits = group_archive_hits(lexical_hits);
 
-        hits.sort_by(|left, right| {
-            right
-                .score
-                .total_cmp(&left.score)
-                .then_with(|| left.artifact_id.cmp(&right.artifact_id))
-                .then_with(|| left.snippet.cmp(&right.snippet))
-        });
+        if should_supplement_archive_hits(&request.filters, query_text, hits.len(), limit) {
+            let semantic_hits = self.semantic_archive_hits(query_text, &request.filters, limit)?;
+            append_unique_hits(&mut hits, group_archive_hits(semantic_hits), limit);
+        }
+
         hits.truncate(limit);
 
         Ok(ArchiveSearchResponse { hits })
     }
+
+    fn semantic_archive_hits(
+        &self,
+        query_text: &str,
+        filters: &SearchFilters,
+        limit: usize,
+    ) -> Result<Vec<ArchiveSearchHit>> {
+        let Some(semantic_store) = &self.semantic_store else {
+            return Ok(Vec::new());
+        };
+        let Some(provider) = &self.embedding_provider else {
+            return Ok(Vec::new());
+        };
+
+        let mut query_vectors = match provider.embed_texts(&[query_text.to_string()]) {
+            Ok(vectors) => vectors,
+            Err(err) => {
+                warn!(
+                    "archive semantic fallback skipped after embedding failure from provider={} model={}: {}",
+                    provider.provider_name(),
+                    provider.model_name(),
+                    err
+                );
+                return Ok(Vec::new());
+            }
+        };
+        let query_vector = query_vectors.pop().unwrap_or_default();
+        if query_vector.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let semantic_results = semantic_store
+            .search_objects_by_embedding(
+                &ObjectSearchFilters {
+                    query: None,
+                    object_type: filters.object_type,
+                    candidate_key: None,
+                    artifact_id: None,
+                },
+                &query_vector,
+                expanded_archive_limit(limit),
+            )
+            .map_err(OpenArchiveError::from)?;
+
+        Ok(semantic_results
+            .into_iter()
+            .map(|result| {
+                let snippet = archive_semantic_snippet(&result);
+                ArchiveSearchHit {
+                artifact_id: result.artifact_id,
+                match_kind: SearchMatchKind::DerivedObject {
+                    derived_object_id: result.derived_object_id,
+                    derived_type: result.derived_object_type,
+                },
+                snippet,
+                score: result.score.unwrap_or_default(),
+            }})
+            .collect())
+    }
+}
+
+fn expanded_archive_limit(limit: usize) -> usize {
+    limit.saturating_mul(8).clamp(limit.max(1), 200)
+}
+
+fn should_supplement_archive_hits(
+    filters: &SearchFilters,
+    query_text: &str,
+    current_hits: usize,
+    limit: usize,
+) -> bool {
+    if filters.source_type.is_some()
+        || filters.tag.is_some()
+        || filters.alias.is_some()
+        || filters.path_prefix.is_some()
+    {
+        return false;
+    }
+
+    current_hits < limit && query_text.split_whitespace().count() >= 3
+}
+
+fn archive_semantic_snippet(result: &DerivedObjectSearchResult) -> String {
+    result
+        .title
+        .clone()
+        .or_else(|| result.body_text.clone())
+        .unwrap_or_else(|| result.derived_object_type.as_str().to_string())
+}
+
+fn group_archive_hits(hits: Vec<ArchiveSearchHit>) -> Vec<ArchiveSearchHit> {
+    use std::collections::HashMap;
+
+    let mut best_by_artifact = HashMap::new();
+    for hit in hits {
+        match best_by_artifact.get_mut(&hit.artifact_id) {
+            Some(existing) => {
+                if archive_hit_cmp(&hit, existing).is_lt() {
+                    *existing = hit;
+                }
+            }
+            None => {
+                best_by_artifact.insert(hit.artifact_id.clone(), hit);
+            }
+        }
+    }
+
+    let mut grouped = best_by_artifact.into_values().collect::<Vec<_>>();
+    grouped.sort_by(archive_hit_cmp);
+    grouped
+}
+
+fn append_unique_hits(
+    hits: &mut Vec<ArchiveSearchHit>,
+    extra_hits: Vec<ArchiveSearchHit>,
+    limit: usize,
+) {
+    for hit in extra_hits {
+        if hits.iter().any(|existing| existing.artifact_id == hit.artifact_id) {
+            continue;
+        }
+        hits.push(hit);
+        if hits.len() >= limit {
+            break;
+        }
+    }
+    hits.sort_by(archive_hit_cmp);
+}
+
+fn archive_hit_cmp(left: &ArchiveSearchHit, right: &ArchiveSearchHit) -> std::cmp::Ordering {
+    right
+        .score
+        .total_cmp(&left.score)
+        .then_with(|| left.artifact_id.cmp(&right.artifact_id))
+        .then_with(|| left.snippet.cmp(&right.snippet))
 }
 
 pub struct ObjectSearchService {
@@ -488,6 +641,55 @@ mod tests {
     }
 
     #[test]
+    fn search_groups_duplicate_artifact_hits_to_best_match() {
+        let service = ArchiveSearchService::new(Arc::new(MockSearchReadStore {
+            candidates: vec![
+                ArchiveSearchCandidate {
+                    artifact_id: "artifact-1".to_string(),
+                    match_record_id: "segment-1".to_string(),
+                    match_kind: SearchCandidateKind::SegmentExcerpt,
+                    snippet: "segment hit".to_string(),
+                    score_hint: 200,
+                },
+                ArchiveSearchCandidate {
+                    artifact_id: "artifact-1".to_string(),
+                    match_record_id: "derived-1".to_string(),
+                    match_kind: SearchCandidateKind::DerivedObject {
+                        derived_type: DerivedObjectType::Summary,
+                    },
+                    snippet: "summary hit".to_string(),
+                    score_hint: 300,
+                },
+                ArchiveSearchCandidate {
+                    artifact_id: "artifact-2".to_string(),
+                    match_record_id: "artifact-2".to_string(),
+                    match_kind: SearchCandidateKind::ArtifactTitle,
+                    snippet: "title hit".to_string(),
+                    score_hint: 250,
+                },
+            ],
+        }));
+
+        let response = service
+            .search(ArchiveSearchRequest {
+                query_text: "artifact".to_string(),
+                limit: 10,
+                filters: SearchFilters::default(),
+            })
+            .expect("search should succeed");
+
+        assert_eq!(response.hits.len(), 2);
+        assert_eq!(response.hits[0].artifact_id, "artifact-1");
+        assert!(matches!(
+            response.hits[0].match_kind,
+            SearchMatchKind::DerivedObject {
+                derived_object_id: _,
+                derived_type: DerivedObjectType::Summary
+            }
+        ));
+    }
+
+    #[test]
     fn search_maps_imported_external_link_hits() {
         let service = ArchiveSearchService::new(Arc::new(MockSearchReadStore {
             candidates: vec![ArchiveSearchCandidate {
@@ -511,6 +713,33 @@ mod tests {
         assert!(matches!(
             response.hits[0].match_kind,
             SearchMatchKind::ImportedExternalLink { ref link_id } if link_id == "link-1"
+        ));
+    }
+
+    #[test]
+    fn search_falls_back_to_semantic_object_hits_when_lexical_archive_hits_are_sparse() {
+        let service = ArchiveSearchService::with_semantic_fallback(
+            Arc::new(MockSearchReadStore { candidates: Vec::new() }),
+            Arc::new(MockObjectSearchStore),
+            Some(Arc::new(StubEmbeddingProvider::new("stub".to_string(), 8))),
+        );
+
+        let response = service
+            .search(ArchiveSearchRequest {
+                query_text: "memory retrieval question".to_string(),
+                limit: 10,
+                filters: SearchFilters::default(),
+            })
+            .expect("semantic fallback search should succeed");
+
+        assert_eq!(response.hits.len(), 1);
+        assert_eq!(response.hits[0].artifact_id, "artifact-1");
+        assert!(matches!(
+            response.hits[0].match_kind,
+            SearchMatchKind::DerivedObject {
+                derived_object_id: _,
+                derived_type: DerivedObjectType::Memory
+            }
         ));
     }
 
