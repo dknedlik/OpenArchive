@@ -43,9 +43,10 @@ use crate::storage::writeback_store::{
     NewAgentEntity, NewAgentMemory, NewArchiveLink, UpdateObjectStatus, WritebackStore,
 };
 use crate::storage::{
-    ArchiveRetrievalStore, ArtifactReadStore, ImportWriteResult, ImportWriteStore,
-    ImportedArtifact, NewImportedNoteAlias, NewImportedNoteLink, NewImportedNoteProperty,
-    NewImportedNoteTag, WriteImportSet,
+    ArchiveRetrievalStore, ArchiveStatusSnapshot, ArtifactEnrichmentCount, ArtifactReadStore,
+    ArtifactSourceCount, EnrichmentJobCount, ImportWriteResult, ImportWriteStore, ImportedArtifact,
+    NewImportedNoteAlias, NewImportedNoteLink, NewImportedNoteProperty, NewImportedNoteTag,
+    OperatorStore, WriteImportSet,
 };
 use crate::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 
@@ -68,6 +69,10 @@ pub struct SqliteEnrichmentJobStore {
 }
 
 pub struct SqliteRetrievalReadStore {
+    config: SqliteConfig,
+}
+
+pub struct SqliteOperatorStore {
     config: SqliteConfig,
 }
 
@@ -105,6 +110,12 @@ impl SqliteRetrievalReadStore {
     }
 }
 
+impl SqliteOperatorStore {
+    pub fn new(config: SqliteConfig) -> Self {
+        Self { config }
+    }
+}
+
 impl SqliteWritebackStore {
     pub fn new(config: SqliteConfig) -> Self {
         Self { config }
@@ -120,6 +131,10 @@ fn db_err(config: &SqliteConfig, source: rusqlite::Error) -> StorageError {
         path: config.path.display().to_string(),
         source: Box::new(source),
     })
+}
+
+fn sqlite_count(value: i64, column: usize) -> rusqlite::Result<usize> {
+    usize::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(column, value))
 }
 
 fn is_sqlite_contention_error_message(message: &str) -> bool {
@@ -185,6 +200,10 @@ fn parse_source_type(value: String) -> rusqlite::Result<SourceType> {
 
 fn parse_enrichment_status(value: String) -> rusqlite::Result<EnrichmentStatus> {
     EnrichmentStatus::parse(&value).ok_or_else(|| invalid_enum("enrichment_status", value))
+}
+
+fn parse_job_status(value: String) -> rusqlite::Result<crate::storage::JobStatus> {
+    crate::storage::JobStatus::parse(&value).ok_or_else(|| invalid_enum("job_status", value))
 }
 
 fn parse_artifact_class(value: String) -> rusqlite::Result<ArtifactClass> {
@@ -1327,6 +1346,82 @@ impl ArtifactReadStore for SqliteArtifactReadStore {
     ) -> StorageResult<Option<LoadedArtifactForEnrichment>> {
         let connection = open_connection(&self.config)?;
         load_artifact_for_enrichment_record(&connection, artifact_id)
+    }
+}
+
+impl OperatorStore for SqliteOperatorStore {
+    fn load_archive_status(&self) -> StorageResult<ArchiveStatusSnapshot> {
+        let connection = open_connection(&self.config)?;
+        let artifact_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM oa_artifact", [], |row| row.get(0))
+            .map_err(|source| db_err(&self.config, source))?;
+        let mut artifact_source_stmt = connection
+            .prepare(
+                "SELECT source_type, COUNT(*) \
+                 FROM oa_artifact \
+                 GROUP BY source_type \
+                 ORDER BY source_type",
+            )
+            .map_err(|source| db_err(&self.config, source))?;
+        let artifacts_by_source = artifact_source_stmt
+            .query_map([], |row| {
+                let count: i64 = row.get(1)?;
+                Ok(ArtifactSourceCount {
+                    source_type: parse_source_type(row.get(0)?)?,
+                    count: sqlite_count(count, 1)?,
+                })
+            })
+            .map_err(|source| db_err(&self.config, source))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|source| db_err(&self.config, source))?;
+
+        let mut artifact_status_stmt = connection
+            .prepare(
+                "SELECT enrichment_status, COUNT(*) \
+                 FROM oa_artifact \
+                 GROUP BY enrichment_status \
+                 ORDER BY enrichment_status",
+            )
+            .map_err(|source| db_err(&self.config, source))?;
+        let artifacts_by_enrichment_status = artifact_status_stmt
+            .query_map([], |row| {
+                let count: i64 = row.get(1)?;
+                Ok(ArtifactEnrichmentCount {
+                    enrichment_status: parse_enrichment_status(row.get(0)?)?,
+                    count: sqlite_count(count, 1)?,
+                })
+            })
+            .map_err(|source| db_err(&self.config, source))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|source| db_err(&self.config, source))?;
+
+        let mut job_status_stmt = connection
+            .prepare(
+                "SELECT job_status, COUNT(*) \
+                 FROM oa_enrichment_job \
+                 GROUP BY job_status \
+                 ORDER BY job_status",
+            )
+            .map_err(|source| db_err(&self.config, source))?;
+        let jobs_by_status = job_status_stmt
+            .query_map([], |row| {
+                let count: i64 = row.get(1)?;
+                Ok(EnrichmentJobCount {
+                    job_status: parse_job_status(row.get(0)?)?,
+                    count: sqlite_count(count, 1)?,
+                })
+            })
+            .map_err(|source| db_err(&self.config, source))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|source| db_err(&self.config, source))?;
+
+        Ok(ArchiveStatusSnapshot {
+            artifact_count: sqlite_count(artifact_count, 0)
+                .map_err(|source| db_err(&self.config, source))?,
+            artifacts_by_source,
+            artifacts_by_enrichment_status,
+            jobs_by_status,
+        })
     }
 }
 

@@ -20,13 +20,13 @@ use crate::processor::{
 use crate::storage::{
     ArchiveRetrievalStore, ArchiveSearchReadStore, ArtifactReadStore,
     CompositeDerivedObjectSearchStore, EnrichmentJobLifecycleStore, EnrichmentStateStore,
-    ImportWriteStore, OracleArchiveRetrievalStore, OracleArtifactReadStore,
+    ImportWriteStore, OperatorStore, OracleArchiveRetrievalStore, OracleArtifactReadStore,
     OracleDerivedMetadataStore, OracleEnrichmentJobStore, OracleImportWriteStore,
-    PostgresArtifactReadStore, PostgresDerivedMetadataStore, PostgresDerivedObjectEmbeddingStore,
-    PostgresEnrichmentJobStore, PostgresImportWriteStore, PostgresRetrievalReadStore,
-    PostgresWritebackStore, SqliteArtifactReadStore, SqliteDerivedMetadataStore,
-    SqliteEnrichmentJobStore, SqliteImportWriteStore, SqliteRetrievalReadStore,
-    SqliteWritebackStore,
+    OracleOperatorStore, PostgresArtifactReadStore, PostgresDerivedMetadataStore,
+    PostgresDerivedObjectEmbeddingStore, PostgresEnrichmentJobStore, PostgresImportWriteStore,
+    PostgresOperatorStore, PostgresRetrievalReadStore, PostgresWritebackStore,
+    SqliteArtifactReadStore, SqliteDerivedMetadataStore, SqliteEnrichmentJobStore,
+    SqliteImportWriteStore, SqliteOperatorStore, SqliteRetrievalReadStore, SqliteWritebackStore,
 };
 use crate::vector::QdrantVectorStore;
 
@@ -51,6 +51,7 @@ pub struct ServiceBundle {
     pub processor_factory: Arc<dyn ArtifactProcessorFactory>,
     pub embedding_store: Option<Arc<dyn crate::storage::DerivedObjectEmbeddingStore>>,
     pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    pub operator_store: Arc<dyn OperatorStore + Send + Sync>,
 }
 
 fn build_processor_factory(
@@ -174,6 +175,8 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 Arc::new(PostgresImportWriteStore::new(pg_config.clone()));
             let read_store: Arc<dyn ArtifactReadStore + Send + Sync> =
                 Arc::new(PostgresArtifactReadStore::new(pg_config.clone()));
+            let operator_store: Arc<dyn OperatorStore + Send + Sync> =
+                Arc::new(PostgresOperatorStore::new(pg_config.clone()));
             let retrieval_impl = Arc::new(PostgresRetrievalReadStore::new(pg_config.clone()));
             let retrieval_store: Arc<dyn ArchiveRetrievalStore + Send + Sync> =
                 retrieval_impl.clone();
@@ -252,6 +255,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 processor_factory,
                 embedding_store,
                 embedding_provider,
+                operator_store,
             })
         }
         RelationalStoreConfig::Sqlite(sqlite_config) => {
@@ -265,6 +269,8 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 Arc::new(SqliteImportWriteStore::new(sqlite_config.clone()));
             let read_store: Arc<dyn ArtifactReadStore + Send + Sync> =
                 Arc::new(SqliteArtifactReadStore::new(sqlite_config.clone()));
+            let operator_store: Arc<dyn OperatorStore + Send + Sync> =
+                Arc::new(SqliteOperatorStore::new(sqlite_config.clone()));
             let retrieval_impl = Arc::new(SqliteRetrievalReadStore::new(sqlite_config.clone()));
             let retrieval_store: Arc<dyn ArchiveRetrievalStore + Send + Sync> =
                 retrieval_impl.clone();
@@ -339,6 +345,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 processor_factory,
                 embedding_store,
                 embedding_provider,
+                operator_store,
             })
         }
         RelationalStoreConfig::Oracle(db_config) => {
@@ -353,6 +360,8 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 Arc::new(OracleImportWriteStore::new(db_config.clone()));
             let read_store: Arc<dyn ArtifactReadStore + Send + Sync> =
                 Arc::new(OracleArtifactReadStore::new(db_config.clone()));
+            let operator_store: Arc<dyn OperatorStore + Send + Sync> =
+                Arc::new(OracleOperatorStore::new(db_config.clone()));
             let retrieval_store: Arc<dyn ArchiveRetrievalStore> =
                 Arc::new(OracleArchiveRetrievalStore::new(db_config.clone()));
             let processor_factory = build_processor_factory(&config.inference)?;
@@ -381,6 +390,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 processor_factory,
                 embedding_store: None,
                 embedding_provider: None,
+                operator_store,
             })
         }
     }

@@ -627,6 +627,9 @@ pub enum ParserError {
     #[error("invalid Obsidian vault: {detail}")]
     InvalidObsidianVault { detail: String },
 
+    #[error("unsupported payload: {detail}")]
+    UnsupportedPayload { detail: String },
+
     #[error("invalid frontmatter in note {note_path}: {detail}")]
     InvalidFrontmatter { note_path: String, detail: String },
 

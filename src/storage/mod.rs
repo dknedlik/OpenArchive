@@ -29,6 +29,7 @@ pub mod enrichment_state_store;
 pub mod import_store;
 pub mod imported_note_store;
 pub mod job_store;
+pub mod operator_store;
 pub mod oracle;
 pub mod postgres;
 pub mod retrieval_read_store;
@@ -51,14 +52,15 @@ pub use enrichment_state_store::EnrichmentStateStore;
 pub use import_store::{ImportPayloadStore, ImportStore};
 pub use imported_note_store::ImportedNoteMetadataStore;
 pub use job_store::{EnrichmentJobLifecycleStore, EnrichmentJobStore};
+pub use operator_store::OperatorStore;
 pub use oracle::{
     OracleArchiveRetrievalStore, OracleArtifactReadStore, OracleDerivedMetadataStore,
-    OracleEnrichmentJobStore, OracleImportWriteStore,
+    OracleEnrichmentJobStore, OracleImportWriteStore, OracleOperatorStore,
 };
 pub use postgres::{
     PostgresArchiveRetrievalStore, PostgresArtifactReadStore, PostgresDerivedMetadataStore,
     PostgresDerivedObjectEmbeddingStore, PostgresEnrichmentJobStore, PostgresImportWriteStore,
-    PostgresRetrievalReadStore, PostgresWritebackStore,
+    PostgresOperatorStore, PostgresRetrievalReadStore, PostgresWritebackStore,
 };
 pub use retrieval_read_store::{
     ArchiveSearchCandidate, ArchiveSearchReadStore, ArtifactContextDerivedObject,
@@ -76,28 +78,28 @@ pub use review_read_store::{
 pub use segment_store::SegmentStore;
 pub use sqlite::{
     SqliteArtifactReadStore, SqliteDerivedMetadataStore, SqliteEnrichmentJobStore,
-    SqliteImportWriteStore, SqliteRetrievalReadStore, SqliteWritebackStore,
+    SqliteImportWriteStore, SqliteOperatorStore, SqliteRetrievalReadStore, SqliteWritebackStore,
 };
 pub use types::{
-    ArtifactClass, ArtifactExtractPayload, ArtifactExtractionResult, ArtifactIngestResult,
-    ArtifactLinkRecord, ArtifactLinkType, ArtifactListFilters, ArtifactListItem,
-    ArtifactReconcilePayload, ArtifactStatus, CandidateEntity, CandidateRelationship, ClaimedJob,
-    ClassificationObjectJson, ConversationWindowRef, DerivationRunStatus, DerivationRunType,
-    DerivedObjectEmbeddingItem, DerivedObjectEmbeddingPayload, DerivedObjectPayload,
-    DerivedObjectType, EnrichmentStatus, EnrichmentTier, EntityObjectJson, ExtractedClassification,
-    ExtractedMemory, ImportStatus, ImportedNoteAliasRecord, ImportedNoteLinkKind,
-    ImportedNoteLinkRecord, ImportedNoteLinkResolutionStatus, ImportedNoteLinkTargetKind,
-    ImportedNoteMetadata, ImportedNoteMetadataWriteSet, ImportedNotePropertyRecord,
-    ImportedNotePropertyValueKind, ImportedNoteTagRecord, ImportedNoteTagSourceKind,
-    InputScopeType, JobStatus, JobType, LoadedArtifactForEnrichment, LoadedArtifactRecord,
-    LoadedParticipant, LoadedSegment, MemoryObjectJson, NewArtifact, NewDerivationRun,
-    NewDerivedObject, NewDerivedObjectEmbedding, NewEnrichmentBatch, NewEnrichmentJob, NewImport,
-    NewImportObjectRef, NewImportedNoteAlias, NewImportedNoteLink, NewImportedNoteProperty,
-    NewImportedNoteTag, NewParticipant, NewSegment, ObjectStatus, OriginKind, PayloadFormat,
-    PersistedEnrichmentBatch, ReconciliationDecision, ReconciliationDecisionKind,
-    RelationshipObjectJson, RetrievalIntent, RetrievedContextItem, RetryOutcome, ScopeType,
-    SegmentSpanRef, SegmentType, SourceType, SummaryObjectJson, TimelineEntry, TimelineFilters,
-    TopicThreadRef,
+    ArchiveStatusSnapshot, ArtifactClass, ArtifactEnrichmentCount, ArtifactExtractPayload,
+    ArtifactExtractionResult, ArtifactIngestResult, ArtifactLinkRecord, ArtifactLinkType,
+    ArtifactListFilters, ArtifactListItem, ArtifactReconcilePayload, ArtifactSourceCount,
+    ArtifactStatus, CandidateEntity, CandidateRelationship, ClaimedJob, ClassificationObjectJson,
+    ConversationWindowRef, DerivationRunStatus, DerivationRunType, DerivedObjectEmbeddingItem,
+    DerivedObjectEmbeddingPayload, DerivedObjectPayload, DerivedObjectType, EnrichmentJobCount,
+    EnrichmentStatus, EnrichmentTier, EntityObjectJson, ExtractedClassification, ExtractedMemory,
+    ImportStatus, ImportedNoteAliasRecord, ImportedNoteLinkKind, ImportedNoteLinkRecord,
+    ImportedNoteLinkResolutionStatus, ImportedNoteLinkTargetKind, ImportedNoteMetadata,
+    ImportedNoteMetadataWriteSet, ImportedNotePropertyRecord, ImportedNotePropertyValueKind,
+    ImportedNoteTagRecord, ImportedNoteTagSourceKind, InputScopeType, JobStatus, JobType,
+    LoadedArtifactForEnrichment, LoadedArtifactRecord, LoadedParticipant, LoadedSegment,
+    MemoryObjectJson, NewArtifact, NewDerivationRun, NewDerivedObject, NewDerivedObjectEmbedding,
+    NewEnrichmentBatch, NewEnrichmentJob, NewImport, NewImportObjectRef, NewImportedNoteAlias,
+    NewImportedNoteLink, NewImportedNoteProperty, NewImportedNoteTag, NewParticipant, NewSegment,
+    ObjectStatus, OriginKind, PayloadFormat, PersistedEnrichmentBatch, ReconciliationDecision,
+    ReconciliationDecisionKind, RelationshipObjectJson, RetrievalIntent, RetrievedContextItem,
+    RetryOutcome, ScopeType, SegmentSpanRef, SegmentType, SourceType, SummaryObjectJson,
+    TimelineEntry, TimelineFilters, TopicThreadRef,
 };
 pub use writeback_store::{
     NewAgentEntity, NewAgentMemory, NewArchiveLink, UpdateObjectStatus, WritebackStore,

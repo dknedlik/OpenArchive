@@ -1256,6 +1256,32 @@ pub struct ArtifactListItem {
     pub enrichment_status: EnrichmentStatus,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactSourceCount {
+    pub source_type: SourceType,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactEnrichmentCount {
+    pub enrichment_status: EnrichmentStatus,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrichmentJobCount {
+    pub job_status: JobStatus,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveStatusSnapshot {
+    pub artifact_count: usize,
+    pub artifacts_by_source: Vec<ArtifactSourceCount>,
+    pub artifacts_by_enrichment_status: Vec<ArtifactEnrichmentCount>,
+    pub jobs_by_status: Vec<EnrichmentJobCount>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactListFilters {
     pub source_type: Option<SourceType>,

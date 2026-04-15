@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::{Cursor, Read};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -6,7 +7,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::domain::SourceTimestamp;
-use crate::error::OpenArchiveError;
+use crate::error::{OpenArchiveError, ParserError};
 use crate::object_store::{NewObject, ObjectStore, PutObjectResult};
 use crate::parser::{self, document::DocumentFormat, ParsedConversation, ParsedMessage};
 use crate::storage::{
@@ -16,6 +17,129 @@ use crate::storage::{
     NewImportedNoteLink, NewImportedNoteProperty, NewImportedNoteTag, NewParticipant, NewSegment,
     PayloadFormat, SegmentType, SourceType, WriteArtifactSet, WriteImportSet,
 };
+
+/// Represents the detected shape of a ChatGPT payload.
+#[derive(Debug)]
+enum ChatGptPayloadShape<'a> {
+    /// Raw JSON bytes (conversations.json content directly).
+    RawJson { bytes: &'a [u8] },
+    /// Zip archive containing conversations.json.
+    Zip {
+        zip_bytes: &'a [u8],
+        conversations_json: Vec<u8>,
+    },
+}
+
+/// Checks if bytes look like a ChatGPT export zip without extracting content.
+///
+/// Returns true if:
+/// - Bytes start with zip local file header magic (PK\x03\x04)
+/// - Archive contains an entry named conversations.json (root-level or nested)
+///
+/// This is a lightweight check for CLI auto-detection and routing.
+pub fn looks_like_chatgpt_zip(bytes: &[u8]) -> bool {
+    // Zip local file header magic: PK\x03\x04
+    if bytes.len() < 4 || bytes[0..4] != *b"PK\x03\x04" {
+        return false;
+    }
+
+    let reader = Cursor::new(bytes);
+    let Ok(mut archive) = zip::ZipArchive::new(reader) else {
+        return false;
+    };
+
+    for index in 0..archive.len() {
+        let Ok(file) = archive.by_index(index) else {
+            continue;
+        };
+        let name = file.name();
+        // Root-level match
+        if name.eq_ignore_ascii_case("conversations.json") {
+            return true;
+        }
+        // Basename match anywhere in tree
+        if std::path::Path::new(name)
+            .file_name()
+            .map(|n| n.eq_ignore_ascii_case("conversations.json"))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Detects whether the payload is a zip archive or raw JSON.
+///
+/// For zip archives, extracts the conversations.json entry.
+/// Returns an error if the zip is corrupt or missing conversations.json.
+fn sniff_chatgpt_payload(bytes: &[u8]) -> Result<ChatGptPayloadShape<'_>, OpenArchiveError> {
+    // Zip local file header magic: PK\x03\x04
+    if bytes.len() < 4 || bytes[0..4] != *b"PK\x03\x04" {
+        // Not a zip - treat as raw JSON
+        return Ok(ChatGptPayloadShape::RawJson { bytes });
+    }
+
+    // It's a zip - now validate it and extract conversations.json
+    let reader = Cursor::new(bytes);
+    let mut archive =
+        zip::ZipArchive::new(reader).map_err(|e| ParserError::UnsupportedPayload {
+            detail: format!("corrupt zip archive: {e}"),
+        })?;
+
+    // First pass: prefer root-level match
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|e| ParserError::UnsupportedPayload {
+                detail: format!("failed to read zip entry {index}: {e}"),
+            })?;
+        if file.name().eq_ignore_ascii_case("conversations.json") {
+            let mut conversations_json = Vec::new();
+            file.read_to_end(&mut conversations_json).map_err(|e| {
+                ParserError::UnsupportedPayload {
+                    detail: format!("failed to read conversations.json from zip: {e}"),
+                }
+            })?;
+            return Ok(ChatGptPayloadShape::Zip {
+                zip_bytes: bytes,
+                conversations_json,
+            });
+        }
+    }
+
+    // Second pass: accept basename match anywhere in the tree
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|e| ParserError::UnsupportedPayload {
+                detail: format!("failed to read zip entry {index}: {e}"),
+            })?;
+        let basename_matches = std::path::Path::new(file.name())
+            .file_name()
+            .map(|name| name.eq_ignore_ascii_case("conversations.json"))
+            .unwrap_or(false);
+        if basename_matches {
+            let mut conversations_json = Vec::new();
+            file.read_to_end(&mut conversations_json).map_err(|e| {
+                ParserError::UnsupportedPayload {
+                    detail: format!("failed to read conversations.json from zip: {e}"),
+                }
+            })?;
+            return Ok(ChatGptPayloadShape::Zip {
+                zip_bytes: bytes,
+                conversations_json,
+            });
+        }
+    }
+
+    // Valid zip but no conversations.json
+    Err(ParserError::UnsupportedPayload {
+        detail: "chatgpt zip missing conversations.json".to_string(),
+    }
+    .into())
+}
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -49,15 +173,37 @@ pub fn import_payload<S, O>(
     object_store: &O,
     source_type: SourceType,
     payload_format: PayloadFormat,
-    payload_bytes: &[u8],
+    payload_blob: &[u8],
 ) -> Result<ImportResponse, OpenArchiveError>
 where
     S: ImportWriteStore + ?Sized,
     O: ObjectStore + ?Sized,
 {
-    let spec = source_import_spec(source_type, payload_format);
-    let parsed = parse_conversations_for_source(source_type, payload_bytes)?;
-    let prepared = build_import_set(payload_bytes, spec, parsed, object_store)?;
+    import_payload_with_parse_bytes(
+        store,
+        object_store,
+        source_type,
+        payload_format,
+        payload_blob,
+        payload_blob,
+    )
+}
+
+fn import_payload_with_parse_bytes<S, O>(
+    store: &S,
+    object_store: &O,
+    source_type: SourceType,
+    payload_format: PayloadFormat,
+    payload_blob: &[u8],
+    parse_bytes: &[u8],
+) -> Result<ImportResponse, OpenArchiveError>
+where
+    S: ImportWriteStore + ?Sized,
+    O: ObjectStore + ?Sized,
+{
+    let spec = source_import_spec(source_type, payload_format)?;
+    let parsed = parse_conversations_for_source(source_type, parse_bytes)?;
+    let prepared = build_import_set(payload_blob, spec, parsed, object_store)?;
     let result = match store.write_import(prepared.write_set) {
         Ok(result) => result,
         Err(err) => {
@@ -90,12 +236,26 @@ where
     S: ImportWriteStore + ?Sized,
     O: ObjectStore + ?Sized,
 {
-    import_payload(
+    let shape = sniff_chatgpt_payload(payload_bytes)?;
+    let format = match &shape {
+        ChatGptPayloadShape::RawJson { .. } => PayloadFormat::ChatGptExportJson,
+        ChatGptPayloadShape::Zip { .. } => PayloadFormat::ChatGptExportZip,
+    };
+    let (payload_blob, parse_input): (&[u8], &[u8]) = match &shape {
+        ChatGptPayloadShape::RawJson { bytes } => (*bytes, *bytes),
+        ChatGptPayloadShape::Zip {
+            zip_bytes,
+            conversations_json,
+        } => (*zip_bytes, conversations_json.as_slice()),
+    };
+
+    import_payload_with_parse_bytes(
         store,
         object_store,
         SourceType::ChatGptExport,
-        PayloadFormat::ChatGptExportJson,
-        payload_bytes,
+        format,
+        payload_blob,
+        parse_input,
     )
 }
 
@@ -200,7 +360,7 @@ where
     S: ImportWriteStore + ?Sized,
     O: ObjectStore + ?Sized,
 {
-    let spec = source_import_spec(SourceType::ObsidianVault, PayloadFormat::ObsidianVaultZip);
+    let spec = source_import_spec(SourceType::ObsidianVault, PayloadFormat::ObsidianVaultZip)?;
     let parsed = parser::obsidian::parse_vault_zip(payload_bytes)?;
     let prepared = build_obsidian_import_set(payload_bytes, spec, parsed, object_store)?;
     let result = match store.write_import(prepared.write_set) {
@@ -238,7 +398,7 @@ where
     S: ImportWriteStore + ?Sized,
     O: ObjectStore + ?Sized,
 {
-    let spec = source_import_spec(source_type, payload_format);
+    let spec = source_import_spec(source_type, payload_format)?;
     let parsed = parser::document::parse_document(payload_bytes, document_format)?;
     let prepared = build_document_import_set(payload_bytes, spec, parsed, object_store)?;
     let result = match store.write_import(prepared.write_set) {
@@ -588,13 +748,26 @@ fn parse_conversations_for_source(
     parsed.map_err(OpenArchiveError::from)
 }
 
-fn source_import_spec(source_type: SourceType, payload_format: PayloadFormat) -> SourceImportSpec {
-    match source_type {
+fn source_import_spec(
+    source_type: SourceType,
+    payload_format: PayloadFormat,
+) -> Result<SourceImportSpec, OpenArchiveError> {
+    let spec = match source_type {
         SourceType::ChatGptExport => SourceImportSpec {
             source_type,
             payload_format,
             artifact_class: ArtifactClass::Conversation,
-            payload_mime_type: "application/json",
+            payload_mime_type: match payload_format {
+                PayloadFormat::ChatGptExportZip => "application/zip",
+                PayloadFormat::ChatGptExportJson | PayloadFormat::ChatGptExportCanonicalJson => {
+                    "application/json"
+                }
+                other => {
+                    return Err(OpenArchiveError::Invariant(format!(
+                        "unexpected payload_format for ChatGptExport: {other:?}"
+                    )))
+                }
+            },
             normalization_version: parser::CHATGPT_NORMALIZATION_VERSION,
             content_hash_version: parser::CHATGPT_CONTENT_HASH_VERSION,
             content_facets: parser::CHATGPT_CONTENT_FACETS,
@@ -664,7 +837,8 @@ fn source_import_spec(source_type: SourceType, payload_format: PayloadFormat) ->
                 "embeds",
             ],
         },
-    }
+    };
+    Ok(spec)
 }
 
 fn build_segment(
@@ -1659,5 +1833,419 @@ mod tests {
             err,
             OpenArchiveError::Parser(ParserError::EmptyExport)
         ));
+    }
+
+    // Tests for ChatGPT zip payload fidelity
+
+    fn chatgpt_export_zip() -> Vec<u8> {
+        let json_content = single_conversation_export();
+        let cursor = Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file("conversations.json", SimpleFileOptions::default())
+            .expect("file should start");
+        writer
+            .write_all(json_content.as_bytes())
+            .expect("content should write");
+        writer.finish().expect("zip should finish").into_inner()
+    }
+
+    fn chatgpt_export_zip_with_extra_files() -> Vec<u8> {
+        let json_content = single_conversation_export();
+        let cursor = Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file("README.txt", SimpleFileOptions::default())
+            .expect("file should start");
+        writer
+            .write_all(b"This is a ChatGPT export")
+            .expect("content should write");
+        writer
+            .start_file("conversations.json", SimpleFileOptions::default())
+            .expect("file should start");
+        writer
+            .write_all(json_content.as_bytes())
+            .expect("content should write");
+        writer.finish().expect("zip should finish").into_inner()
+    }
+
+    fn chatgpt_export_zip_missing_conversations() -> Vec<u8> {
+        let cursor = Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file("README.txt", SimpleFileOptions::default())
+            .expect("file should start");
+        writer
+            .write_all(b"Missing conversations.json")
+            .expect("content should write");
+        writer.finish().expect("zip should finish").into_inner()
+    }
+
+    #[test]
+    fn import_chatgpt_payload_accepts_zip_export() {
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+        let zip_bytes = chatgpt_export_zip();
+
+        let response = import_chatgpt_payload(&store, &object_store, &zip_bytes).unwrap();
+
+        assert_eq!(response.artifacts.len(), 1);
+
+        let captured = store.captured.lock().unwrap();
+        let import_set = captured.first().unwrap();
+
+        // Verify the zip format and mime type
+        assert_eq!(
+            import_set.payload_object.payload_format,
+            PayloadFormat::ChatGptExportZip
+        );
+        assert_eq!(import_set.payload_object.mime_type, "application/zip");
+
+        // Verify stored blob matches input zip bytes (via sha256)
+        let expected_sha256 = sha256_hex(&zip_bytes);
+        assert_eq!(import_set.payload_object.sha256, expected_sha256);
+
+        // Verify the parsed artifact matches what we'd get from raw JSON
+        let artifact = &import_set.artifact_sets[0].artifact;
+        assert_eq!(artifact.source_conversation_key.as_deref(), Some("conv-1"));
+        assert_eq!(import_set.artifact_sets[0].segments.len(), 2);
+    }
+
+    #[test]
+    fn import_chatgpt_payload_accepts_zip_with_extra_files() {
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+        let zip_bytes = chatgpt_export_zip_with_extra_files();
+
+        let response = import_chatgpt_payload(&store, &object_store, &zip_bytes).unwrap();
+
+        assert_eq!(response.artifacts.len(), 1);
+
+        let captured = store.captured.lock().unwrap();
+        let import_set = captured.first().unwrap();
+
+        assert_eq!(
+            import_set.payload_object.payload_format,
+            PayloadFormat::ChatGptExportZip
+        );
+        assert_eq!(import_set.payload_object.mime_type, "application/zip");
+    }
+
+    #[test]
+    fn import_chatgpt_payload_zip_missing_conversations_json_errors() {
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+        let zip_bytes = chatgpt_export_zip_missing_conversations();
+
+        let err = import_chatgpt_payload(&store, &object_store, &zip_bytes).unwrap_err();
+
+        // Should return UnsupportedPayload error
+        assert!(
+            matches!(
+                &err,
+                OpenArchiveError::Parser(ParserError::UnsupportedPayload { detail })
+                if detail.contains("conversations.json")
+            ),
+            "expected UnsupportedPayload error mentioning conversations.json, got: {err:?}"
+        );
+
+        // Verify no objects were left in the store
+        assert!(object_store.puts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn import_chatgpt_payload_zip_with_malformed_conversations_json_fails_on_parse() {
+        // Create a zip with malformed JSON inside
+        let cursor = Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file("conversations.json", SimpleFileOptions::default())
+            .expect("file should start");
+        writer
+            .write_all(br#"{"invalid": json}"#)
+            .expect("content should write");
+        let zip_bytes = writer.finish().expect("zip should finish").into_inner();
+
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+
+        let err = import_chatgpt_payload(&store, &object_store, &zip_bytes).unwrap_err();
+
+        // Parser fails before any object is stored
+        assert!(matches!(err, OpenArchiveError::Parser(_)));
+        // No objects should have been stored
+        assert!(object_store.puts.lock().unwrap().is_empty());
+        assert!(object_store.deletes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn import_chatgpt_payload_raw_json_still_uses_json_format() {
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+        let json_bytes = single_conversation_export().as_bytes();
+
+        let response = import_chatgpt_payload(&store, &object_store, json_bytes).unwrap();
+
+        assert_eq!(response.artifacts.len(), 1);
+
+        let captured = store.captured.lock().unwrap();
+        let import_set = captured.first().unwrap();
+
+        // Verify raw JSON still uses ChatGptExportJson format
+        assert_eq!(
+            import_set.payload_object.payload_format,
+            PayloadFormat::ChatGptExportJson
+        );
+        assert_eq!(import_set.payload_object.mime_type, "application/json");
+
+        // Verify stored blob matches input bytes
+        let expected_sha256 = sha256_hex(json_bytes);
+        assert_eq!(import_set.payload_object.sha256, expected_sha256);
+    }
+
+    #[test]
+    fn sniff_chatgpt_payload_detects_zip_by_magic() {
+        // Valid zip magic
+        let zip_bytes = chatgpt_export_zip();
+        assert!(zip_bytes.len() >= 4);
+        assert_eq!(&zip_bytes[0..4], &[0x50, 0x4B, 0x03, 0x04]);
+
+        let shape = sniff_chatgpt_payload(&zip_bytes).unwrap();
+        assert!(
+            matches!(shape, ChatGptPayloadShape::Zip { .. }),
+            "should detect zip by magic bytes"
+        );
+    }
+
+    #[test]
+    fn sniff_chatgpt_payload_detects_raw_json() {
+        let json_bytes = single_conversation_export().as_bytes();
+
+        let shape = sniff_chatgpt_payload(json_bytes).unwrap();
+        assert!(
+            matches!(shape, ChatGptPayloadShape::RawJson { bytes } if bytes == json_bytes),
+            "should detect raw JSON"
+        );
+    }
+
+    #[test]
+    fn sniff_chatgpt_payload_falls_back_to_raw_json_for_short_input() {
+        // Truncated zip header (less than 4 bytes with zip magic start)
+        let truncated = vec![0x50, 0x4B];
+
+        let shape = sniff_chatgpt_payload(&truncated).unwrap();
+        // Won't detect as zip because it's less than 4 bytes, will try JSON parsing
+        assert!(
+            matches!(shape, ChatGptPayloadShape::RawJson { .. }),
+            "short input should fall back to raw JSON"
+        );
+    }
+
+    #[test]
+    fn sniff_chatgpt_payload_handles_empty_bytes() {
+        let empty: &[u8] = b"";
+
+        let shape = sniff_chatgpt_payload(empty).unwrap();
+        assert!(
+            matches!(shape, ChatGptPayloadShape::RawJson { bytes } if bytes.is_empty()),
+            "empty bytes should fall back to raw JSON"
+        );
+    }
+
+    #[test]
+    fn sniff_chatgpt_payload_rejects_corrupt_zip_after_valid_magic() {
+        // Valid zip magic followed by garbage (valid magic, corrupt body)
+        let corrupt = b"PK\x03\x04garbage that is not a valid zip structure";
+
+        let err = sniff_chatgpt_payload(corrupt).unwrap_err();
+        // ZipArchive::new should fail and surface as UnsupportedPayload
+        assert!(
+            matches!(
+                &err,
+                OpenArchiveError::Parser(ParserError::UnsupportedPayload { detail })
+                if detail.contains("corrupt")
+            ),
+            "expected corrupt zip error, got: {err:?}"
+        );
+    }
+
+    // Tests for looks_like_chatgpt_zip helper
+
+    #[test]
+    fn looks_like_chatgpt_zip_detects_root_level_conversations() {
+        let zip_bytes = chatgpt_export_zip();
+        assert!(looks_like_chatgpt_zip(&zip_bytes));
+    }
+
+    #[test]
+    fn looks_like_chatgpt_zip_detects_nested_conversations() {
+        let json_content = single_conversation_export();
+        let cursor = Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file(
+                "chatgpt-export-2024-01-01/conversations.json",
+                SimpleFileOptions::default(),
+            )
+            .expect("file should start");
+        writer
+            .write_all(json_content.as_bytes())
+            .expect("content should write");
+        let zip_bytes = writer.finish().expect("zip should finish").into_inner();
+
+        assert!(looks_like_chatgpt_zip(&zip_bytes));
+    }
+
+    #[test]
+    fn looks_like_chatgpt_zip_rejects_zip_without_conversations() {
+        let cursor = Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file("README.txt", SimpleFileOptions::default())
+            .expect("file should start");
+        writer
+            .write_all(b"No conversations here")
+            .expect("content should write");
+        let zip_bytes = writer.finish().expect("zip should finish").into_inner();
+
+        assert!(!looks_like_chatgpt_zip(&zip_bytes));
+    }
+
+    #[test]
+    fn looks_like_chatgpt_zip_rejects_raw_json() {
+        let json_bytes = single_conversation_export().as_bytes();
+        assert!(!looks_like_chatgpt_zip(json_bytes));
+    }
+
+    #[test]
+    fn looks_like_chatgpt_zip_rejects_short_input() {
+        let truncated = vec![0x50, 0x4B];
+        assert!(!looks_like_chatgpt_zip(&truncated));
+    }
+
+    #[test]
+    fn looks_like_chatgpt_zip_rejects_corrupt_zip() {
+        let corrupt = b"PK\x03\x04garbage that is not a valid zip structure";
+        assert!(!looks_like_chatgpt_zip(corrupt));
+    }
+
+    #[test]
+    fn import_chatgpt_payload_accepts_nested_conversations_json() {
+        // Create a zip with nested conversations.json (third-party export format)
+        let json_content = single_conversation_export();
+        let cursor = Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file(
+                "chatgpt-export-2024-01-01/conversations.json",
+                SimpleFileOptions::default(),
+            )
+            .expect("file should start");
+        writer
+            .write_all(json_content.as_bytes())
+            .expect("content should write");
+        let zip_bytes = writer.finish().expect("zip should finish").into_inner();
+
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+
+        let response = import_chatgpt_payload(&store, &object_store, &zip_bytes).unwrap();
+
+        assert_eq!(response.artifacts.len(), 1);
+
+        let captured = store.captured.lock().unwrap();
+        let import_set = captured.first().unwrap();
+
+        // Verify the zip format and mime type
+        assert_eq!(
+            import_set.payload_object.payload_format,
+            PayloadFormat::ChatGptExportZip
+        );
+        assert_eq!(import_set.payload_object.mime_type, "application/zip");
+
+        // Verify the conversation was parsed correctly
+        let artifact = &import_set.artifact_sets[0].artifact;
+        assert_eq!(artifact.source_conversation_key.as_deref(), Some("conv-1"));
+    }
+
+    #[test]
+    fn import_chatgpt_payload_prefers_root_level_over_nested() {
+        // Create a zip with both root-level and nested conversations.json
+        // Should prefer the root-level one
+        let root_json = single_conversation_export();
+        let nested_json = multi_conversation_export(); // Different content
+        let cursor = Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+
+        // Add nested first
+        writer
+            .start_file(
+                "nested/folder/conversations.json",
+                SimpleFileOptions::default(),
+            )
+            .expect("file should start");
+        writer
+            .write_all(nested_json.as_bytes())
+            .expect("content should write");
+
+        // Add root-level second (should be preferred)
+        writer
+            .start_file("conversations.json", SimpleFileOptions::default())
+            .expect("file should start");
+        writer
+            .write_all(root_json.as_bytes())
+            .expect("content should write");
+
+        let zip_bytes = writer.finish().expect("zip should finish").into_inner();
+
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+
+        let response = import_chatgpt_payload(&store, &object_store, &zip_bytes).unwrap();
+
+        // Should get 1 artifact (from root-level single_conversation_export)
+        // not 2 artifacts (from nested multi_conversation_export)
+        assert_eq!(response.artifacts.len(), 1);
+    }
+
+    #[test]
+    fn import_chatgpt_payload_zip_produces_same_artifacts_as_raw_json() {
+        // Import as zip
+        let zip_store = MockStore::new();
+        let zip_object_store = MockObjectStore::new();
+        let zip_bytes = chatgpt_export_zip();
+        import_chatgpt_payload(&zip_store, &zip_object_store, &zip_bytes).unwrap();
+
+        // Import as raw JSON
+        let json_store = MockStore::new();
+        let json_object_store = MockObjectStore::new();
+        let json_bytes = single_conversation_export().as_bytes();
+        import_chatgpt_payload(&json_store, &json_object_store, json_bytes).unwrap();
+
+        // Compare artifact keys and segment counts
+        let zip_captured = zip_store.captured.lock().unwrap();
+        let json_captured = json_store.captured.lock().unwrap();
+
+        assert_eq!(
+            zip_captured[0].artifact_sets[0]
+                .artifact
+                .source_conversation_key,
+            json_captured[0].artifact_sets[0]
+                .artifact
+                .source_conversation_key,
+            "source_conversation_key should match between zip and JSON imports"
+        );
+
+        assert_eq!(
+            zip_captured[0].artifact_sets[0].segments.len(),
+            json_captured[0].artifact_sets[0].segments.len(),
+            "segment count should match between zip and JSON imports"
+        );
+
+        // Verify different blob hashes (zip vs JSON)
+        assert_ne!(
+            zip_captured[0].payload_object.sha256, json_captured[0].payload_object.sha256,
+            "zip and JSON should have different blob hashes"
+        );
     }
 }

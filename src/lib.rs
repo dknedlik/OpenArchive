@@ -28,3 +28,4 @@ pub use error::{
     ConfigError, DbError, EmbeddingError, MigrationsError, ObjectStoreError, OpenArchiveError,
     ParserError, Result, StorageError, WorkerError, WorkerResult,
 };
+pub use import_service::looks_like_chatgpt_zip;
