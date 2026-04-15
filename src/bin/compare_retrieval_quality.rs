@@ -349,7 +349,10 @@ fn print_report(comparisons: &[QueryComparison], limit: usize) {
         "Average semantic candidate-key overlap: {:.2}",
         semantic_candidate_overlap
     );
-    println!("Lexical top-1 agreement rate: {:.2}", lexical_top1_agreement);
+    println!(
+        "Lexical top-1 agreement rate: {:.2}",
+        lexical_top1_agreement
+    );
     println!("Merged top-1 agreement rate: {:.2}", merged_top1_agreement);
     println!(
         "Semantic top-1 agreement rate: {:.2}",
