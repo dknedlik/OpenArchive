@@ -5,5 +5,5 @@ set -eu
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
-echo "pre-push: running make verify"
+echo "pre-commit: running make verify"
 exec make verify
