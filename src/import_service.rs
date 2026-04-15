@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -386,6 +386,200 @@ where
     })
 }
 
+/// Import an Obsidian vault from a directory, storing a manifest instead of a synthetic zip.
+/// Preserves original file mtimes and stores content with fidelity.
+pub fn import_obsidian_vault_directory<S, O>(
+    store: &S,
+    object_store: &O,
+    directory_path: &std::path::Path,
+) -> Result<ImportResponse, OpenArchiveError>
+where
+    S: ImportWriteStore + ?Sized,
+    O: ObjectStore + ?Sized,
+{
+    use std::collections::BTreeMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::parser::obsidian::{
+        ObsidianVaultManifest, VaultDirectoryFile, VaultManifestFileEntry,
+        OBSIDIAN_VAULT_MANIFEST_VERSION,
+    };
+
+    // Parse the directory to get vault and file metadata
+    let (parsed_vault, files) = parser::obsidian::parse_vault_directory(directory_path)?;
+
+    // Store each file individually and build manifest entries
+    let mut manifest_files = BTreeMap::new();
+    let mut stored_blobs: Vec<crate::object_store::StoredObject> = Vec::new();
+
+    for VaultDirectoryFile {
+        relative_path,
+        content,
+        mtime_millis,
+        ..
+    } in &files
+    {
+        let content_bytes = content.as_bytes();
+        let content_hash = sha256_hex(content_bytes);
+        let blob_id = new_id("blob");
+
+        // Store the individual file content
+        let blob_result = object_store.put_object(crate::object_store::NewObject {
+            object_id: blob_id.clone(),
+            namespace: "obsidian-files".to_string(),
+            mime_type: "text/markdown".to_string(),
+            bytes: content_bytes.to_vec(),
+            sha256: content_hash.clone(),
+        })?;
+
+        let stored = blob_result.stored_object;
+        manifest_files.insert(
+            relative_path.clone(),
+            VaultManifestFileEntry {
+                size: content_bytes.len() as u64,
+                mtime_millis: *mtime_millis,
+                content_hash: content_hash.clone(),
+                provider: stored.provider.clone(),
+                storage_key: stored.storage_key.clone(),
+                mime_type: stored.mime_type.clone(),
+                stored_size_bytes: stored.size_bytes,
+                stored_sha256: stored.sha256.clone(),
+            },
+        );
+        stored_blobs.push(stored);
+    }
+
+    // Create the manifest
+    // Use milliseconds for consistency with other timestamps in the codebase
+    let captured_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| OpenArchiveError::Invariant("system time before epoch".to_string()))?
+        .as_millis() as i64;
+
+    let manifest = ObsidianVaultManifest {
+        version: OBSIDIAN_VAULT_MANIFEST_VERSION,
+        captured_at,
+        files: manifest_files,
+    };
+
+    // Generate import_id first - needed for artifact FK references
+    let import_id = new_id("import");
+
+    // Serialize manifest as the payload
+    let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(|err| {
+        OpenArchiveError::Invariant(format!("failed to serialize manifest: {err}"))
+    })?;
+    let manifest_sha256 = sha256_hex(&manifest_json);
+    let payload_object_id = new_id("payload");
+
+    // Store the manifest as the payload object
+    // Use match to ensure blob cleanup on failure
+    let payload_put = match persist_raw_payload(
+        object_store,
+        &payload_object_id,
+        &manifest_json,
+        &manifest_sha256,
+        "application/json",
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            // Clean up all stored file blobs before returning error
+            for stored_object in &stored_blobs {
+                let _ = object_store.delete_object(stored_object);
+            }
+            return Err(err);
+        }
+    };
+
+    // Build the spec for directory format
+    let spec = source_import_spec(
+        SourceType::ObsidianVault,
+        PayloadFormat::ObsidianVaultDirectory,
+    )?;
+    let content_facets_json = serde_json::to_string(spec.content_facets).map_err(|err| {
+        OpenArchiveError::Invariant(format!("failed to serialize content facets: {err}"))
+    })?;
+
+    // Build artifact sets from parsed vault
+    let planned_notes = parsed_vault
+        .notes
+        .into_iter()
+        .map(|note| (new_id("artifact"), note))
+        .collect::<Vec<_>>();
+    let artifact_ids_by_path = planned_notes
+        .iter()
+        .map(|(artifact_id, note)| (note.note_path.clone(), artifact_id.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let artifact_sets = planned_notes
+        .into_iter()
+        .map(|(artifact_id, note)| {
+            build_obsidian_artifact_set(
+                &import_id, // Fixed: use actual import_id for artifact FK
+                &content_facets_json,
+                spec,
+                artifact_id,
+                note,
+                &artifact_ids_by_path,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let write_set = WriteImportSet {
+        payload_object: NewImportObjectRef {
+            object_id: payload_object_id.clone(),
+            payload_format: PayloadFormat::ObsidianVaultDirectory,
+            mime_type: "application/json".to_string(),
+            size_bytes: manifest_json.len() as i64,
+            sha256: manifest_sha256.clone(),
+            stored_object: payload_put.stored_object.clone(),
+        },
+        import: NewImport {
+            import_id: import_id.clone(),
+            source_type: SourceType::ObsidianVault,
+            import_status: ImportStatus::Pending,
+            payload_object_id,
+            source_filename: Some(
+                directory_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+            ),
+            source_content_hash: manifest_sha256,
+            conversation_count_detected: artifact_sets.len() as i32,
+        },
+        artifact_sets,
+    };
+
+    // Attempt to write the import, with cleanup on failure
+    let result = match store.write_import(write_set) {
+        Ok(result) => result,
+        Err(err) => {
+            // Clean up the payload object
+            cleanup_unreferenced_payload_object(object_store, &payload_put, &err);
+            // Clean up all stored file blobs
+            for stored_object in stored_blobs {
+                let _ = object_store.delete_object(&stored_object);
+            }
+            return Err(err.into());
+        }
+    };
+
+    Ok(ImportResponse {
+        import_id: result.import_id,
+        import_status: result.import_status.as_str().to_string(),
+        artifacts: result
+            .artifacts
+            .into_iter()
+            .map(|artifact| ImportArtifactStatus {
+                artifact_id: artifact.artifact_id,
+                enrichment_status: artifact.enrichment_status.as_str().to_string(),
+                ingest_result: artifact.ingest_result.as_str().to_string(),
+            })
+            .collect(),
+    })
+}
+
 fn import_document_payload<S, O>(
     store: &S,
     object_store: &O,
@@ -558,7 +752,7 @@ fn build_obsidian_import_set(
     let artifact_ids_by_path = planned_notes
         .iter()
         .map(|(artifact_id, note)| (note.note_path.clone(), artifact_id.clone()))
-        .collect::<HashMap<_, _>>();
+        .collect::<BTreeMap<_, _>>();
 
     let artifact_sets = planned_notes
         .into_iter()
@@ -968,7 +1162,7 @@ fn build_obsidian_artifact_set(
     spec: SourceImportSpec,
     artifact_id: String,
     note: parser::obsidian::ParsedVaultNote,
-    artifact_ids_by_path: &HashMap<String, String>,
+    artifact_ids_by_path: &BTreeMap<String, String>,
 ) -> Result<WriteArtifactSet, OpenArchiveError> {
     let note_identity_hash =
         obsidian_note_identity_hash(&note.note_path, &note.document.content_hash);
@@ -1532,6 +1726,364 @@ mod tests {
             source_hashes.len(),
             2,
             "same-content notes under different paths must not collapse"
+        );
+    }
+
+    // =========================================================================
+    // Obsidian Directory Import Tests
+    // =========================================================================
+
+    use tempfile::TempDir;
+
+    fn create_test_vault_dir() -> TempDir {
+        let temp_dir = TempDir::new().expect("temp dir should create");
+        let root = temp_dir.path();
+
+        // Create nested structure
+        fs::create_dir(root.join("Projects")).expect("dir should create");
+        fs::create_dir(root.join("Projects").join("Acme")).expect("dir should create");
+        fs::create_dir(root.join(".obsidian")).expect("hidden dir should create");
+
+        // Create notes
+        fs::write(
+            root.join("Inbox.md"),
+            "---\ntags: [project/acme]\naliases: [Inbox Note]\n---\n# Inbox\nLink to [[Projects/Acme|Acme]].",
+        )
+        .expect("note should write");
+
+        fs::write(root.join("Projects").join("Acme.md"), "# Acme\nContent")
+            .expect("note should write");
+
+        fs::write(
+            root.join("Projects").join("Acme").join("Tasks.md"),
+            "# Tasks\n- [ ] Do something",
+        )
+        .expect("note should write");
+
+        // Hidden note (should be skipped)
+        fs::write(root.join(".obsidian").join("config.md"), "# Config").ok();
+
+        temp_dir
+    }
+
+    #[test]
+    fn import_obsidian_vault_directory_stores_manifest_and_blobs() {
+        let vault_dir = create_test_vault_dir();
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+
+        let response = import_obsidian_vault_directory(&store, &object_store, vault_dir.path())
+            .expect("directory import should succeed");
+
+        // Should create 3 artifacts (matching 3 markdown files)
+        assert_eq!(response.artifacts.len(), 3);
+
+        // Verify store received correct import data
+        let captured = store.captured.lock().unwrap();
+        let import_set = captured.first().expect("import set should exist");
+        assert_eq!(import_set.import.source_type, SourceType::ObsidianVault);
+        assert_eq!(
+            import_set.payload_object.payload_format,
+            PayloadFormat::ObsidianVaultDirectory
+        );
+        assert_eq!(import_set.payload_object.mime_type, "application/json");
+
+        // Verify object store received file blobs + manifest
+        let puts = object_store.puts.lock().unwrap();
+        // 3 file blobs + 1 manifest = 4 objects
+        assert_eq!(puts.len(), 4, "should store 3 file blobs + 1 manifest");
+
+        // Verify manifest is stored as JSON
+        let manifest_object = puts
+            .iter()
+            .find(|o| o.mime_type == "application/json")
+            .expect("manifest should exist");
+        assert!(!manifest_object.bytes.is_empty());
+
+        // Verify file blobs are stored as markdown
+        let markdown_objects: Vec<_> = puts
+            .iter()
+            .filter(|o| o.mime_type == "text/markdown")
+            .collect();
+        assert_eq!(markdown_objects.len(), 3);
+    }
+
+    #[test]
+    fn import_obsidian_vault_directory_manifest_is_deterministic() {
+        use crate::parser::obsidian::ObsidianVaultManifest;
+
+        let vault_dir = create_test_vault_dir();
+
+        // Run import twice with fresh stores
+        let store1 = MockStore::new();
+        let object_store1 = MockObjectStore::new();
+        import_obsidian_vault_directory(&store1, &object_store1, vault_dir.path())
+            .expect("first import should succeed");
+
+        let store2 = MockStore::new();
+        let object_store2 = MockObjectStore::new();
+        import_obsidian_vault_directory(&store2, &object_store2, vault_dir.path())
+            .expect("second import should succeed");
+
+        // Extract manifest bytes from both runs
+        let puts1 = object_store1.puts.lock().unwrap();
+        let manifest1_bytes = &puts1
+            .iter()
+            .find(|o| o.mime_type == "application/json")
+            .expect("manifest1 should exist")
+            .bytes;
+
+        let puts2 = object_store2.puts.lock().unwrap();
+        let manifest2_bytes = &puts2
+            .iter()
+            .find(|o| o.mime_type == "application/json")
+            .expect("manifest2 should exist")
+            .bytes;
+
+        // Parse manifests and compare file ordering (timestamp will differ)
+        let manifest1: ObsidianVaultManifest =
+            serde_json::from_slice(manifest1_bytes).expect("manifest1 should parse");
+        let manifest2: ObsidianVaultManifest =
+            serde_json::from_slice(manifest2_bytes).expect("manifest2 should parse");
+
+        // Both should have same version
+        assert_eq!(manifest1.version, manifest2.version);
+
+        // Files should be identical (same paths, same metadata, same order)
+        assert_eq!(
+            manifest1.files.len(),
+            manifest2.files.len(),
+            "file counts should match"
+        );
+
+        // Collect file paths in order and verify they're identical
+        let paths1: Vec<_> = manifest1.files.keys().collect();
+        let paths2: Vec<_> = manifest2.files.keys().collect();
+        assert_eq!(paths1, paths2, "file ordering must be deterministic");
+
+        // Verify each file entry is identical (content hash, size, etc.)
+        for (path, entry1) in &manifest1.files {
+            let entry2 = manifest2
+                .files
+                .get(path)
+                .expect("file should exist in both manifests");
+            assert_eq!(
+                entry1.content_hash, entry2.content_hash,
+                "content hash should match for {path}"
+            );
+            assert_eq!(entry1.size, entry2.size, "size should match for {path}");
+        }
+    }
+
+    #[test]
+    fn import_obsidian_vault_directory_cleans_up_on_write_failure() {
+        let vault_dir = create_test_vault_dir();
+        // Use FailingImportStore to simulate write failure
+        let store = FailingImportStore;
+        let object_store = MockObjectStore::new();
+
+        let result = import_obsidian_vault_directory(&store, &object_store, vault_dir.path());
+        assert!(result.is_err(), "should fail on write error");
+
+        // Verify cleanup occurred
+        let deletes = object_store.deletes.lock().unwrap();
+        // Should delete: 3 file blobs + 1 manifest = 4 objects
+        assert_eq!(
+            deletes.len(),
+            4,
+            "should clean up all stored objects on failure"
+        );
+    }
+
+    #[test]
+    fn import_obsidian_vault_directory_cleans_up_blobs_on_manifest_storage_failure() {
+        let vault_dir = create_test_vault_dir();
+        let store = MockStore::new();
+
+        // Create object store that fails on the 4th put (the manifest)
+        let failing_object_store = FailingObjectStore::new(3); // Fail after 3 successful puts
+
+        let result =
+            import_obsidian_vault_directory(&store, &failing_object_store, vault_dir.path());
+        assert!(result.is_err(), "should fail on manifest storage error");
+
+        // Verify cleanup of the 3 file blobs occurred
+        let deletes = failing_object_store.deletes.lock().unwrap();
+        assert_eq!(
+            deletes.len(),
+            3,
+            "should clean up file blobs when manifest storage fails"
+        );
+    }
+
+    // Object store that fails after N successful puts
+    struct FailingObjectStore {
+        puts: Mutex<Vec<NewObject>>,
+        deletes: Mutex<Vec<StoredObject>>,
+        fail_after: usize,
+        put_count: Mutex<usize>,
+    }
+
+    impl FailingObjectStore {
+        fn new(fail_after: usize) -> Self {
+            Self {
+                puts: Mutex::new(Vec::new()),
+                deletes: Mutex::new(Vec::new()),
+                fail_after,
+                put_count: Mutex::new(0),
+            }
+        }
+    }
+
+    impl ObjectStore for FailingObjectStore {
+        fn put_object(
+            &self,
+            object: NewObject,
+        ) -> crate::error::ObjectStoreResult<PutObjectResult> {
+            let mut count = self.put_count.lock().unwrap();
+            *count += 1;
+
+            if *count > self.fail_after {
+                return Err(crate::error::ObjectStoreError::WriteObject {
+                    object_id: object.object_id.clone(),
+                    path: std::path::PathBuf::from("/mock/fail"),
+                    source: Box::new(std::io::Error::other("simulated storage failure")),
+                });
+            }
+
+            let stored = StoredObject {
+                object_id: object.object_id.clone(),
+                provider: "mock".to_string(),
+                storage_key: format!("{}/{}", "obsidian-files", object.sha256),
+                mime_type: object.mime_type.clone(),
+                size_bytes: object.bytes.len() as i64,
+                sha256: object.sha256.clone(),
+            };
+            self.puts.lock().unwrap().push(object);
+            Ok(PutObjectResult {
+                stored_object: stored,
+                was_created: true,
+            })
+        }
+
+        fn get_object_bytes(
+            &self,
+            object: &StoredObject,
+        ) -> crate::error::ObjectStoreResult<Vec<u8>> {
+            Ok(object.storage_key.as_bytes().to_vec())
+        }
+
+        fn delete_object(&self, object: &StoredObject) -> crate::error::ObjectStoreResult<()> {
+            self.deletes.lock().unwrap().push(object.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn import_obsidian_vault_directory_produces_same_artifacts_as_zip() {
+        let vault_dir = create_test_vault_dir();
+
+        // Import directory
+        let dir_store = MockStore::new();
+        let dir_object_store = MockObjectStore::new();
+        let dir_response =
+            import_obsidian_vault_directory(&dir_store, &dir_object_store, vault_dir.path())
+                .expect("directory import should succeed");
+
+        // Create equivalent zip
+        let cursor = Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file("Inbox.md", SimpleFileOptions::default())
+            .expect("file should start");
+        writer
+            .write_all(
+                b"---\n\
+                  tags: [project/acme]\n\
+                  aliases: [Inbox Note]\n\
+                  ---\n\
+                  # Inbox\n\
+                  Link to [[Projects/Acme|Acme]].",
+            )
+            .expect("note should write");
+        writer
+            .start_file("Projects/Acme.md", SimpleFileOptions::default())
+            .expect("file should start");
+        writer
+            .write_all(b"# Acme\nContent")
+            .expect("note should write");
+        writer
+            .start_file("Projects/Acme/Tasks.md", SimpleFileOptions::default())
+            .expect("file should start");
+        writer
+            .write_all(b"# Tasks\n- [ ] Do something")
+            .expect("note should write");
+        let zip_bytes = writer.finish().expect("zip should finish").into_inner();
+
+        // Import zip
+        let zip_store = MockStore::new();
+        let zip_object_store = MockObjectStore::new();
+        let zip_response = import_obsidian_vault_payload(&zip_store, &zip_object_store, &zip_bytes)
+            .expect("zip import should succeed");
+
+        // Both should produce same number of artifacts
+        assert_eq!(dir_response.artifacts.len(), zip_response.artifacts.len());
+        assert_eq!(dir_response.artifacts.len(), 3);
+
+        // Verify both stores have same note paths
+        let dir_captured = dir_store.captured.lock().unwrap();
+        let dir_set = dir_captured.first().unwrap();
+        let dir_paths: std::collections::BTreeSet<_> = dir_set
+            .artifact_sets
+            .iter()
+            .map(|a| a.artifact.source_conversation_key.clone().unwrap())
+            .collect();
+
+        let zip_captured = zip_store.captured.lock().unwrap();
+        let zip_set = zip_captured.first().unwrap();
+        let zip_paths: std::collections::BTreeSet<_> = zip_set
+            .artifact_sets
+            .iter()
+            .map(|a| a.artifact.source_conversation_key.clone().unwrap())
+            .collect();
+
+        assert_eq!(dir_paths, zip_paths);
+    }
+
+    #[test]
+    fn import_obsidian_vault_directory_link_resolution_works() {
+        let vault_dir = create_test_vault_dir();
+        let store = MockStore::new();
+        let object_store = MockObjectStore::new();
+
+        import_obsidian_vault_directory(&store, &object_store, vault_dir.path())
+            .expect("import should succeed");
+
+        let captured = store.captured.lock().unwrap();
+        let import_set = captured.first().unwrap();
+
+        // Find Inbox note and verify its link to Projects/Acme resolved
+        let inbox = import_set
+            .artifact_sets
+            .iter()
+            .find(|a| a.artifact.source_conversation_key.as_deref() == Some("Inbox.md"))
+            .expect("Inbox should exist");
+
+        // The link [[Projects/Acme|Acme]] should resolve
+        // raw_target includes the display text: "Projects/Acme|Acme"
+        let link = inbox
+            .imported_note_metadata
+            .links
+            .iter()
+            .find(|l| l.raw_target.starts_with("Projects/Acme"))
+            .expect("link should exist");
+        assert_eq!(link.target_path.as_deref(), Some("Projects/Acme.md"));
+        assert!(
+            matches!(
+                link.resolution_status,
+                crate::storage::ImportedNoteLinkResolutionStatus::Resolved
+            ),
+            "link should be resolved"
         );
     }
 

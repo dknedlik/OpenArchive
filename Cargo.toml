@@ -30,3 +30,4 @@ url = "2.5"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 [dev-dependencies]
 mockall = "0.12"
+tempfile = "3.0"

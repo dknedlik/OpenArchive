@@ -66,6 +66,7 @@ pub enum PayloadFormat {
     TextPlain,
     MarkdownText,
     ObsidianVaultZip,
+    ObsidianVaultDirectory,
 }
 
 impl PayloadFormat {
@@ -80,6 +81,7 @@ impl PayloadFormat {
             PayloadFormat::TextPlain => "text_plain",
             PayloadFormat::MarkdownText => "markdown_text",
             PayloadFormat::ObsidianVaultZip => "obsidian_vault_zip",
+            PayloadFormat::ObsidianVaultDirectory => "obsidian_vault_directory",
         }
     }
 }

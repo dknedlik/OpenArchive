@@ -14,10 +14,8 @@ use open_archive::import_service::ImportResponse;
 use open_archive::qdrant_sidecar::ManagedQdrantHandle;
 use open_archive::shutdown::ShutdownToken;
 use open_archive::{db, http, migrations, parser};
-use zip::write::SimpleFileOptions;
 
 use std::fs;
-use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -147,7 +145,25 @@ impl ImportMode {
 struct PlannedImport {
     import_path: PathBuf,
     mode: ImportMode,
-    payload_bytes: Vec<u8>,
+    payload_bytes: Option<Vec<u8>>,
+}
+
+impl PlannedImport {
+    fn with_bytes(import_path: PathBuf, mode: ImportMode, bytes: Vec<u8>) -> Self {
+        Self {
+            import_path,
+            mode,
+            payload_bytes: Some(bytes),
+        }
+    }
+
+    fn directory(import_path: PathBuf, mode: ImportMode) -> Self {
+        Self {
+            import_path,
+            mode,
+            payload_bytes: None,
+        }
+    }
 }
 
 fn import_command(args: ImportArgs) -> Result<(), anyhow::Error> {
@@ -348,35 +364,49 @@ fn execute_import(
     app: &ArchiveApplication,
     item: &PlannedImport,
 ) -> Result<ImportResponse, anyhow::Error> {
+    // Handle Obsidian directory imports specially
+    if item.mode == ImportMode::Obsidian && item.payload_bytes.is_none() {
+        return app
+            .imports
+            .import_obsidian_vault_directory(&item.import_path)
+            .map_err(anyhow::Error::new);
+    }
+
+    // All other imports require payload bytes
+    let bytes = item
+        .payload_bytes
+        .as_ref()
+        .expect("payload_bytes required for non-directory imports");
+
     match item.mode {
         ImportMode::Auto => unreachable!("planned imports must resolve auto before execution"),
         ImportMode::Chatgpt => app
             .imports
-            .import_chatgpt_payload(&item.payload_bytes)
+            .import_chatgpt_payload(bytes)
             .map_err(anyhow::Error::new),
         ImportMode::Claude => app
             .imports
-            .import_claude_payload(&item.payload_bytes)
+            .import_claude_payload(bytes)
             .map_err(anyhow::Error::new),
         ImportMode::Grok => app
             .imports
-            .import_grok_payload(&item.payload_bytes)
+            .import_grok_payload(bytes)
             .map_err(anyhow::Error::new),
         ImportMode::Gemini => app
             .imports
-            .import_gemini_payload(&item.payload_bytes)
+            .import_gemini_payload(bytes)
             .map_err(anyhow::Error::new),
         ImportMode::Markdown => app
             .imports
-            .import_markdown_payload(&item.payload_bytes)
+            .import_markdown_payload(bytes)
             .map_err(anyhow::Error::new),
         ImportMode::Text => app
             .imports
-            .import_text_payload(&item.payload_bytes)
+            .import_text_payload(bytes)
             .map_err(anyhow::Error::new),
         ImportMode::Obsidian => app
             .imports
-            .import_obsidian_vault_payload(&item.payload_bytes)
+            .import_obsidian_vault_payload(bytes)
             .map_err(anyhow::Error::new),
     }
 }
@@ -426,19 +456,19 @@ fn plan_auto_imports(path: &Path) -> Result<Vec<PlannedImport>, anyhow::Error> {
         let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         if is_extension(path, &["zip"]) {
             if parser::obsidian::parse_vault_zip(&bytes).is_ok() {
-                return Ok(vec![PlannedImport {
-                    import_path: path.to_path_buf(),
-                    mode: ImportMode::Obsidian,
-                    payload_bytes: bytes,
-                }]);
+                return Ok(vec![PlannedImport::with_bytes(
+                    path.to_path_buf(),
+                    ImportMode::Obsidian,
+                    bytes,
+                )]);
             }
             // Check if zip contains conversations.json (ChatGPT export)
             if open_archive::looks_like_chatgpt_zip(&bytes) {
-                return Ok(vec![PlannedImport {
-                    import_path: path.to_path_buf(),
-                    mode: ImportMode::Chatgpt,
-                    payload_bytes: bytes,
-                }]);
+                return Ok(vec![PlannedImport::with_bytes(
+                    path.to_path_buf(),
+                    ImportMode::Chatgpt,
+                    bytes,
+                )]);
             }
             return Err(anyhow::anyhow!(
                 "auto import does not recognize zip payload {}",
@@ -452,11 +482,11 @@ fn plan_auto_imports(path: &Path) -> Result<Vec<PlannedImport>, anyhow::Error> {
                 path.display()
             )
         })?;
-        return Ok(vec![PlannedImport {
-            import_path: path.to_path_buf(),
-            mode: detected,
-            payload_bytes: bytes,
-        }]);
+        return Ok(vec![PlannedImport::with_bytes(
+            path.to_path_buf(),
+            detected,
+            bytes,
+        )]);
     }
 
     Err(anyhow::anyhow!(
@@ -492,11 +522,11 @@ fn plan_conversation_import(
     let payload_bytes =
         fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
 
-    Ok(vec![PlannedImport {
-        import_path: path.to_path_buf(),
+    Ok(vec![PlannedImport::with_bytes(
+        path.to_path_buf(),
         mode,
         payload_bytes,
-    }])
+    )])
 }
 
 fn plan_document_imports(
@@ -508,11 +538,13 @@ fn plan_document_imports(
         let files = collect_files_with_extensions(path, extensions)?;
         return Ok(files
             .into_iter()
-            .map(|file_path| PlannedImport {
-                import_path: file_path.clone(),
-                mode,
-                payload_bytes: fs::read(&file_path)
-                    .unwrap_or_else(|_| unreachable!("collected file should remain readable")),
+            .map(|file_path| {
+                PlannedImport::with_bytes(
+                    file_path.clone(),
+                    mode,
+                    fs::read(&file_path)
+                        .unwrap_or_else(|_| unreachable!("collected file should remain readable")),
+                )
             })
             .collect());
     }
@@ -524,31 +556,36 @@ fn plan_document_imports(
         ));
     }
 
-    Ok(vec![PlannedImport {
-        import_path: path.to_path_buf(),
+    Ok(vec![PlannedImport::with_bytes(
+        path.to_path_buf(),
         mode,
-        payload_bytes: fs::read(path)
-            .with_context(|| format!("failed to read {}", path.display()))?,
-    }])
+        fs::read(path).with_context(|| format!("failed to read {}", path.display()))?,
+    )])
 }
 
 fn plan_obsidian_import(path: &Path) -> Result<Vec<PlannedImport>, anyhow::Error> {
-    let payload_bytes = if path.is_dir() {
-        zip_directory(path)?
-    } else if path.is_file() {
-        fs::read(path).with_context(|| format!("failed to read {}", path.display()))?
-    } else {
-        return Err(anyhow::anyhow!(
-            "import path {} does not exist",
-            path.display()
-        ));
-    };
+    if path.is_dir() {
+        // Use directory-based import with manifest storage (fidelity-preserving)
+        return Ok(vec![PlannedImport::directory(
+            path.to_path_buf(),
+            ImportMode::Obsidian,
+        )]);
+    }
 
-    Ok(vec![PlannedImport {
-        import_path: path.to_path_buf(),
-        mode: ImportMode::Obsidian,
-        payload_bytes,
-    }])
+    if path.is_file() {
+        // For zip files, use the existing byte-based import
+        let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        return Ok(vec![PlannedImport::with_bytes(
+            path.to_path_buf(),
+            ImportMode::Obsidian,
+            bytes,
+        )]);
+    }
+
+    Err(anyhow::anyhow!(
+        "import path {} does not exist",
+        path.display()
+    ))
 }
 
 fn detect_conversation_mode(path: &Path, payload_bytes: &[u8]) -> Option<ImportMode> {
@@ -632,56 +669,6 @@ fn is_extension(path: &Path, extensions: &[&str]) -> bool {
                 .iter()
                 .any(|expected| extension.eq_ignore_ascii_case(expected))
         })
-}
-
-fn zip_directory(root: &Path) -> Result<Vec<u8>, anyhow::Error> {
-    let cursor = Cursor::new(Vec::<u8>::new());
-    let mut writer = zip::ZipWriter::new(cursor);
-    let mut files = Vec::new();
-    collect_all_files(root, root, &mut files)?;
-    files.sort_by(|left, right| left.0.cmp(&right.0));
-    for (relative_path, absolute_path) in files {
-        writer
-            .start_file(relative_path, SimpleFileOptions::default())
-            .context("failed to start zip entry")?;
-        let bytes = fs::read(&absolute_path)
-            .with_context(|| format!("failed to read {}", absolute_path.display()))?;
-        writer
-            .write_all(&bytes)
-            .with_context(|| format!("failed to write {}", absolute_path.display()))?;
-    }
-    writer
-        .finish()
-        .context("failed to finalize vault zip")
-        .map(|cursor| cursor.into_inner())
-}
-
-fn collect_all_files(
-    root: &Path,
-    current: &Path,
-    files: &mut Vec<(String, PathBuf)>,
-) -> Result<(), anyhow::Error> {
-    let mut entries = fs::read_dir(current)
-        .with_context(|| format!("failed to read directory {}", current.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .with_context(|| format!("failed to read directory {}", current.display()))?;
-    entries.sort_by_key(|entry| entry.path());
-    for entry in entries {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_all_files(root, &path, files)?;
-            continue;
-        }
-        let relative = path
-            .strip_prefix(root)
-            .with_context(|| format!("failed to compute relative path for {}", path.display()))?;
-        let relative = relative
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("path {} is not valid UTF-8", relative.display()))?
-            .replace('\\', "/");
-        files.push((relative, path));
-    }
-    Ok(())
 }
 
 fn relational_store_label(config: &AppConfig) -> &'static str {

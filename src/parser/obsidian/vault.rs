@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
+use std::fs;
 use std::io::{Cursor, Read};
+use std::path::Path;
 
 use zip::read::ZipArchive;
 
@@ -10,6 +12,15 @@ use super::frontmatter::{normalize_alias, parse_frontmatter};
 use super::links::{normalize_note_path, VaultLinkResolver};
 use super::tags::extract_inline_tags;
 use super::{ParsedVault, ParsedVaultAlias, ParsedVaultNote, ParsedVaultTag};
+
+/// Metadata for a file discovered in a vault directory.
+#[derive(Debug, Clone)]
+pub struct VaultDirectoryFile {
+    pub relative_path: String,
+    pub absolute_path: std::path::PathBuf,
+    pub content: String,
+    pub mtime_millis: Option<i64>,
+}
 
 const MAX_VAULT_NOTES: usize = 10_000;
 const MAX_VAULT_NOTE_BYTES: usize = 64 * 1024 * 1024;
@@ -86,6 +97,132 @@ pub fn parse_vault_zip(input: &[u8]) -> ParserResult<ParsedVault> {
     })
 }
 
+/// Parse an Obsidian vault from a directory on disk.
+/// Returns the parsed vault and metadata about the files found.
+/// Files are skipped if they exceed size limits or are not valid UTF-8.
+pub fn parse_vault_directory(root: &Path) -> ParserResult<(ParsedVault, Vec<VaultDirectoryFile>)> {
+    let mut files = Vec::new();
+    let mut total_note_bytes = 0usize;
+
+    collect_vault_files(root, root, &mut files, &mut total_note_bytes)?;
+
+    if files.is_empty() {
+        return Err(ParserError::EmptyVault);
+    }
+
+    // Build resolver from file paths
+    let note_paths: Vec<String> = files.iter().map(|f| f.relative_path.clone()).collect();
+    let resolver = VaultLinkResolver::new(&note_paths);
+
+    // Parse all notes
+    let parsed_notes: ParserResult<Vec<_>> = files
+        .iter()
+        .map(|file| parse_note(&file.relative_path, &file.content, &resolver))
+        .collect();
+    let parsed_notes = parsed_notes?;
+
+    Ok((
+        ParsedVault {
+            notes: parsed_notes,
+        },
+        files,
+    ))
+}
+
+fn collect_vault_files(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<VaultDirectoryFile>,
+    total_bytes: &mut usize,
+) -> ParserResult<()> {
+    let entries = fs::read_dir(current).map_err(|err| ParserError::InvalidObsidianVault {
+        detail: format!("failed to read directory {}: {err}", current.display()),
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|err| ParserError::InvalidObsidianVault {
+            detail: format!("failed to read directory entry: {err}"),
+        })?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            // Skip hidden directories
+            if entry
+                .file_name()
+                .to_str()
+                .map(|name| name.starts_with('.'))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            collect_vault_files(root, &path, files, total_bytes)?;
+            continue;
+        }
+
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| ParserError::InvalidObsidianVault {
+                detail: format!("failed to compute relative path for {}", path.display()),
+            })?;
+        let relative_path = relative.to_str().map(normalize_note_path).ok_or_else(|| {
+            ParserError::InvalidObsidianVault {
+                detail: format!("invalid path encoding for {}", path.display()),
+            }
+        })?;
+
+        if should_skip_path(&relative_path) || !relative_path.ends_with(".md") {
+            continue;
+        }
+
+        if files.len() >= MAX_VAULT_NOTES {
+            return Err(ParserError::InvalidObsidianVault {
+                detail: format!("vault exceeds maximum supported note count of {MAX_VAULT_NOTES}"),
+            });
+        }
+
+        let metadata = fs::metadata(&path).map_err(|err| ParserError::InvalidObsidianVault {
+            detail: format!("failed to read metadata for {}: {err}", path.display()),
+        })?;
+        let file_size = metadata.len() as usize;
+
+        *total_bytes = total_bytes.saturating_add(file_size);
+        if *total_bytes > MAX_VAULT_NOTE_BYTES {
+            return Err(ParserError::InvalidObsidianVault {
+                detail: format!(
+                    "vault exceeds maximum supported markdown payload size of {MAX_VAULT_NOTE_BYTES} bytes"
+                ),
+            });
+        }
+
+        let mtime_millis = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|dur| dur.as_millis() as i64);
+
+        let bytes = fs::read(&path).map_err(|err| ParserError::InvalidObsidianVault {
+            detail: format!("failed to read note {}: {err}", path.display()),
+        })?;
+        let content =
+            String::from_utf8(bytes).map_err(|err| ParserError::InvalidObsidianVault {
+                detail: format!("note {} is not valid UTF-8: {err}", path.display()),
+            })?;
+
+        if content.trim().is_empty() {
+            continue;
+        }
+
+        files.push(VaultDirectoryFile {
+            relative_path,
+            absolute_path: path,
+            content,
+            mtime_millis,
+        });
+    }
+
+    Ok(())
+}
+
 fn parse_note(
     note_path: &str,
     raw_text: &str,
@@ -155,8 +292,11 @@ fn normalize_archive_path(path: &str) -> String {
     normalize_note_path(path)
 }
 
-fn should_skip_path(path: &str) -> bool {
-    path.starts_with(".obsidian/") || path.starts_with(".git/")
+/// Check if a path should be skipped during vault parsing.
+/// Skips hidden directories (starting with '.') and their contents.
+pub fn should_skip_path(path: &str) -> bool {
+    // Skip any path component starting with '.' (hidden directories/files)
+    path.split('/').any(|component| component.starts_with('.'))
 }
 
 fn filename_stem(path: &str) -> Option<String> {
@@ -269,5 +409,158 @@ mod tests {
         let parsed = parse_vault_zip(&bytes).expect("vault should parse");
         assert_eq!(parsed.notes.len(), 1);
         assert_eq!(parsed.notes[0].note_path, "Inbox.md");
+    }
+
+    // =========================================================================
+    // Directory Parsing Tests
+    // =========================================================================
+
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn create_test_vault_dir() -> (TempDir, Vec<VaultDirectoryFile>) {
+        let temp_dir = TempDir::new().expect("temp dir should create");
+        let root = temp_dir.path();
+
+        // Create nested structure
+        fs::create_dir(root.join("Projects")).expect("dir should create");
+        fs::create_dir(root.join("Projects").join("Acme")).expect("dir should create");
+        fs::create_dir(root.join(".obsidian")).expect("hidden dir should create");
+        fs::create_dir(root.join(".private")).expect("hidden dir should create");
+
+        // Create notes
+        fs::write(
+            root.join("Inbox.md"),
+            "---\ntags: [project/acme]\naliases: [Inbox Note]\n---\n# Inbox\nLink to [[Projects/Acme|Acme]].",
+        )
+        .expect("note should write");
+
+        fs::write(root.join("Projects").join("Acme.md"), "# Acme\nContent")
+            .expect("note should write");
+
+        fs::write(
+            root.join("Projects").join("Acme").join("Tasks.md"),
+            "# Tasks\n- [ ] Do something",
+        )
+        .expect("note should write");
+
+        // Hidden notes (should be skipped)
+        fs::write(root.join(".obsidian").join("config.md"), "# Config").ok();
+        fs::write(root.join(".private").join("secret.md"), "# Secret").ok();
+
+        let (_vault, files) = parse_vault_directory(root).expect("vault should parse");
+        (temp_dir, files)
+    }
+
+    #[test]
+    fn parse_vault_directory_finds_all_markdown_files() {
+        let (_temp, files) = create_test_vault_dir();
+
+        // Should find exactly 3 markdown files
+        assert_eq!(files.len(), 3);
+
+        let paths: Vec<&str> = files.iter().map(|f| f.relative_path.as_str()).collect();
+        assert!(paths.contains(&"Inbox.md"));
+        assert!(paths.contains(&"Projects/Acme.md"));
+        assert!(paths.contains(&"Projects/Acme/Tasks.md"));
+    }
+
+    #[test]
+    fn parse_vault_directory_skips_hidden_directories() {
+        let (_temp, files) = create_test_vault_dir();
+
+        // Should NOT include files from .obsidian or .private
+        let paths: Vec<&str> = files.iter().map(|f| f.relative_path.as_str()).collect();
+        assert!(!paths.iter().any(|p| p.contains(".obsidian")));
+        assert!(!paths.iter().any(|p| p.contains(".private")));
+        assert!(!paths.contains(&".obsidian/config.md"));
+        assert!(!paths.contains(&".private/secret.md"));
+    }
+
+    #[test]
+    fn parse_vault_directory_preserves_content() {
+        let (_temp, files) = create_test_vault_dir();
+
+        let inbox = files
+            .iter()
+            .find(|f| f.relative_path == "Inbox.md")
+            .expect("Inbox.md should exist");
+        assert!(inbox.content.contains("# Inbox"));
+        assert!(inbox.content.contains("project/acme"));
+    }
+
+    #[test]
+    fn parse_vault_directory_captures_mtime() {
+        let (_temp, files) = create_test_vault_dir();
+
+        // All files should have mtime captured
+        for file in &files {
+            assert!(
+                file.mtime_millis.is_some(),
+                "{} should have mtime",
+                file.relative_path
+            );
+            assert!(file.mtime_millis.unwrap() > 0);
+        }
+    }
+
+    #[test]
+    fn parse_vault_directory_produces_equivalent_vault_to_zip() {
+        let (temp_dir, _files) = create_test_vault_dir();
+
+        // Parse directory
+        let (dir_vault, _) = parse_vault_directory(temp_dir.path()).expect("dir should parse");
+
+        // Create equivalent zip
+        let cursor = Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file("Inbox.md", SimpleFileOptions::default())
+            .expect("file should start");
+        writer
+            .write_all(
+                b"---\n\
+                  tags: [project/acme]\n\
+                  aliases: [Inbox Note]\n\
+                  ---\n\
+                  # Inbox\n\
+                  Link to [[Projects/Acme|Acme]].",
+            )
+            .expect("note should write");
+        writer
+            .start_file("Projects/Acme.md", SimpleFileOptions::default())
+            .expect("file should start");
+        writer
+            .write_all(b"# Acme\nContent")
+            .expect("note should write");
+        writer
+            .start_file("Projects/Acme/Tasks.md", SimpleFileOptions::default())
+            .expect("file should start");
+        writer
+            .write_all(b"# Tasks\n- [ ] Do something")
+            .expect("note should write");
+        let zip_bytes = writer.finish().expect("zip should finish").into_inner();
+
+        let zip_vault = parse_vault_zip(&zip_bytes).expect("zip should parse");
+
+        // Both should have same number of notes
+        assert_eq!(dir_vault.notes.len(), zip_vault.notes.len());
+
+        // Both should have same note paths
+        let dir_paths: std::collections::BTreeSet<_> =
+            dir_vault.notes.iter().map(|n| &n.note_path).collect();
+        let zip_paths: std::collections::BTreeSet<_> =
+            zip_vault.notes.iter().map(|n| &n.note_path).collect();
+        assert_eq!(dir_paths, zip_paths);
+    }
+
+    #[test]
+    fn should_skip_path_skips_all_hidden() {
+        assert!(should_skip_path(".obsidian/config"));
+        assert!(should_skip_path(".git/objects"));
+        assert!(should_skip_path(".private/notes.md"));
+        assert!(should_skip_path("notes/.hidden/file.md"));
+        assert!(!should_skip_path("Projects/Acme.md"));
+        assert!(!should_skip_path("Inbox.md"));
     }
 }

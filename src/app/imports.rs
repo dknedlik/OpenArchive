@@ -3,8 +3,8 @@ use std::sync::Arc;
 use crate::error::OpenArchiveError;
 use crate::import_service::{
     import_chatgpt_payload, import_claude_payload, import_gemini_payload, import_grok_payload,
-    import_markdown_payload, import_obsidian_vault_payload, import_payload, import_text_payload,
-    ImportResponse,
+    import_markdown_payload, import_obsidian_vault_directory, import_obsidian_vault_payload,
+    import_payload, import_text_payload, ImportResponse,
 };
 use crate::object_store::ObjectStore;
 use crate::storage::{ImportWriteStore, PayloadFormat, SourceType};
@@ -99,6 +99,17 @@ impl ImportApplicationService {
             self.import_store.as_ref(),
             self.object_store.as_ref(),
             payload_bytes,
+        )
+    }
+
+    pub fn import_obsidian_vault_directory(
+        &self,
+        directory_path: &std::path::Path,
+    ) -> Result<ImportResponse, OpenArchiveError> {
+        import_obsidian_vault_directory(
+            self.import_store.as_ref(),
+            self.object_store.as_ref(),
+            directory_path,
         )
     }
 
