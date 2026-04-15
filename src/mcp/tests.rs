@@ -13,13 +13,19 @@ use crate::app::ArchiveApplication;
 use crate::storage::{ArchiveRetrievalStore, RetrievalIntent, RetrievedContextItem};
 
 fn test_app() -> ArchiveApplication {
+    test_app_with_object_search(Arc::new(MockObjectSearchStore))
+}
+
+fn test_app_with_object_search(
+    object_search_store: Arc<dyn crate::storage::DerivedObjectSearchStore>,
+) -> ArchiveApplication {
     let search = Some(ArchiveSearchService::new(Arc::new(MockSearchReadStore)));
     let artifact_detail = Some(ArtifactDetailService::new(Arc::new(
         MockArtifactDetailStore,
     )));
     let context_pack = Some(ContextPackService::new(Arc::new(MockContextPackStore)));
     let object_search = Some(crate::app::search::ObjectSearchService::new(
-        Arc::new(MockObjectSearchStore),
+        object_search_store,
         None,
     ));
     let writeback = Some(crate::app::writeback::WritebackService::new(Arc::new(
@@ -172,6 +178,39 @@ fn tool_success_uses_compact_summary_text() {
             .as_array()
             .map(Vec::len),
         Some(2)
+    );
+}
+
+#[test]
+fn tool_success_drops_inline_payload_text_when_too_large() {
+    // Build a single oversized "related" entry well above the 32 KB cap. The
+    // text channel should fall back to the summary only — `structuredContent`
+    // still carries the full payload so MCP clients can read it without the
+    // JSON-RPC frame doubling in size.
+    let big_body = "x".repeat(64 * 1024);
+    let response = tool_success(json!({
+        "related": [
+            {
+                "derived_object_id": "n1",
+                "body_text": big_body,
+            }
+        ]
+    }));
+
+    let text = response["content"][0]["text"]
+        .as_str()
+        .expect("text response");
+    assert_eq!(text, "1 related objects");
+    assert!(
+        !text.contains("\"related\""),
+        "oversized payload should not be inlined into the text channel"
+    );
+    assert_eq!(
+        response["structuredContent"]["related"][0]["body_text"]
+            .as_str()
+            .map(str::len),
+        Some(64 * 1024),
+        "structuredContent should preserve the full body so callers can read it"
     );
 }
 
@@ -733,4 +772,118 @@ impl crate::storage::ReviewWriteStore for MockReviewStore {
     fn retry_artifact_enrichment(&self, artifact_id: &str) -> crate::error::StorageResult<String> {
         Ok(format!("job-retry-{artifact_id}"))
     }
+}
+
+/// Object-search mock that returns N "related" entries with an oversized
+/// `body_text`. Used by the regression test that pins the `get_related`
+/// response size after the doubled-serialization fix.
+struct FatBodyObjectSearchStore {
+    count: usize,
+    body_chars: usize,
+}
+
+impl crate::storage::DerivedObjectSearchStore for FatBodyObjectSearchStore {
+    fn search_objects(
+        &self,
+        _filters: &crate::storage::ObjectSearchFilters,
+        _limit: usize,
+    ) -> crate::error::StorageResult<Vec<crate::storage::DerivedObjectSearchResult>> {
+        Ok(vec![])
+    }
+
+    fn search_objects_by_embedding(
+        &self,
+        _filters: &crate::storage::ObjectSearchFilters,
+        _query_embedding: &[f32],
+        _limit: usize,
+    ) -> crate::error::StorageResult<Vec<crate::storage::DerivedObjectSearchResult>> {
+        Ok(vec![])
+    }
+
+    fn get_related_objects(
+        &self,
+        _derived_object_id: &str,
+        _limit: usize,
+    ) -> crate::error::StorageResult<Vec<crate::storage::GraphRelatedEntry>> {
+        let body = "x".repeat(self.body_chars);
+        Ok((0..self.count)
+            .map(|i| crate::storage::GraphRelatedEntry {
+                derived_object_id: format!("n{i}"),
+                artifact_id: "art-1".to_string(),
+                derived_object_type: crate::storage::DerivedObjectType::Memory,
+                title: Some(format!("memory {i}")),
+                body_text: Some(body.clone()),
+                relation_kind: "archive_link".to_string(),
+                link_type: Some("same_topic".to_string()),
+                confidence_score: Some(0.9),
+                rationale: Some("r".to_string()),
+            })
+            .collect())
+    }
+}
+
+#[test]
+fn get_related_response_is_bounded_for_large_body_text() {
+    // 20 neighbours × ~50 KB body = ~1 MB raw. Before the fix this got
+    // *doubled* into the JSON-RPC frame because `tool_success` also embedded a
+    // pretty-printed copy in `content[0].text`, which presented as a hang to
+    // the MCP client. Pin the wire size to something the client can stream
+    // without backpressure pathologies.
+    let store = Arc::new(FatBodyObjectSearchStore {
+        count: 20,
+        body_chars: 50_000,
+    });
+    let app = test_app_with_object_search(store);
+
+    let response = call_tool(
+        &app,
+        json!({
+            "name": "get_related",
+            "arguments": {
+                "derived_object_id": "source",
+                "limit": 20
+            }
+        }),
+    );
+
+    assert_eq!(response["isError"], Value::Bool(false));
+
+    // The text channel always starts with the summary line. After body
+    // truncation the inlined pretty payload (if any) must stay well under the
+    // 32 KB cap, otherwise `tool_success` would have dropped it entirely.
+    let text = response["content"][0]["text"]
+        .as_str()
+        .expect("text response");
+    assert!(text.starts_with("20 related objects"));
+    assert!(
+        text.len() < 32 * 1024,
+        "inline text payload should stay under the tool_success cap, got {} bytes",
+        text.len()
+    );
+
+    // Each neighbour's body_text must be truncated to the excerpt budget
+    // (currently 512 chars + ellipsis = 513 chars) so 20 of them fit
+    // comfortably under the inline-payload cap.
+    let related = response["structuredContent"]["related"]
+        .as_array()
+        .expect("related array");
+    assert_eq!(related.len(), 20);
+    for entry in related {
+        let body = entry["body_text"].as_str().expect("body_text string");
+        assert!(
+            body.chars().count() <= 513,
+            "body_text should be truncated to the excerpt budget, got {} chars",
+            body.chars().count()
+        );
+        assert!(body.ends_with('…'));
+    }
+
+    // Belt-and-braces: the entire wire response should be small enough that a
+    // single JSON-RPC frame is well under a megabyte.
+    let serialized = serde_json::to_string(&response).expect("serialize");
+    assert!(
+        serialized.len() < 64 * 1024,
+        "get_related response should stay small, got {} bytes",
+        serialized.len()
+    );
 }

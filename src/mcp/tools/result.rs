@@ -30,11 +30,20 @@ pub(in crate::mcp) fn tool_success(value: Value) -> Value {
     })
 }
 
+/// Maximum size (bytes) of the pretty-printed JSON we are willing to embed in
+/// `content[0].text`. Above this we emit the summary only — the same payload is
+/// always available on `structuredContent`, so dropping the text duplicate
+/// keeps the JSON-RPC frame from doubling for large results (e.g. `get_related`
+/// neighbours that include long `body_text` fields).
+const MAX_INLINE_PAYLOAD_TEXT_BYTES: usize = 32 * 1024;
+
 fn render_tool_result_text(value: &Value, summary: &str) -> String {
     if should_include_payload_text(value) {
         match serde_json::to_string_pretty(value) {
-            Ok(payload) => format!("{summary}\n{payload}"),
-            Err(_) => summary.to_string(),
+            Ok(payload) if payload.len() <= MAX_INLINE_PAYLOAD_TEXT_BYTES => {
+                format!("{summary}\n{payload}")
+            }
+            _ => summary.to_string(),
         }
     } else {
         summary.to_string()

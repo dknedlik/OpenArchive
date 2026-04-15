@@ -171,7 +171,11 @@ fn get_related_objects_for_unknown_id_returns_empty_quickly() {
         .expect("get_related");
     let elapsed = start.elapsed();
 
-    eprintln!("unknown id returned {} entries in {:?}", result.len(), elapsed);
+    eprintln!(
+        "unknown id returned {} entries in {:?}",
+        result.len(),
+        elapsed
+    );
     assert!(elapsed < Duration::from_secs(1));
     assert!(result.is_empty());
 }
@@ -234,7 +238,7 @@ fn get_related_objects_for_object_with_null_candidate_key_terminates() {
     let db = TempSqliteDb::create();
     let conn = db.connection();
     seed_corpus(&conn, 0, 0); // base scaffolding
-    // Insert a single object with an empty json (no candidate_key).
+                              // Insert a single object with an empty json (no candidate_key).
     conn.execute(
         "INSERT INTO oa_derived_object (derived_object_id, artifact_id, derivation_run_id, derived_object_type, origin_kind, object_status, confidence_score, scope_type, scope_id, title, body_text, object_json)
          VALUES ('null-key', 'art-x', 'run-x', 'summary', 'inferred', 'active', 0.5, 'artifact', 'art-x', 't', 'b', '{}')",
@@ -255,9 +259,15 @@ fn get_related_objects_for_object_with_null_candidate_key_terminates() {
 
     let store = SqliteRetrievalReadStore::new(db.config.clone());
     let start = Instant::now();
-    let result = store.get_related_objects("null-key", 20).expect("get_related");
+    let result = store
+        .get_related_objects("null-key", 20)
+        .expect("get_related");
     let elapsed = start.elapsed();
-    eprintln!("null-key returned {} entries in {:?}", result.len(), elapsed);
+    eprintln!(
+        "null-key returned {} entries in {:?}",
+        result.len(),
+        elapsed
+    );
     assert!(elapsed < Duration::from_secs(1));
     assert!(result.is_empty());
 }

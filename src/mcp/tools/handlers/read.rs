@@ -344,13 +344,44 @@ pub(in crate::mcp::tools) fn handle_get_related(
         .map(|v| v as usize)
         .unwrap_or(20);
     match service.get_related(derived_object_id, limit) {
-        Ok(entries) => {
+        Ok(mut entries) => {
+            // `get_related` is a graph-traversal preview, not a full content
+            // fetch. Embedding the entire `body_text` for every neighbour (as
+            // SQLite happily returns) blows up the JSON-RPC response — 20
+            // neighbours of 50 KB each becomes a ~1 MB single-line frame
+            // before `tool_success` even doubles it. Truncate to a short
+            // excerpt; callers that need the full body can issue a follow-up
+            // `get_artifact` for the owning artifact.
+            for entry in &mut entries {
+                if let Some(body) = entry.body_text.as_mut() {
+                    truncate_body_excerpt(body, MAX_RELATED_BODY_EXCERPT_CHARS);
+                }
+            }
             let entries_json =
                 serde_json::to_value(&entries).expect("related entries serializable");
             tool_success(json!({ "related": entries_json }))
         }
         Err(err) => tool_error("internal_error", &err.to_string()),
     }
+}
+
+/// Maximum number of characters of `body_text` we return per `get_related`
+/// neighbour. Long enough to be useful as a snippet, short enough that 50
+/// neighbours stay well under the inline-payload cap in `tool_success`.
+const MAX_RELATED_BODY_EXCERPT_CHARS: usize = 512;
+
+fn truncate_body_excerpt(body: &mut String, max_chars: usize) {
+    // Operate on character boundaries to stay UTF-8-safe.
+    if body.chars().count() <= max_chars {
+        return;
+    }
+    let cutoff = body
+        .char_indices()
+        .nth(max_chars)
+        .map(|(idx, _)| idx)
+        .unwrap_or_else(|| body.len());
+    body.truncate(cutoff);
+    body.push('…');
 }
 
 pub(in crate::mcp::tools) fn handle_get_timeline(
