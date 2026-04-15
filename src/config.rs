@@ -145,7 +145,7 @@ pub enum RelationalStoreConfig {
 
 impl RelationalStoreConfig {
     pub fn from_env() -> ConfigResult<Self> {
-        let provider = env::var("OA_RELATIONAL_STORE").unwrap_or_else(|_| "postgres".to_string());
+        let provider = env::var("OA_RELATIONAL_STORE").unwrap_or_else(|_| "sqlite".to_string());
         match provider.as_str() {
             "postgres" => Ok(Self::Postgres(PostgresConfig::from_env()?)),
             "sqlite" => Ok(Self::Sqlite(SqliteConfig::from_env()?)),
@@ -176,7 +176,8 @@ pub struct SqliteConfig {
 impl SqliteConfig {
     pub fn from_env() -> ConfigResult<Self> {
         Ok(Self {
-            path: PathBuf::from(required_env("OA_SQLITE_PATH")?),
+            path: optional_path_env("OA_SQLITE_PATH")?
+                .unwrap_or(default_local_archive_root()?.join("open_archive.db")),
             busy_timeout: optional_duration_env_ms("OA_SQLITE_BUSY_TIMEOUT_MS")?
                 .unwrap_or_else(|| Duration::from_secs(30)),
         })
@@ -187,7 +188,7 @@ impl SqliteConfig {
 pub enum VectorStoreConfig {
     Disabled,
     PostgresPgVector,
-    Qdrant(QdrantConfig),
+    Qdrant(Box<QdrantConfig>),
 }
 
 impl VectorStoreConfig {
@@ -200,7 +201,7 @@ impl VectorStoreConfig {
         match provider.as_str() {
             "disabled" => Ok(Self::Disabled),
             "postgres" => Ok(Self::PostgresPgVector),
-            "qdrant" => Ok(Self::Qdrant(QdrantConfig::from_env()?)),
+            "qdrant" => Ok(Self::Qdrant(Box::new(QdrantConfig::from_env()?))),
             _ => Err(ConfigError::InvalidEnumEnv {
                 key: "OA_VECTOR_STORE",
                 value: provider,
@@ -216,6 +217,7 @@ pub struct QdrantConfig {
     pub collection_name: String,
     pub request_timeout: Duration,
     pub exact: bool,
+    pub managed: ManagedQdrantConfig,
 }
 
 impl QdrantConfig {
@@ -227,6 +229,38 @@ impl QdrantConfig {
             request_timeout: optional_duration_env_ms("OA_QDRANT_TIMEOUT_MS")?
                 .unwrap_or_else(|| Duration::from_secs(30)),
             exact: bool_env("OA_QDRANT_EXACT")?.unwrap_or(true),
+            managed: ManagedQdrantConfig::from_env()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedQdrantConfig {
+    pub enabled: bool,
+    pub version: String,
+    pub install_root: PathBuf,
+    pub storage_path: PathBuf,
+    pub log_path: PathBuf,
+    pub startup_timeout: Duration,
+    pub binary_path: Option<PathBuf>,
+}
+
+impl ManagedQdrantConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        let install_root = optional_path_env("OA_QDRANT_INSTALL_ROOT")?
+            .unwrap_or(default_local_archive_root()?.join("qdrant"));
+        Ok(Self {
+            enabled: bool_env("OA_QDRANT_MANAGED")?.unwrap_or(true),
+            version: optional_trimmed_env("OA_QDRANT_VERSION")
+                .unwrap_or_else(|| "1.17.1".to_string()),
+            storage_path: optional_path_env("OA_QDRANT_STORAGE_PATH")?
+                .unwrap_or_else(|| install_root.join("storage")),
+            log_path: optional_path_env("OA_QDRANT_LOG_PATH")?
+                .unwrap_or_else(|| install_root.join("qdrant.log")),
+            startup_timeout: optional_duration_env_ms("OA_QDRANT_STARTUP_TIMEOUT_MS")?
+                .unwrap_or_else(|| Duration::from_secs(30)),
+            binary_path: optional_path_env("OA_QDRANT_BINARY_PATH")?,
+            install_root,
         })
     }
 }
@@ -278,15 +312,66 @@ pub struct LocalFsObjectStoreConfig {
 
 impl LocalFsObjectStoreConfig {
     pub fn from_env() -> ConfigResult<Self> {
-        let root = if let Ok(value) = env::var("OA_OBJECT_STORE_ROOT") {
-            PathBuf::from(value)
-        } else {
-            let home = env::var("HOME")
-                .map_err(|_| ConfigError::MissingEnvWithDependency { key: "HOME" })?;
-            PathBuf::from(home).join(".open_archive").join("objects")
-        };
+        let root = optional_path_env("OA_OBJECT_STORE_ROOT")?
+            .unwrap_or(default_local_archive_root()?.join("objects"));
 
         Ok(Self { root })
+    }
+}
+
+fn default_local_archive_root() -> ConfigResult<PathBuf> {
+    Ok(home_dir()?.join(".open_archive"))
+}
+
+fn home_dir() -> ConfigResult<PathBuf> {
+    Ok(PathBuf::from(env::var("HOME").map_err(|_| {
+        ConfigError::MissingEnvWithDependency { key: "HOME" }
+    })?))
+}
+
+fn optional_path_env(key: &'static str) -> ConfigResult<Option<PathBuf>> {
+    optional_trimmed_env(key)
+        .map(|value| expand_home_path(&value))
+        .transpose()
+}
+
+fn expand_home_path(value: &str) -> ConfigResult<PathBuf> {
+    let Some(expanded) = expand_with_home(value)? else {
+        return Ok(PathBuf::from(value));
+    };
+    Ok(PathBuf::from(expanded))
+}
+
+fn expand_with_home(value: &str) -> ConfigResult<Option<String>> {
+    let Some(home) = home_dir_string_if_needed(value)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        if value == "~" || value == "$HOME" || value == "${HOME}" {
+            home
+        } else if let Some(rest) = value.strip_prefix("~/") {
+            format!("{home}/{rest}")
+        } else if let Some(rest) = value.strip_prefix("$HOME/") {
+            format!("{home}/{rest}")
+        } else if let Some(rest) = value.strip_prefix("${HOME}/") {
+            format!("{home}/{rest}")
+        } else {
+            home
+        },
+    ))
+}
+
+fn home_dir_string_if_needed(value: &str) -> ConfigResult<Option<String>> {
+    if matches!(value, "~" | "$HOME" | "${HOME}")
+        || value.starts_with("~/")
+        || value.starts_with("$HOME/")
+        || value.starts_with("${HOME}/")
+    {
+        Ok(Some(env::var("HOME").map_err(|_| {
+            ConfigError::MissingEnvWithDependency { key: "HOME" }
+        })?))
+    } else {
+        Ok(None)
     }
 }
 
@@ -949,6 +1034,13 @@ mod tests {
             "OA_QDRANT_COLLECTION",
             "OA_QDRANT_TIMEOUT_MS",
             "OA_QDRANT_EXACT",
+            "OA_QDRANT_MANAGED",
+            "OA_QDRANT_VERSION",
+            "OA_QDRANT_INSTALL_ROOT",
+            "OA_QDRANT_STORAGE_PATH",
+            "OA_QDRANT_LOG_PATH",
+            "OA_QDRANT_STARTUP_TIMEOUT_MS",
+            "OA_QDRANT_BINARY_PATH",
             "OA_OPENAI_REPAIR_MAX_OUTPUT_TOKENS",
             "OA_OBJECT_STORE_ROOT",
             "DATABASE_URL",
@@ -993,25 +1085,41 @@ mod tests {
     }
 
     #[test]
-    fn app_config_defaults_to_postgres_and_stubbed_future_providers() {
+    fn app_config_defaults_to_sqlite_qdrant_and_stubbed_future_providers() {
         let _guard = env_lock();
         clear_test_env();
-        std::env::set_var(
-            "OA_POSTGRES_URL",
-            "postgres://test:test@localhost/open_archive",
-        );
+        std::env::set_var("HOME", "/tmp/open-archive-config-defaults");
 
         let config = AppConfig::from_env().expect("app config should load");
 
         assert!(matches!(
             config.relational_store,
-            RelationalStoreConfig::Postgres(_)
+            RelationalStoreConfig::Sqlite(_)
         ));
-        assert!(matches!(
-            config.vector_store,
-            VectorStoreConfig::PostgresPgVector
-        ));
-        assert!(matches!(config.object_store, ObjectStoreConfig::LocalFs(_)));
+        let RelationalStoreConfig::Sqlite(sqlite) = config.relational_store else {
+            panic!("expected sqlite config");
+        };
+        assert_eq!(
+            sqlite.path,
+            PathBuf::from("/tmp/open-archive-config-defaults/.open_archive/open_archive.db")
+        );
+        let ObjectStoreConfig::LocalFs(local_fs) = config.object_store else {
+            panic!("expected local fs config");
+        };
+        assert_eq!(
+            local_fs.root,
+            PathBuf::from("/tmp/open-archive-config-defaults/.open_archive/objects")
+        );
+        let VectorStoreConfig::Qdrant(qdrant) = config.vector_store else {
+            panic!("expected qdrant config");
+        };
+        assert_eq!(qdrant.url, "http://127.0.0.1:6333");
+        assert!(qdrant.managed.enabled);
+        assert_eq!(qdrant.managed.version, "1.17.1");
+        assert_eq!(
+            qdrant.managed.install_root,
+            PathBuf::from("/tmp/open-archive-config-defaults/.open_archive/qdrant")
+        );
         assert_eq!(config.inference, InferenceConfig::Stub);
         assert_eq!(config.embeddings, EmbeddingConfig::Disabled);
         assert_eq!(config.inference_mode, InferenceExecutionMode::Batch);
@@ -1049,6 +1157,32 @@ mod tests {
         assert_eq!(sqlite.path, PathBuf::from("/tmp/open_archive.sqlite"));
         assert_eq!(sqlite.busy_timeout, Duration::from_secs(30));
         assert!(matches!(config.vector_store, VectorStoreConfig::Qdrant(_)));
+    }
+
+    #[test]
+    fn sqlite_and_local_fs_paths_expand_home_prefixes() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var("HOME", "/tmp/open-archive-home");
+        std::env::set_var("OA_SQLITE_PATH", "${HOME}/db/open_archive.sqlite");
+        std::env::set_var("OA_OBJECT_STORE_ROOT", "~/objects");
+
+        let config = AppConfig::from_env().expect("path expansion should work");
+        let RelationalStoreConfig::Sqlite(sqlite) = config.relational_store else {
+            panic!("expected sqlite config");
+        };
+        let ObjectStoreConfig::LocalFs(local_fs) = config.object_store else {
+            panic!("expected local fs config");
+        };
+
+        assert_eq!(
+            sqlite.path,
+            PathBuf::from("/tmp/open-archive-home/db/open_archive.sqlite")
+        );
+        assert_eq!(
+            local_fs.root,
+            PathBuf::from("/tmp/open-archive-home/objects")
+        );
     }
 
     #[test]
@@ -1114,6 +1248,42 @@ mod tests {
         assert_eq!(qdrant.collection_name, "oa_derived_object_embeddings");
         assert_eq!(qdrant.request_timeout, Duration::from_secs(30));
         assert!(qdrant.exact);
+        assert!(qdrant.managed.enabled);
+        assert_eq!(qdrant.managed.version, "1.17.1");
+    }
+
+    #[test]
+    fn qdrant_managed_paths_expand_home_prefixes() {
+        let _guard = env_lock();
+        clear_test_env();
+        std::env::set_var("HOME", "/tmp/open-archive-qdrant-home");
+        std::env::set_var("OA_RELATIONAL_STORE", "sqlite");
+        std::env::set_var("OA_QDRANT_INSTALL_ROOT", "${HOME}/managed-qdrant");
+        std::env::set_var("OA_QDRANT_STORAGE_PATH", "~/managed-qdrant/storage");
+        std::env::set_var("OA_QDRANT_LOG_PATH", "$HOME/managed-qdrant/qdrant.log");
+        std::env::set_var("OA_QDRANT_BINARY_PATH", "${HOME}/bin/qdrant");
+
+        let config = AppConfig::from_env().expect("qdrant config should load");
+        let VectorStoreConfig::Qdrant(qdrant) = config.vector_store else {
+            panic!("expected qdrant vector config");
+        };
+
+        assert_eq!(
+            qdrant.managed.install_root,
+            PathBuf::from("/tmp/open-archive-qdrant-home/managed-qdrant")
+        );
+        assert_eq!(
+            qdrant.managed.storage_path,
+            PathBuf::from("/tmp/open-archive-qdrant-home/managed-qdrant/storage")
+        );
+        assert_eq!(
+            qdrant.managed.log_path,
+            PathBuf::from("/tmp/open-archive-qdrant-home/managed-qdrant/qdrant.log")
+        );
+        assert_eq!(
+            qdrant.managed.binary_path,
+            Some(PathBuf::from("/tmp/open-archive-qdrant-home/bin/qdrant"))
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ endif
 COMPOSE_PROFILES ?= $(DB_PROFILE)
 COMPOSE_RUN = $(if $(COMPOSE_PROFILES),COMPOSE_PROFILES=$(COMPOSE_PROFILES) )OA_ORACLE_IMAGE=$(ORACLE_DB_IMAGE) $(COMPOSE)
 
-.PHONY: ensure-runtime-base build-runtime-base reset-oracle-db up up-ollama up-oracle-db up-qdrant down logs ps rebuild migrate shell status verify test-postgres-integration test-oracle-integration
+.PHONY: ensure-runtime-base build-runtime-base reset-oracle-db up up-ollama up-oracle-db up-qdrant down logs ps rebuild migrate shell status verify install-qdrant test-postgres-integration test-oracle-integration
 
 ensure-runtime-base:
 	@docker image inspect $(ORACLE_RUNTIME_BASE_IMAGE) >/dev/null 2>&1 || $(MAKE) build-runtime-base
@@ -68,6 +68,9 @@ verify:
 	cargo fmt --all -- --check
 	cargo clippy --all-targets -- -D warnings
 	cargo test --lib
+
+install-qdrant:
+	./scripts/install_qdrant.sh
 
 test-postgres-integration:
 	OA_POSTGRES_INTEGRATION_TESTS=1 OA_ALLOW_SCHEMA_RESET=1 cargo test --test postgres_import_write -- --ignored

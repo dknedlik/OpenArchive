@@ -5,7 +5,8 @@
 OpenArchive V1 proved the core local-first system shape and made it usable:
 
 - import and preserve real source payloads
-- persist a canonical archive in Postgres
+- persist a canonical archive in SQLite for local-first runtime
+- support Qdrant-backed semantic retrieval in local profile
 - keep raw payloads in object storage
 - run a durable enrichment pipeline
 - expose retrieval through MCP

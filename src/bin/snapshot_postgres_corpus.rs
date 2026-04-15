@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use open_archive::config::{QdrantConfig, SqliteConfig};
+use open_archive::config::{ManagedQdrantConfig, QdrantConfig, SqliteConfig};
 use open_archive::migrations;
 use open_archive::sqlite_db;
 use open_archive::storage::types::DerivedObjectType;
@@ -402,6 +402,27 @@ fn main() -> Result<()> {
             collection_name: args.qdrant_collection.clone(),
             request_timeout: Duration::from_secs(30),
             exact: true,
+            managed: ManagedQdrantConfig {
+                enabled: false,
+                version: "1.17.1".to_string(),
+                install_root: args
+                    .sqlite_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join(".managed-qdrant"),
+                storage_path: args
+                    .sqlite_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join(".managed-qdrant/storage"),
+                log_path: args
+                    .sqlite_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join(".managed-qdrant/qdrant.log"),
+                startup_timeout: Duration::from_secs(30),
+                binary_path: None,
+            },
         },
         None,
     )

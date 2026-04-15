@@ -5,8 +5,9 @@
 OpenArchive is a local-first archive and memory layer for AI-era personal
 data. The current V1 shape is:
 
-- local startup via Docker Compose
-- Postgres as the default relational backend
+- direct local startup on host
+- SQLite as the default relational backend
+- Qdrant as the default vector store, managed as a native sidecar
 - filesystem-backed object storage by default
 - MCP as the primary external interface
 - asynchronous enrichment with a database-backed job queue

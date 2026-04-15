@@ -17,6 +17,7 @@ pub mod object_store;
 pub mod parser;
 pub mod postgres_db;
 pub mod processor;
+pub mod qdrant_sidecar;
 pub mod shutdown;
 pub mod sqlite_db;
 pub mod storage;

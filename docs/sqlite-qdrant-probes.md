@@ -1,5 +1,14 @@
 # SQLite / Qdrant Probe Notes
 
+These probe results informed the current local-first default runtime:
+`sqlite` for relational state, `qdrant` for vectors, and `local_fs` for raw
+payload bytes.
+
+Probe examples below assume a local Qdrant instance is already running. The
+current `serve` and `mcp` binaries now install or launch a managed native
+Qdrant sidecar automatically; the older Docker-based probe command is no longer
+the mainline setup path.
+
 These probes are meant to answer the two main local-profile risks before
 building the full provider layer:
 
@@ -60,8 +69,6 @@ distribution and vector dimensionality.
 Example:
 
 ```bash
-COMPOSE_PROFILES=qdrant docker compose up -d qdrant
-
 cargo run --bin probe_qdrant_search -- \
   --qdrant-url http://127.0.0.1:6333 \
   --postgres-url postgres://openarchive:openarchive@127.0.0.1:5432/openarchive \

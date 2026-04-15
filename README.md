@@ -50,7 +50,10 @@ OpenArchive V1 is a working local-first MVP.
 
 What exists today:
 
-- Postgres as the mainline relational backend
+- SQLite as the default local relational backend, with Postgres and Oracle
+  still available as provider paths
+- Qdrant as the default vector store for the local profile, managed as a native
+  sidecar rather than a Docker dependency
 - Local filesystem object storage by default, with S3-compatible storage as an
   optional provider
 - Import handlers for ChatGPT, Claude, Grok, and Gemini export JSON
@@ -73,22 +76,26 @@ What is still missing or intentionally early:
 
 ### Prerequisites
 
-- Docker and Docker Compose
-- Rust and Cargo if you want to run the MCP server locally outside Docker
+- Rust and Cargo for source builds
 
-### 1. Start the local stack
+OpenArchive now defaults to local `sqlite` + `qdrant` + `local_fs`.
 
-Copy the example environment and start the stack:
+### 1. Prepare local config
+
+Copy the example environment:
 
 ```bash
 cp .env.example .env
-make up
 ```
 
-The checked-in `.env.example` is set up for a local smoke-test path:
+The checked-in `.env.example` is set up for local smoke-test path:
 
-- `OA_RELATIONAL_STORE=postgres`
+- `OA_RELATIONAL_STORE=sqlite`
+- `OA_VECTOR_STORE=qdrant`
 - `OA_OBJECT_STORE=local_fs`
+- `OA_SQLITE_PATH=${HOME}/.open_archive/open_archive.db`
+- `OA_OBJECT_STORE_ROOT=${HOME}/.open_archive/objects`
+- `OA_QDRANT_MANAGED=true`
 - `OA_MODEL_PROVIDER=stub`
 - `OA_INFERENCE_MODE=direct`
 - `OA_EMBEDDING_PROVIDER=disabled`
@@ -96,20 +103,50 @@ The checked-in `.env.example` is set up for a local smoke-test path:
 That path is useful for validating imports, storage, MCP wiring, and the job
 pipeline. It is not intended to represent real enrichment quality.
 
-Sanity-check the running service:
+Create local data directories before first run:
+
+```bash
+mkdir -p "${HOME}/.open_archive/objects"
+```
+
+### 2. Install or bundle Qdrant
+
+OpenArchive now manages Qdrant directly:
+
+- release installers can bundle the matching native `qdrant` binary next to the
+  OpenArchive executable
+- source builds can install the matching Qdrant release asset with:
+
+```bash
+cargo run --bin open_archive -- install-qdrant
+```
+
+If a bundled binary is present, OpenArchive uses it first. If not, the managed
+sidecar falls back to the downloaded binary under `${HOME}/.open_archive/qdrant`.
+
+### 3. Start OpenArchive locally
+
+Run migrations and start HTTP service directly on host:
+
+```bash
+cargo run --bin open_archive -- migrate
+cargo run --bin open_archive -- serve
+```
+
+When `serve` or `mcp` starts with `OA_VECTOR_STORE=qdrant`, OpenArchive will:
+
+- reuse an already healthy local Qdrant instance when one exists
+- otherwise launch the managed Qdrant sidecar automatically
+- if `127.0.0.1:6333` is busy, pick the next free local port instead of
+  crashing
+
+Sanity-check running service:
 
 ```bash
 curl http://localhost:3000/artifacts
 ```
 
-Useful operator commands:
-
-```bash
-make logs
-make down
-```
-
-### 2. Switch to a real inference provider
+### 4. Switch to a real inference provider
 
 For real enrichment, edit `.env` and set a hosted provider plus credentials.
 Supported inference providers today:
@@ -180,11 +217,11 @@ OA_GEMINI_API_KEY=...
 Gemini embeddings use the native Gemini API. OpenAI embeddings still support
 OpenAI-compatible endpoints through `OA_OPENAI_BASE_URL`.
 
-Embedding dimensions are effectively schema-level configuration. The first
-database setup fixes the vector column width. Changing
-`OA_EMBEDDING_DIMENSIONS` later requires a schema migration and re-embedding
-existing derived objects. Startup now fails fast if the configured dimensions
-do not match the Postgres schema.
+Embedding dimensions are effectively storage-level configuration. The first
+vector-store setup fixes the collection width. Changing
+`OA_EMBEDDING_DIMENSIONS` later requires recreating the Qdrant collection and
+re-embedding existing derived objects. The Postgres provider still enforces the
+same constraint through its vector column schema.
 
 ### Choosing extraction and reconcile models
 
@@ -328,6 +365,7 @@ The active documentation set is intentionally small:
 - [docs/architecture.md](docs/architecture.md)
 - [docs/domain-model.md](docs/domain-model.md)
 - [docs/engineering-rules.md](docs/engineering-rules.md)
+- [docs/sqlite-qdrant-probes.md](docs/sqlite-qdrant-probes.md)
 - [docs/roadmap.md](docs/roadmap.md)
 
 ## Contributing

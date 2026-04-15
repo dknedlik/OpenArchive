@@ -8,8 +8,8 @@ use clap::Parser;
 use open_archive::app::search::ObjectSearchService;
 use open_archive::bootstrap::build_service_bundle;
 use open_archive::config::{
-    AppConfig, LocalFsObjectStoreConfig, ObjectStoreConfig, QdrantConfig, RelationalStoreConfig,
-    SqliteConfig, VectorStoreConfig,
+    AppConfig, LocalFsObjectStoreConfig, ManagedQdrantConfig, ObjectStoreConfig, QdrantConfig,
+    RelationalStoreConfig, SqliteConfig, VectorStoreConfig,
 };
 use open_archive::embedding::EmbeddingProvider;
 use open_archive::storage::{
@@ -209,12 +209,21 @@ fn build_sqlite_backend(base: &AppConfig, args: &Args) -> Result<Backend> {
         path: args.sqlite_path.clone(),
         busy_timeout: Duration::from_secs(30),
     });
-    config.vector_store = VectorStoreConfig::Qdrant(QdrantConfig {
+    config.vector_store = VectorStoreConfig::Qdrant(Box::new(QdrantConfig {
         url: args.qdrant_url.clone(),
         collection_name: args.qdrant_collection.clone(),
         request_timeout: Duration::from_secs(30),
         exact: true,
-    });
+        managed: ManagedQdrantConfig {
+            enabled: false,
+            version: "1.17.1".to_string(),
+            install_root: args.sqlite_object_root.join(".managed-qdrant"),
+            storage_path: args.sqlite_object_root.join(".managed-qdrant/storage"),
+            log_path: args.sqlite_object_root.join(".managed-qdrant/qdrant.log"),
+            startup_timeout: Duration::from_secs(30),
+            binary_path: None,
+        },
+    }));
     config.object_store = ObjectStoreConfig::LocalFs(LocalFsObjectStoreConfig {
         root: args.sqlite_object_root.clone(),
     });

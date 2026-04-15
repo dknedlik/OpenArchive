@@ -36,7 +36,9 @@ fn main() -> Result<(), anyhow::Error> {
     let _ = dotenvy::dotenv();
     normalize_stdio_postgres_url(explicit_postgres_url);
 
-    let config = AppConfig::from_env().context("failed to load application configuration")?;
+    let mut config = AppConfig::from_env().context("failed to load application configuration")?;
+    let _managed_qdrant = open_archive::qdrant_sidecar::ensure_managed_qdrant(&mut config)
+        .context("failed to prepare managed Qdrant")?;
     info!("[open-archive-mcp] configuration loaded");
 
     let services = build_service_bundle(&config)

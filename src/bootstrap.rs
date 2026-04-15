@@ -215,7 +215,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                     ),
                     VectorStoreConfig::Qdrant(qdrant_config) => {
                         let qdrant_impl = Arc::new(QdrantVectorStore::new(
-                            qdrant_config.clone(),
+                            qdrant_config.as_ref().clone(),
                             embedding_provider.as_deref(),
                         )?);
                         let composite_impl = Arc::new(CompositeDerivedObjectSearchStore::new(
@@ -300,7 +300,7 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                     VectorStoreConfig::PostgresPgVector => unreachable!("validated above"),
                     VectorStoreConfig::Qdrant(qdrant_config) => {
                         let qdrant_impl = Arc::new(QdrantVectorStore::new(
-                            qdrant_config.clone(),
+                            qdrant_config.as_ref().clone(),
                             embedding_provider.as_deref(),
                         )?);
                         let composite_impl = Arc::new(CompositeDerivedObjectSearchStore::new(

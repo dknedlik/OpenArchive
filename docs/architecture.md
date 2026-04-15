@@ -22,14 +22,18 @@ branching belongs there, not inside domain logic or request handlers.
 
 The default deployment shape is local-first:
 
-- Docker Compose for local startup
-- Postgres as the mainline relational backend
+- direct host startup with `cargo run --bin open_archive -- serve`
+- SQLite as the default relational backend
+- Qdrant as the default vector store, managed as a colocated native sidecar
 - local filesystem object storage for raw payloads
 - hosted inference providers or stub inference
 - MCP as the primary external interface
 
 Optional provider paths:
 
+- bundled Qdrant binary in installer artifacts, with release-download fallback
+  for source builds
+- Postgres as alternate relational backend
 - S3-compatible object storage instead of local filesystem storage
 - Oracle as a legacy relational provider that still exists in the codebase but
   is no longer the mainline contributor path
@@ -152,10 +156,11 @@ Rules:
 
 Current provider families:
 
-- relational storage: Postgres, Oracle
+- relational storage: SQLite, Postgres, Oracle
+- vector storage: Qdrant, Postgres pgvector, disabled
 - object storage: local filesystem, S3-compatible
 - inference: stub, OpenAI, Gemini, Anthropic, Grok
-- embeddings: disabled, stub, OpenAI
+- embeddings: disabled, stub, Gemini, OpenAI
 
 ## Architectural Constraints
 

@@ -24,6 +24,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    InstallQdrant,
     OracleCheck,
     Migrate,
     MigrateCheck,
@@ -34,6 +35,7 @@ fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::InstallQdrant => install_qdrant(),
         Command::OracleCheck => oracle_check(),
         Command::Migrate => {
             let config =
@@ -68,10 +70,21 @@ fn oracle_check() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+fn install_qdrant() -> Result<(), anyhow::Error> {
+    let config = AppConfig::from_env().context("failed to load application configuration")?;
+    let path = open_archive::qdrant_sidecar::install_managed_qdrant(&config)
+        .context("failed to install managed Qdrant")?;
+    println!("qdrant_binary={}", path.display());
+    Ok(())
+}
+
 fn serve() -> Result<(), anyhow::Error> {
     env_logger::init();
 
-    let app_config = AppConfig::from_env().context("failed to load application configuration")?;
+    let mut app_config =
+        AppConfig::from_env().context("failed to load application configuration")?;
+    let _managed_qdrant = open_archive::qdrant_sidecar::ensure_managed_qdrant(&mut app_config)
+        .context("failed to prepare managed Qdrant")?;
     migrations::migrate(&app_config).context("failed to apply database migrations before serve")?;
     let http_config = app_config.http.clone();
     let services = build_service_bundle(&app_config)
