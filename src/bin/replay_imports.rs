@@ -1,16 +1,23 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use open_archive::config::ObjectStoreConfig;
-use open_archive::object_store::{LocalFsObjectStore, ObjectStore, S3CompatibleObjectStore, StoredObject};
+use open_archive::object_store::{
+    LocalFsObjectStore, ObjectStore, S3CompatibleObjectStore, StoredObject,
+};
 use open_archive::storage::SourceType;
 use reqwest::blocking::Client;
 use reqwest::StatusCode;
 
 #[derive(Parser, Debug)]
 #[command(name = "replay_imports")]
-#[command(about = "Replay persisted raw import payloads from Postgres into a target OpenArchive app")]
+#[command(
+    about = "Replay persisted raw import payloads from Postgres into a target OpenArchive app"
+)]
 struct Cli {
-    #[arg(long, default_value = "postgres://openarchive:openarchive@127.0.0.1:5432/openarchive")]
+    #[arg(
+        long,
+        default_value = "postgres://openarchive:openarchive@127.0.0.1:5432/openarchive"
+    )]
     postgres_url: String,
 
     #[arg(long, default_value = "http://127.0.0.1:3111")]
@@ -40,7 +47,9 @@ fn main() -> Result<()> {
 
     let object_store = build_object_store()?;
     let imports = load_imports(&cli)?;
-    let client = Client::builder().build().context("failed to build HTTP client")?;
+    let client = Client::builder()
+        .build()
+        .context("failed to build HTTP client")?;
 
     println!("imports_found={}", imports.len());
 
@@ -61,11 +70,10 @@ fn main() -> Result<()> {
             .get_object_bytes(&import.stored_object)
             .with_context(|| format!("failed to read object for import {}", import.import_id))?;
 
-        let response = client
-            .post(&url)
-            .body(bytes)
-            .send()
-            .with_context(|| format!("failed to POST import {} to {}", import.import_id, url))?;
+        let response =
+            client.post(&url).body(bytes).send().with_context(|| {
+                format!("failed to POST import {} to {}", import.import_id, url)
+            })?;
 
         if response.status() != StatusCode::OK {
             let status = response.status();
@@ -73,12 +81,13 @@ fn main() -> Result<()> {
             failed += 1;
             eprintln!(
                 "import_id={} status={} body={}",
-                import.import_id,
-                status,
-                body
+                import.import_id, status, body
             );
             if cli.stop_on_error {
-                return Err(anyhow!("stopping after replay failure for {}", import.import_id));
+                return Err(anyhow!(
+                    "stopping after replay failure for {}",
+                    import.import_id
+                ));
             }
             continue;
         }

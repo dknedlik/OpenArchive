@@ -102,16 +102,14 @@ struct RunSummary {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.command.unwrap_or_else(|| {
-        CommandKind::Run(RunArgs {
-            db_path: None,
-            jobs: 2_000,
-            workers: 4,
-            process_ms: 5,
-            busy_timeout_ms: DEFAULT_BUSY_TIMEOUT_MS,
-            keep_db: false,
-        })
-    }) {
+    match cli.command.unwrap_or(CommandKind::Run(RunArgs {
+        db_path: None,
+        jobs: 2_000,
+        workers: 4,
+        process_ms: 5,
+        busy_timeout_ms: DEFAULT_BUSY_TIMEOUT_MS,
+        keep_db: false,
+    })) {
         CommandKind::Run(args) => run_probe(args),
         CommandKind::Worker(args) => worker_entry(args),
     }

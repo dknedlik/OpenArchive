@@ -30,6 +30,15 @@ use crate::storage::{
 };
 use crate::vector::QdrantVectorStore;
 
+type CrossArtifactStoreArc = Arc<dyn crate::storage::CrossArtifactReadStore + Send + Sync>;
+type ObjectSearchStoreArc = Arc<dyn crate::storage::DerivedObjectSearchStore + Send + Sync>;
+type EmbeddingStoreArc = Arc<dyn crate::storage::DerivedObjectEmbeddingStore>;
+type VectorStoreBundle = (
+    CrossArtifactStoreArc,
+    ObjectSearchStoreArc,
+    Option<EmbeddingStoreArc>,
+);
+
 pub struct ServiceBundle {
     pub app: Arc<ArchiveApplication>,
     pub read_store: Arc<dyn ArtifactReadStore>,
@@ -190,37 +199,34 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
             let lookup_store: Arc<dyn crate::storage::DerivedObjectLookupStore + Send + Sync> =
                 retrieval_impl.clone();
 
-            let (cross_artifact_store, object_search_store, embedding_store): (
-                Arc<dyn crate::storage::CrossArtifactReadStore + Send + Sync>,
-                Arc<dyn crate::storage::DerivedObjectSearchStore + Send + Sync>,
-                Option<Arc<dyn crate::storage::DerivedObjectEmbeddingStore>>,
-            ) = match &config.vector_store {
-                VectorStoreConfig::Disabled => (
-                    postgres_cross_artifact_store,
-                    postgres_object_search_store,
-                    None,
-                ),
-                VectorStoreConfig::PostgresPgVector => (
-                    postgres_cross_artifact_store,
-                    postgres_object_search_store,
-                    Some(Arc::new(PostgresDerivedObjectEmbeddingStore::new(
-                        pg_config.clone(),
-                    ))),
-                ),
-                VectorStoreConfig::Qdrant(qdrant_config) => {
-                    let qdrant_impl = Arc::new(QdrantVectorStore::new(
-                        qdrant_config.clone(),
-                        embedding_provider.as_deref(),
-                    )?);
-                    let composite_impl = Arc::new(CompositeDerivedObjectSearchStore::new(
-                        postgres_object_search_store,
-                        lookup_store,
+            let (cross_artifact_store, object_search_store, embedding_store): VectorStoreBundle =
+                match &config.vector_store {
+                    VectorStoreConfig::Disabled => (
                         postgres_cross_artifact_store,
-                        qdrant_impl.clone(),
-                    ));
-                    (composite_impl.clone(), composite_impl, Some(qdrant_impl))
-                }
-            };
+                        postgres_object_search_store,
+                        None,
+                    ),
+                    VectorStoreConfig::PostgresPgVector => (
+                        postgres_cross_artifact_store,
+                        postgres_object_search_store,
+                        Some(Arc::new(PostgresDerivedObjectEmbeddingStore::new(
+                            pg_config.clone(),
+                        ))),
+                    ),
+                    VectorStoreConfig::Qdrant(qdrant_config) => {
+                        let qdrant_impl = Arc::new(QdrantVectorStore::new(
+                            qdrant_config.clone(),
+                            embedding_provider.as_deref(),
+                        )?);
+                        let composite_impl = Arc::new(CompositeDerivedObjectSearchStore::new(
+                            postgres_object_search_store,
+                            lookup_store,
+                            postgres_cross_artifact_store,
+                            qdrant_impl.clone(),
+                        ));
+                        (composite_impl.clone(), composite_impl, Some(qdrant_impl))
+                    }
+                };
             let app = Arc::new(ArchiveApplication::new(ArchiveApplicationDeps {
                 import_store: Arc::clone(&import_store),
                 read_store: Arc::clone(&read_store),
@@ -284,31 +290,28 @@ pub fn build_service_bundle(config: &AppConfig) -> ConfigResult<ServiceBundle> {
                 Arc::new(SqliteWritebackStore::new(sqlite_config.clone()));
             let processor_factory = build_processor_factory(&config.inference)?;
 
-            let (cross_artifact_store, object_search_store, embedding_store): (
-                Arc<dyn crate::storage::CrossArtifactReadStore + Send + Sync>,
-                Arc<dyn crate::storage::DerivedObjectSearchStore + Send + Sync>,
-                Option<Arc<dyn crate::storage::DerivedObjectEmbeddingStore>>,
-            ) = match &config.vector_store {
-                VectorStoreConfig::Disabled => (
-                    sqlite_cross_artifact_store,
-                    sqlite_object_search_store,
-                    None,
-                ),
-                VectorStoreConfig::PostgresPgVector => unreachable!("validated above"),
-                VectorStoreConfig::Qdrant(qdrant_config) => {
-                    let qdrant_impl = Arc::new(QdrantVectorStore::new(
-                        qdrant_config.clone(),
-                        embedding_provider.as_deref(),
-                    )?);
-                    let composite_impl = Arc::new(CompositeDerivedObjectSearchStore::new(
-                        sqlite_object_search_store,
-                        lookup_store,
+            let (cross_artifact_store, object_search_store, embedding_store): VectorStoreBundle =
+                match &config.vector_store {
+                    VectorStoreConfig::Disabled => (
                         sqlite_cross_artifact_store,
-                        qdrant_impl.clone(),
-                    ));
-                    (composite_impl.clone(), composite_impl, Some(qdrant_impl))
-                }
-            };
+                        sqlite_object_search_store,
+                        None,
+                    ),
+                    VectorStoreConfig::PostgresPgVector => unreachable!("validated above"),
+                    VectorStoreConfig::Qdrant(qdrant_config) => {
+                        let qdrant_impl = Arc::new(QdrantVectorStore::new(
+                            qdrant_config.clone(),
+                            embedding_provider.as_deref(),
+                        )?);
+                        let composite_impl = Arc::new(CompositeDerivedObjectSearchStore::new(
+                            sqlite_object_search_store,
+                            lookup_store,
+                            sqlite_cross_artifact_store,
+                            qdrant_impl.clone(),
+                        ));
+                        (composite_impl.clone(), composite_impl, Some(qdrant_impl))
+                    }
+                };
 
             let app = Arc::new(ArchiveApplication::new(ArchiveApplicationDeps {
                 import_store: Arc::clone(&import_store),

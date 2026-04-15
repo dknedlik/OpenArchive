@@ -132,14 +132,14 @@ fn is_sqlite_contention_error_message(message: &str) -> bool {
 
 fn is_sqlite_contention_error(error: &StorageError) -> bool {
     match error {
-        StorageError::Db(DbError::ConnectSqlite { source, .. }) => source
-            .sqlite_error_code()
-            .is_some_and(|code| {
+        StorageError::Db(DbError::ConnectSqlite { source, .. }) => {
+            source.sqlite_error_code().is_some_and(|code| {
                 matches!(
                     code,
                     rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
                 )
-            }),
+            })
+        }
         _ => is_sqlite_contention_error_message(&error.to_string()),
     }
 }
@@ -1431,6 +1431,91 @@ fn load_artifact_for_enrichment_record(
     }))
 }
 
+/// FTS5 query mode. `Plain` rewrites a bag-of-words query into an OR of quoted
+/// tokens so that adding terms broadens results instead of eliminating them
+/// (matching the spirit of Postgres `plainto_tsquery` rewritten with `|`).
+/// `Operator` passes the user query straight through to FTS5 so power users can
+/// write phrase queries (`"exact phrase"`), explicit operators (`AND`/`OR`/`NOT`),
+/// `NEAR(...)`, prefix tokens (`foo*`), and column filters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqliteSearchQueryMode {
+    Plain,
+    Operator,
+}
+
+fn detect_search_query_mode(query: &str) -> SqliteSearchQueryMode {
+    // Only route to Operator mode when the query looks intentionally written
+    // for FTS5 syntax. Stray punctuation in a casual query (an unbalanced `"`
+    // from a half-finished phrase, a lone `(`, etc.) would otherwise crash
+    // FTS5 parsing — Plain mode escapes those characters safely.
+    let quote_count = query.chars().filter(|c| *c == '"').count();
+    let open_paren_count = query.chars().filter(|c| *c == '(').count();
+    let close_paren_count = query.chars().filter(|c| *c == ')').count();
+    let has_balanced_quotes = quote_count >= 2 && quote_count % 2 == 0;
+    let has_balanced_parens = open_paren_count > 0 && open_paren_count == close_paren_count;
+    let has_prefix = query.split_whitespace().any(|tok| {
+        // Trailing `*` on a bare token is FTS5 prefix syntax. Ignore standalone
+        // `*` and any token containing other punctuation we already escape.
+        let bytes = tok.as_bytes();
+        bytes.len() >= 2
+            && bytes[bytes.len() - 1] == b'*'
+            && bytes[..bytes.len() - 1]
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    });
+    let has_operator = query
+        .split_whitespace()
+        .any(|tok| matches!(tok, "AND" | "OR" | "NOT" | "NEAR"));
+    if has_balanced_quotes || has_balanced_parens || has_prefix || has_operator {
+        SqliteSearchQueryMode::Operator
+    } else {
+        SqliteSearchQueryMode::Plain
+    }
+}
+
+/// Build an FTS5 MATCH expression from a free-text query. Returns `None` when
+/// the query reduces to no usable tokens.
+///
+/// In `Plain` mode each whitespace-separated token is wrapped in double quotes
+/// (with embedded `"` escaped as `""`) and joined with ` OR `. Quoting disables
+/// FTS5 operator parsing, so punctuation in user input is treated as a plain
+/// phrase rather than a syntax error.
+///
+/// In `Operator` mode the query is forwarded verbatim.
+fn build_fts5_match_expression(query: &str) -> Option<String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match detect_search_query_mode(trimmed) {
+        SqliteSearchQueryMode::Operator => Some(trimmed.to_string()),
+        SqliteSearchQueryMode::Plain => {
+            let tokens: Vec<String> = trimmed
+                .split_whitespace()
+                .filter(|tok| !tok.is_empty())
+                .map(|tok| format!("\"{}\"", tok.replace('"', "\"\"")))
+                .collect();
+            if tokens.is_empty() {
+                None
+            } else {
+                Some(tokens.join(" OR "))
+            }
+        }
+    }
+}
+
+/// Convert FTS5 `bm25()` (smaller / more negative is better) into a non-negative
+/// integer bonus to add on top of a `score_hint` base. Mirrors the
+/// `base + GREATEST(0, FLOOR(rank * scale))` shape used by the Postgres path.
+fn fts5_bm25_score_bonus(bm25: f64) -> i32 {
+    let scaled = (-bm25) * 10.0;
+    if !scaled.is_finite() || scaled <= 0.0 {
+        0
+    } else {
+        scaled.round().min(i32::MAX as f64) as i32
+    }
+}
+
 fn artifact_filter_conditions(
     filters: &SearchFilters,
     artifact_alias: &str,
@@ -1690,18 +1775,22 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
         }
 
         let connection = open_connection(&self.config)?;
+        // Substring pattern is used by the lexical fallbacks for
+        // tag / alias / note-path matches (those columns aren't FTS-indexed).
         let pattern = format!("%{}%", query_text.to_lowercase());
+        let fts_match = build_fts5_match_expression(query_text);
         let mut candidates = Vec::new();
 
-        {
-            let mut values = vec![pattern.clone()];
+        if let Some(match_expr) = fts_match.as_ref() {
+            let mut values: Vec<String> = vec![match_expr.clone()];
             let filter_sql = artifact_filter_conditions(filters, "a", &mut values);
             values.push(limit.to_string());
             let sql = format!(
-                "SELECT a.artifact_id, a.title
-                 FROM oa_artifact a
-                 WHERE lower(coalesce(a.title, '')) LIKE ? AND {filter_sql}
-                 ORDER BY a.captured_at DESC, a.artifact_id ASC
+                "SELECT a.artifact_id, a.title, bm25(oa_artifact_fts) AS rank_score
+                 FROM oa_artifact_fts
+                 JOIN oa_artifact a ON a.rowid = oa_artifact_fts.rowid
+                 WHERE oa_artifact_fts MATCH ?1 AND {filter_sql}
+                 ORDER BY rank_score ASC
                  LIMIT ?"
             );
             let mut stmt = connection
@@ -1709,12 +1798,13 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
                 .map_err(|source| db_err(&self.config, source))?;
             let rows = stmt
                 .query_map(params_from_iter(values.iter()), |row| {
+                    let bm25: f64 = row.get(2)?;
                     Ok(ArchiveSearchCandidate {
                         artifact_id: row.get(0)?,
                         match_record_id: row.get(0)?,
                         match_kind: SearchCandidateKind::ArtifactTitle,
                         snippet: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                        score_hint: 240,
+                        score_hint: 240 + fts5_bm25_score_bonus(bm25),
                     })
                 })
                 .map_err(|source| db_err(&self.config, source))?;
@@ -1819,8 +1909,8 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
             );
         }
 
-        {
-            let mut values = vec![pattern.clone(), pattern.clone()];
+        if let Some(match_expr) = fts_match.as_ref() {
+            let mut values: Vec<String> = vec![match_expr.clone()];
             let filter_sql = artifact_filter_conditions(filters, "a", &mut values);
             if let Some(object_type) = filters.object_type {
                 values.push(object_type.as_str().to_string());
@@ -1832,14 +1922,17 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
                 ""
             };
             let sql = format!(
-                "SELECT d.artifact_id, d.derived_object_id, d.derived_object_type, COALESCE(d.title, d.body_text, '')
-                 FROM oa_derived_object d
+                "SELECT d.artifact_id, d.derived_object_id, d.derived_object_type,
+                        COALESCE(d.title, d.body_text, ''),
+                        bm25(oa_derived_object_fts) AS rank_score
+                 FROM oa_derived_object_fts
+                 JOIN oa_derived_object d ON d.rowid = oa_derived_object_fts.rowid
                  JOIN oa_artifact a ON a.artifact_id = d.artifact_id
-                 WHERE d.object_status = 'active'
-                   AND (lower(coalesce(d.title, '')) LIKE ? OR lower(coalesce(d.body_text, '')) LIKE ?)
+                 WHERE oa_derived_object_fts MATCH ?1
+                   AND d.object_status = 'active'
                    AND {filter_sql}
                    {object_filter}
-                 ORDER BY d.confidence_score DESC, d.derived_object_id ASC
+                 ORDER BY rank_score ASC
                  LIMIT ?"
             );
             let mut stmt = connection
@@ -1847,6 +1940,7 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
                 .map_err(|source| db_err(&self.config, source))?;
             let rows = stmt
                 .query_map(params_from_iter(values.iter()), |row| {
+                    let bm25: f64 = row.get(4)?;
                     Ok(ArchiveSearchCandidate {
                         artifact_id: row.get(0)?,
                         match_record_id: row.get(1)?,
@@ -1854,7 +1948,7 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
                             derived_type: parse_derived_object_type(row.get(2)?)?,
                         },
                         snippet: row.get::<_, String>(3)?,
-                        score_hint: 260,
+                        score_hint: 260 + fts5_bm25_score_bonus(bm25),
                     })
                 })
                 .map_err(|source| db_err(&self.config, source))?;
@@ -1865,35 +1959,41 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
         }
 
         if filters.object_type.is_none() {
-            let mut values = vec![pattern.clone()];
-            let filter_sql = artifact_filter_conditions(filters, "a", &mut values);
-            values.push(limit.to_string());
-            let sql = format!(
-                "SELECT s.artifact_id, s.segment_id, substr(s.text_content, 1, 240)
-                 FROM oa_segment s
-                 JOIN oa_artifact a ON a.artifact_id = s.artifact_id
-                 WHERE lower(coalesce(s.text_content, '')) LIKE ? AND {filter_sql}
-                 ORDER BY s.sequence_no ASC, s.segment_id ASC
-                 LIMIT ?"
-            );
-            let mut stmt = connection
-                .prepare(&sql)
-                .map_err(|source| db_err(&self.config, source))?;
-            let rows = stmt
-                .query_map(params_from_iter(values.iter()), |row| {
-                    Ok(ArchiveSearchCandidate {
-                        artifact_id: row.get(0)?,
-                        match_record_id: row.get(1)?,
-                        match_kind: SearchCandidateKind::SegmentExcerpt,
-                        snippet: row.get(2)?,
-                        score_hint: 200,
+            if let Some(match_expr) = fts_match.as_ref() {
+                let mut values: Vec<String> = vec![match_expr.clone()];
+                let filter_sql = artifact_filter_conditions(filters, "a", &mut values);
+                values.push(limit.to_string());
+                let sql = format!(
+                    "SELECT s.artifact_id, s.segment_id,
+                            substr(s.text_content, 1, 240),
+                            bm25(oa_segment_fts) AS rank_score
+                     FROM oa_segment_fts
+                     JOIN oa_segment s ON s.rowid = oa_segment_fts.rowid
+                     JOIN oa_artifact a ON a.artifact_id = s.artifact_id
+                     WHERE oa_segment_fts MATCH ?1 AND {filter_sql}
+                     ORDER BY rank_score ASC
+                     LIMIT ?"
+                );
+                let mut stmt = connection
+                    .prepare(&sql)
+                    .map_err(|source| db_err(&self.config, source))?;
+                let rows = stmt
+                    .query_map(params_from_iter(values.iter()), |row| {
+                        let bm25: f64 = row.get(3)?;
+                        Ok(ArchiveSearchCandidate {
+                            artifact_id: row.get(0)?,
+                            match_record_id: row.get(1)?,
+                            match_kind: SearchCandidateKind::SegmentExcerpt,
+                            snippet: row.get(2)?,
+                            score_hint: 200 + fts5_bm25_score_bonus(bm25),
+                        })
                     })
-                })
-                .map_err(|source| db_err(&self.config, source))?;
-            candidates.extend(
-                rows.collect::<Result<Vec<_>, _>>()
-                    .map_err(|source| db_err(&self.config, source))?,
-            );
+                    .map_err(|source| db_err(&self.config, source))?;
+                candidates.extend(
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|source| db_err(&self.config, source))?,
+                );
+            }
         }
 
         candidates.sort_by(|left, right| {
@@ -1961,49 +2061,75 @@ impl DerivedObjectSearchStore for SqliteRetrievalReadStore {
         limit: usize,
     ) -> StorageResult<Vec<DerivedObjectSearchResult>> {
         let connection = open_connection(&self.config)?;
-        let mut values = Vec::new();
-        let mut conditions = vec!["object_status = 'active'".to_string()];
-        if let Some(query) = filters
+
+        // If the caller provided a free-text query, rewrite it through the
+        // shared FTS5 builder and rank with bm25. Otherwise fall back to a
+        // plain confidence-ordered scan so callers that filter only by type /
+        // candidate_key / artifact_id keep working.
+        let normalized_query = filters
             .query
             .as_ref()
             .map(|q| q.trim())
-            .filter(|q| !q.is_empty())
-        {
-            let pattern = format!("%{}%", query.to_lowercase());
-            conditions.push(
-                "(lower(coalesce(title, '')) LIKE ? OR lower(coalesce(body_text, '')) LIKE ?)"
+            .filter(|q| !q.is_empty());
+        let fts_match = normalized_query.and_then(build_fts5_match_expression);
+
+        let mut values: Vec<String> = Vec::new();
+        let mut conditions = vec!["d.object_status = 'active'".to_string()];
+
+        let (from_clause, rank_select, order_clause) = if fts_match.is_some() {
+            (
+                "oa_derived_object_fts \
+                 JOIN oa_derived_object d ON d.rowid = oa_derived_object_fts.rowid"
                     .to_string(),
-            );
-            values.push(pattern.clone());
-            values.push(pattern);
+                ", bm25(oa_derived_object_fts) AS rank_score".to_string(),
+                "ORDER BY rank_score ASC".to_string(),
+            )
+        } else {
+            (
+                "oa_derived_object d".to_string(),
+                ", NULL AS rank_score".to_string(),
+                "ORDER BY COALESCE(d.confidence_score, 0.0) DESC, d.derived_object_id ASC"
+                    .to_string(),
+            )
+        };
+
+        if let Some(match_expr) = fts_match.as_ref() {
+            conditions.push("oa_derived_object_fts MATCH ?".to_string());
+            values.push(match_expr.clone());
         }
         if let Some(object_type) = filters.object_type {
-            conditions.push("derived_object_type = ?".to_string());
+            conditions.push("d.derived_object_type = ?".to_string());
             values.push(object_type.as_str().to_string());
         }
         if let Some(candidate_key) = filters.candidate_key.as_ref() {
-            conditions.push("candidate_key = ?".to_string());
+            conditions.push("d.candidate_key = ?".to_string());
             values.push(candidate_key.clone());
         }
         if let Some(artifact_id) = filters.artifact_id.as_ref() {
-            conditions.push("artifact_id = ?".to_string());
+            conditions.push("d.artifact_id = ?".to_string());
             values.push(artifact_id.clone());
         }
         values.push(limit.to_string());
 
         let sql = format!(
-            "SELECT derived_object_id, artifact_id, derived_object_type, title, body_text, candidate_key, confidence_score
-             FROM oa_derived_object
-             WHERE {}
-             ORDER BY COALESCE(confidence_score, 0.0) DESC, derived_object_id ASC
+            "SELECT d.derived_object_id, d.artifact_id, d.derived_object_type,
+                    d.title, d.body_text, d.candidate_key, d.confidence_score
+                    {rank_select}
+             FROM {from_clause}
+             WHERE {where_clause}
+             {order_clause}
              LIMIT ?",
-            conditions.join(" AND ")
+            rank_select = rank_select,
+            from_clause = from_clause,
+            where_clause = conditions.join(" AND "),
+            order_clause = order_clause,
         );
         let mut stmt = connection
             .prepare(&sql)
             .map_err(|source| db_err(&self.config, source))?;
         let rows = stmt
             .query_map(params_from_iter(values.iter()), |row| {
+                let bm25: Option<f64> = row.get(7)?;
                 Ok(DerivedObjectSearchResult {
                     derived_object_id: row.get(0)?,
                     artifact_id: row.get(1)?,
@@ -2012,7 +2138,10 @@ impl DerivedObjectSearchStore for SqliteRetrievalReadStore {
                     body_text: row.get(4)?,
                     candidate_key: row.get(5)?,
                     confidence_score: row.get(6)?,
-                    score: None,
+                    // Surface a positive lexical relevance score (higher = better).
+                    // `app::search::normalize_lexical_score` re-normalizes this
+                    // before blending with semantic scores.
+                    score: bm25.map(|value| (-value) as f32),
                 })
             })
             .map_err(|source| db_err(&self.config, source))?;
@@ -3623,5 +3752,118 @@ impl WritebackStore for SqliteWritebackStore {
         .map_err(|source| db_err(&self.config, source))?;
         tx.commit().map_err(|source| db_err(&self.config, source))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod fts5_helper_tests {
+    use super::{
+        build_fts5_match_expression, detect_search_query_mode, fts5_bm25_score_bonus,
+        SqliteSearchQueryMode,
+    };
+
+    #[test]
+    fn plain_query_becomes_or_of_quoted_tokens() {
+        assert_eq!(
+            build_fts5_match_expression("dressage horse training").as_deref(),
+            Some("\"dressage\" OR \"horse\" OR \"training\"")
+        );
+    }
+
+    #[test]
+    fn single_token_plain_query_is_quoted() {
+        assert_eq!(
+            build_fts5_match_expression("dressage").as_deref(),
+            Some("\"dressage\"")
+        );
+    }
+
+    #[test]
+    fn extra_whitespace_is_collapsed() {
+        assert_eq!(
+            build_fts5_match_expression("  blood   pressure  ").as_deref(),
+            Some("\"blood\" OR \"pressure\"")
+        );
+    }
+
+    #[test]
+    fn empty_query_yields_none() {
+        assert!(build_fts5_match_expression("").is_none());
+        assert!(build_fts5_match_expression("   ").is_none());
+    }
+
+    #[test]
+    fn embedded_double_quote_is_escaped() {
+        // FTS5 escapes a literal `"` inside a quoted token by doubling it.
+        assert_eq!(
+            build_fts5_match_expression("foo\"bar").as_deref(),
+            Some("\"foo\"\"bar\"")
+        );
+    }
+
+    #[test]
+    fn operator_query_passes_through_verbatim() {
+        let raw = "memory AND retrieval NOT cache";
+        assert_eq!(
+            detect_search_query_mode(raw),
+            SqliteSearchQueryMode::Operator
+        );
+        assert_eq!(build_fts5_match_expression(raw).as_deref(), Some(raw));
+    }
+
+    #[test]
+    fn quoted_phrase_query_passes_through_verbatim() {
+        let raw = "\"enrichment pipeline\"";
+        assert_eq!(
+            detect_search_query_mode(raw),
+            SqliteSearchQueryMode::Operator
+        );
+        assert_eq!(build_fts5_match_expression(raw).as_deref(), Some(raw));
+    }
+
+    #[test]
+    fn parenthesized_query_is_operator_mode() {
+        let raw = "(memory OR summary) AND retrieval";
+        assert_eq!(
+            detect_search_query_mode(raw),
+            SqliteSearchQueryMode::Operator
+        );
+    }
+
+    #[test]
+    fn prefix_query_is_operator_mode() {
+        let raw = "dressag*";
+        assert_eq!(
+            detect_search_query_mode(raw),
+            SqliteSearchQueryMode::Operator
+        );
+        assert_eq!(build_fts5_match_expression(raw).as_deref(), Some(raw));
+    }
+
+    #[test]
+    fn lowercase_and_or_not_are_treated_as_plain_tokens() {
+        // FTS5 only treats uppercase AND/OR/NOT as operators, so a lowercase
+        // "and" should be quoted like any other plain token. This matches the
+        // intent of "adding a term broadens results".
+        assert_eq!(
+            build_fts5_match_expression("dressage and horse").as_deref(),
+            Some("\"dressage\" OR \"and\" OR \"horse\"")
+        );
+    }
+
+    #[test]
+    fn bm25_bonus_rewards_better_matches_with_larger_values() {
+        // bm25() returns smaller (more negative) values for better matches.
+        let weak = fts5_bm25_score_bonus(-0.1);
+        let strong = fts5_bm25_score_bonus(-2.5);
+        assert!(strong > weak, "strong={strong} should exceed weak={weak}");
+    }
+
+    #[test]
+    fn bm25_bonus_clamps_non_matches_to_zero() {
+        assert_eq!(fts5_bm25_score_bonus(0.0), 0);
+        assert_eq!(fts5_bm25_score_bonus(1.5), 0);
+        assert_eq!(fts5_bm25_score_bonus(f64::NAN), 0);
+        assert_eq!(fts5_bm25_score_bonus(f64::INFINITY), 0);
     }
 }

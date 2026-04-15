@@ -183,14 +183,15 @@ impl ArchiveSearchService {
             .map(|result| {
                 let snippet = archive_semantic_snippet(&result);
                 ArchiveSearchHit {
-                artifact_id: result.artifact_id,
-                match_kind: SearchMatchKind::DerivedObject {
-                    derived_object_id: result.derived_object_id,
-                    derived_type: result.derived_object_type,
-                },
-                snippet,
-                score: result.score.unwrap_or_default(),
-            }})
+                    artifact_id: result.artifact_id,
+                    match_kind: SearchMatchKind::DerivedObject {
+                        derived_object_id: result.derived_object_id,
+                        derived_type: result.derived_object_type,
+                    },
+                    snippet,
+                    score: result.score.unwrap_or_default(),
+                }
+            })
             .collect())
     }
 }
@@ -252,7 +253,10 @@ fn append_unique_hits(
     limit: usize,
 ) {
     for hit in extra_hits {
-        if hits.iter().any(|existing| existing.artifact_id == hit.artifact_id) {
+        if hits
+            .iter()
+            .any(|existing| existing.artifact_id == hit.artifact_id)
+        {
             continue;
         }
         hits.push(hit);
@@ -719,7 +723,9 @@ mod tests {
     #[test]
     fn search_falls_back_to_semantic_object_hits_when_lexical_archive_hits_are_sparse() {
         let service = ArchiveSearchService::with_semantic_fallback(
-            Arc::new(MockSearchReadStore { candidates: Vec::new() }),
+            Arc::new(MockSearchReadStore {
+                candidates: Vec::new(),
+            }),
             Arc::new(MockObjectSearchStore),
             Some(Arc::new(StubEmbeddingProvider::new("stub".to_string(), 8))),
         );

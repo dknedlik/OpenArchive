@@ -9,8 +9,8 @@ use clap::Parser;
 use open_archive::config::{QdrantConfig, SqliteConfig};
 use open_archive::migrations;
 use open_archive::sqlite_db;
-use open_archive::storage::{DerivedObjectEmbeddingStore, NewDerivedObjectEmbedding};
 use open_archive::storage::types::DerivedObjectType;
+use open_archive::storage::{DerivedObjectEmbeddingStore, NewDerivedObjectEmbedding};
 use open_archive::vector::QdrantVectorStore;
 use postgres::{Client, NoTls};
 use reqwest::blocking::Client as HttpClient;
@@ -335,7 +335,10 @@ struct Args {
     #[arg(long = "postgres-url")]
     postgres_url: String,
 
-    #[arg(long = "sqlite-path", default_value = "tmp/sqlite-snapshot/open_archive.db")]
+    #[arg(
+        long = "sqlite-path",
+        default_value = "tmp/sqlite-snapshot/open_archive.db"
+    )]
     sqlite_path: PathBuf,
 
     #[arg(long = "qdrant-url", default_value = "http://127.0.0.1:6333")]
@@ -403,9 +406,12 @@ fn main() -> Result<()> {
         None,
     )
     .context("failed to initialize Qdrant vector store")?;
-    let embedding_count =
-        copy_embeddings_to_qdrant(&mut pg, &qdrant_store).context("failed to load Qdrant vectors")?;
-    println!("copied {:>6} embeddings into Qdrant collection {}", embedding_count, args.qdrant_collection);
+    let embedding_count = copy_embeddings_to_qdrant(&mut pg, &qdrant_store)
+        .context("failed to load Qdrant vectors")?;
+    println!(
+        "copied {:>6} embeddings into Qdrant collection {}",
+        embedding_count, args.qdrant_collection
+    );
 
     Ok(())
 }
@@ -474,15 +480,14 @@ fn recreate_qdrant_collection(qdrant_url: &str, collection: &str) -> Result<()> 
         200 | 202 | 404 => Ok(()),
         status => {
             let body = response.text().unwrap_or_default();
-            Err(anyhow!("Qdrant collection delete returned HTTP {status}: {body}"))
+            Err(anyhow!(
+                "Qdrant collection delete returned HTTP {status}: {body}"
+            ))
         }
     }
 }
 
-fn copy_embeddings_to_qdrant(
-    pg: &mut Client,
-    qdrant_store: &QdrantVectorStore,
-) -> Result<usize> {
+fn copy_embeddings_to_qdrant(pg: &mut Client, qdrant_store: &QdrantVectorStore) -> Result<usize> {
     let rows = pg
         .query(
             "SELECT derived_object_id,

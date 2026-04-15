@@ -35,7 +35,10 @@ const DEFAULT_QUERIES: &[&str] = &[
 #[command(name = "compare_retrieval_quality")]
 #[command(about = "Compare side-by-side retrieval quality for Postgres and SQLite/Qdrant")]
 struct Args {
-    #[arg(long = "sqlite-path", default_value = "tmp/sqlite-side-by-side/open_archive.db")]
+    #[arg(
+        long = "sqlite-path",
+        default_value = "tmp/sqlite-side-by-side/open_archive.db"
+    )]
     sqlite_path: PathBuf,
 
     #[arg(
@@ -294,17 +297,23 @@ fn print_report(comparisons: &[QueryComparison], limit: usize) {
     let semantic_candidate_overlap = average_candidate_overlap(comparisons);
     let merged_top1_agreement = comparisons
         .iter()
-        .filter(|comparison| top1_equivalent(&comparison.postgres_merged, &comparison.sqlite_merged))
+        .filter(|comparison| {
+            top1_equivalent(&comparison.postgres_merged, &comparison.sqlite_merged)
+        })
         .count() as f32
         / comparisons.len().max(1) as f32;
     let semantic_top1_agreement = comparisons
         .iter()
-        .filter(|comparison| top1_equivalent(&comparison.postgres_semantic, &comparison.sqlite_semantic))
+        .filter(|comparison| {
+            top1_equivalent(&comparison.postgres_semantic, &comparison.sqlite_semantic)
+        })
         .count() as f32
         / comparisons.len().max(1) as f32;
     let semantic_summary_agreement = comparisons
         .iter()
-        .filter(|comparison| summary_top3_equivalent(&comparison.postgres_semantic, &comparison.sqlite_semantic))
+        .filter(|comparison| {
+            summary_top3_equivalent(&comparison.postgres_semantic, &comparison.sqlite_semantic)
+        })
         .count() as f32
         / comparisons.len().max(1) as f32;
 
@@ -316,10 +325,7 @@ fn print_report(comparisons: &[QueryComparison], limit: usize) {
         "Average semantic candidate-key overlap: {:.2}",
         semantic_candidate_overlap
     );
-    println!(
-        "Merged top-1 agreement rate: {:.2}",
-        merged_top1_agreement
-    );
+    println!("Merged top-1 agreement rate: {:.2}", merged_top1_agreement);
     println!(
         "Semantic top-1 agreement rate: {:.2}",
         semantic_top1_agreement
@@ -362,7 +368,12 @@ fn print_report(comparisons: &[QueryComparison], limit: usize) {
 
 fn average_overlap<'a, I>(pairs: I) -> f32
 where
-    I: Iterator<Item = (&'a Vec<DerivedObjectSearchResult>, &'a Vec<DerivedObjectSearchResult>)>,
+    I: Iterator<
+        Item = (
+            &'a Vec<DerivedObjectSearchResult>,
+            &'a Vec<DerivedObjectSearchResult>,
+        ),
+    >,
 {
     let mut total = 0.0f32;
     let mut count = 0usize;
@@ -383,15 +394,14 @@ fn average_candidate_overlap(comparisons: &[QueryComparison]) -> f32 {
     }
     comparisons
         .iter()
-        .map(|comparison| candidate_overlap(&comparison.postgres_semantic, &comparison.sqlite_semantic))
+        .map(|comparison| {
+            candidate_overlap(&comparison.postgres_semantic, &comparison.sqlite_semantic)
+        })
         .sum::<f32>()
         / comparisons.len() as f32
 }
 
-fn concept_overlap(
-    left: &[DerivedObjectSearchResult],
-    right: &[DerivedObjectSearchResult],
-) -> f32 {
+fn concept_overlap(left: &[DerivedObjectSearchResult], right: &[DerivedObjectSearchResult]) -> f32 {
     let left_signatures = left
         .iter()
         .flat_map(result_signatures)
@@ -405,27 +415,41 @@ fn concept_overlap(
     }
     let intersection = left_signatures.intersection(&right_signatures).count() as f32;
     let union = left_signatures.union(&right_signatures).count() as f32;
-    if union == 0.0 { 0.0 } else { intersection / union }
+    if union == 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
 }
 
-fn candidate_overlap(left: &[DerivedObjectSearchResult], right: &[DerivedObjectSearchResult]) -> f32 {
+fn candidate_overlap(
+    left: &[DerivedObjectSearchResult],
+    right: &[DerivedObjectSearchResult],
+) -> f32 {
     let left_candidates = left
         .iter()
-        .filter_map(|result| normalized_candidate_key(result))
+        .filter_map(normalized_candidate_key)
         .collect::<BTreeSet<_>>();
     let right_candidates = right
         .iter()
-        .filter_map(|result| normalized_candidate_key(result))
+        .filter_map(normalized_candidate_key)
         .collect::<BTreeSet<_>>();
     if left_candidates.is_empty() && right_candidates.is_empty() {
         return 1.0;
     }
     let intersection = left_candidates.intersection(&right_candidates).count() as f32;
     let union = left_candidates.union(&right_candidates).count() as f32;
-    if union == 0.0 { 0.0 } else { intersection / union }
+    if union == 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
 }
 
-fn top1_equivalent(left: &[DerivedObjectSearchResult], right: &[DerivedObjectSearchResult]) -> bool {
+fn top1_equivalent(
+    left: &[DerivedObjectSearchResult],
+    right: &[DerivedObjectSearchResult],
+) -> bool {
     match (left.first(), right.first()) {
         (Some(left), Some(right)) => result_equivalent(left, right),
         (None, None) => true,
@@ -433,7 +457,10 @@ fn top1_equivalent(left: &[DerivedObjectSearchResult], right: &[DerivedObjectSea
     }
 }
 
-fn summary_top3_equivalent(left: &[DerivedObjectSearchResult], right: &[DerivedObjectSearchResult]) -> bool {
+fn summary_top3_equivalent(
+    left: &[DerivedObjectSearchResult],
+    right: &[DerivedObjectSearchResult],
+) -> bool {
     let left_summary = left
         .iter()
         .take(3)
@@ -450,7 +477,9 @@ fn summary_top3_equivalent(left: &[DerivedObjectSearchResult], right: &[DerivedO
 }
 
 fn result_equivalent(left: &DerivedObjectSearchResult, right: &DerivedObjectSearchResult) -> bool {
-    if normalized_candidate_key(left).is_some() && normalized_candidate_key(left) == normalized_candidate_key(right) {
+    if normalized_candidate_key(left).is_some()
+        && normalized_candidate_key(left) == normalized_candidate_key(right)
+    {
         return true;
     }
 
@@ -521,7 +550,11 @@ fn token_jaccard(left: &str, right: &str) -> f32 {
     }
     let intersection = left_tokens.intersection(&right_tokens).count() as f32;
     let union = left_tokens.union(&right_tokens).count() as f32;
-    if union == 0.0 { 0.0 } else { intersection / union }
+    if union == 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
 }
 
 fn print_backend_results(label: &str, results: &[DerivedObjectSearchResult]) {
@@ -555,7 +588,10 @@ fn truncate(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }
-    let mut out = text.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    let mut out = text
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
     out.push('…');
     out
 }
