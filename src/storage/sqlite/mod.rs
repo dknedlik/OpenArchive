@@ -1444,16 +1444,20 @@ enum SqliteSearchQueryMode {
 }
 
 fn detect_search_query_mode(query: &str) -> SqliteSearchQueryMode {
+    let trimmed = query.trim();
     // Only route to Operator mode when the query looks intentionally written
     // for FTS5 syntax. Stray punctuation in a casual query (an unbalanced `"`
     // from a half-finished phrase, a lone `(`, etc.) would otherwise crash
     // FTS5 parsing — Plain mode escapes those characters safely.
-    let quote_count = query.chars().filter(|c| *c == '"').count();
-    let open_paren_count = query.chars().filter(|c| *c == '(').count();
-    let close_paren_count = query.chars().filter(|c| *c == ')').count();
-    let has_balanced_quotes = quote_count >= 2 && quote_count % 2 == 0;
+    let quote_count = trimmed.chars().filter(|c| *c == '"').count();
+    let open_paren_count = trimmed.chars().filter(|c| *c == '(').count();
+    let close_paren_count = trimmed.chars().filter(|c| *c == ')').count();
+    let has_quoted_phrase = quote_count >= 2
+        && quote_count % 2 == 0
+        && trimmed.starts_with('"')
+        && trimmed.ends_with('"');
     let has_balanced_parens = open_paren_count > 0 && open_paren_count == close_paren_count;
-    let has_prefix = query.split_whitespace().any(|tok| {
+    let has_prefix = trimmed.split_whitespace().any(|tok| {
         // Trailing `*` on a bare token is FTS5 prefix syntax. Ignore standalone
         // `*` and any token containing other punctuation we already escape.
         let bytes = tok.as_bytes();
@@ -1463,10 +1467,10 @@ fn detect_search_query_mode(query: &str) -> SqliteSearchQueryMode {
                 .iter()
                 .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
     });
-    let has_operator = query
+    let has_operator = trimmed
         .split_whitespace()
         .any(|tok| matches!(tok, "AND" | "OR" | "NOT" | "NEAR"));
-    if has_balanced_quotes || has_balanced_parens || has_prefix || has_operator {
+    if has_quoted_phrase || has_balanced_parens || has_prefix || has_operator {
         SqliteSearchQueryMode::Operator
     } else {
         SqliteSearchQueryMode::Plain
@@ -3819,6 +3823,16 @@ mod fts5_helper_tests {
             SqliteSearchQueryMode::Operator
         );
         assert_eq!(build_fts5_match_expression(raw).as_deref(), Some(raw));
+    }
+
+    #[test]
+    fn mixed_natural_language_with_quoted_phrase_stays_plain() {
+        let raw = "Ahab's \"Strike Through the Mask\" Speech";
+        assert_eq!(detect_search_query_mode(raw), SqliteSearchQueryMode::Plain);
+        assert_eq!(
+            build_fts5_match_expression(raw).as_deref(),
+            Some("\"Ahab's\" OR \"\"\"Strike\" OR \"Through\" OR \"the\" OR \"Mask\"\"\" OR \"Speech\"")
+        );
     }
 
     #[test]

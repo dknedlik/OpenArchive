@@ -74,6 +74,8 @@ struct Backend {
 
 struct QueryComparison {
     query: String,
+    postgres_lexical: Vec<DerivedObjectSearchResult>,
+    sqlite_lexical: Vec<DerivedObjectSearchResult>,
     postgres_merged: Vec<DerivedObjectSearchResult>,
     sqlite_merged: Vec<DerivedObjectSearchResult>,
     postgres_semantic: Vec<DerivedObjectSearchResult>,
@@ -240,6 +242,14 @@ fn compare_query(
         query: Some(query.to_string()),
         ..Default::default()
     };
+    let postgres_lexical = postgres
+        .object_search_store
+        .search_objects(&filters, limit)
+        .with_context(|| format!("postgres lexical search failed for query {query:?}"))?;
+    let sqlite_lexical = sqlite
+        .object_search_store
+        .search_objects(&filters, limit)
+        .with_context(|| format!("sqlite lexical search failed for query {query:?}"))?;
     let postgres_merged = postgres
         .object_search
         .search(filters.clone(), limit)
@@ -271,6 +281,8 @@ fn compare_query(
 
     Ok(QueryComparison {
         query: query.to_string(),
+        postgres_lexical,
+        sqlite_lexical,
         postgres_merged,
         sqlite_merged,
         postgres_semantic,
@@ -289,11 +301,23 @@ fn print_report(comparisons: &[QueryComparison], limit: usize) {
             .iter()
             .map(|comparison| (&comparison.postgres_merged, &comparison.sqlite_merged)),
     );
+    let lexical_overlap = average_overlap(
+        comparisons
+            .iter()
+            .map(|comparison| (&comparison.postgres_lexical, &comparison.sqlite_lexical)),
+    );
     let semantic_overlap = average_overlap(
         comparisons
             .iter()
             .map(|comparison| (&comparison.postgres_semantic, &comparison.sqlite_semantic)),
     );
+    let lexical_top1_agreement = comparisons
+        .iter()
+        .filter(|comparison| {
+            top1_equivalent(&comparison.postgres_lexical, &comparison.sqlite_lexical)
+        })
+        .count() as f32
+        / comparisons.len().max(1) as f32;
     let semantic_candidate_overlap = average_candidate_overlap(comparisons);
     let merged_top1_agreement = comparisons
         .iter()
@@ -318,13 +342,14 @@ fn print_report(comparisons: &[QueryComparison], limit: usize) {
         / comparisons.len().max(1) as f32;
 
     println!(
-        "Average concept overlap: merged {:.2} / semantic {:.2}",
-        merged_overlap, semantic_overlap
+        "Average concept overlap: lexical {:.2} / merged {:.2} / semantic {:.2}",
+        lexical_overlap, merged_overlap, semantic_overlap
     );
     println!(
         "Average semantic candidate-key overlap: {:.2}",
         semantic_candidate_overlap
     );
+    println!("Lexical top-1 agreement rate: {:.2}", lexical_top1_agreement);
     println!("Merged top-1 agreement rate: {:.2}", merged_top1_agreement);
     println!(
         "Semantic top-1 agreement rate: {:.2}",
@@ -338,6 +363,10 @@ fn print_report(comparisons: &[QueryComparison], limit: usize) {
 
     for comparison in comparisons {
         println!("Query: {}", comparison.query);
+        println!(
+            "  lexical concept overlap: {:.2}",
+            concept_overlap(&comparison.postgres_lexical, &comparison.sqlite_lexical)
+        );
         println!(
             "  merged concept overlap: {:.2}",
             concept_overlap(&comparison.postgres_merged, &comparison.sqlite_merged)
@@ -358,6 +387,8 @@ fn print_report(comparisons: &[QueryComparison], limit: usize) {
                 "no"
             }
         );
+        print_backend_results("postgres lexical", &comparison.postgres_lexical);
+        print_backend_results("sqlite  lexical", &comparison.sqlite_lexical);
         print_backend_results("postgres merged", &comparison.postgres_merged);
         print_backend_results("sqlite  merged", &comparison.sqlite_merged);
         print_backend_results("postgres semantic", &comparison.postgres_semantic);

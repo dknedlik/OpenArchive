@@ -22,20 +22,27 @@ enum SearchQueryMode {
 
 impl SearchQueryMode {
     fn detect(query: &str) -> Self {
-        let has_symbol_operator = query.contains('"')
-            || query.contains('-')
-            || query.contains('|')
-            || query.contains('&')
-            || query.contains('!')
-            || query.contains('(')
-            || query.contains(')')
-            || query.contains('<')
-            || query.contains('>');
-        if has_symbol_operator
-            || query
-                .split_whitespace()
-                .any(|token| matches!(token, "OR" | "AND" | "NOT" | "or" | "and" | "not"))
-        {
+        let trimmed = query.trim();
+        let quote_count = trimmed.chars().filter(|c| *c == '"').count();
+        let open_paren_count = trimmed.chars().filter(|c| *c == '(').count();
+        let close_paren_count = trimmed.chars().filter(|c| *c == ')').count();
+        let has_quoted_phrase = quote_count >= 2
+            && quote_count % 2 == 0
+            && trimmed.starts_with('"')
+            && trimmed.ends_with('"');
+        let has_balanced_parens = open_paren_count > 0 && open_paren_count == close_paren_count;
+        let has_negation = trimmed.split_whitespace().any(|token| {
+            let bytes = token.as_bytes();
+            bytes.len() >= 2
+                && bytes[0] == b'-'
+                && bytes[1..]
+                    .iter()
+                    .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        });
+        let has_operator = trimmed
+            .split_whitespace()
+            .any(|token| matches!(token, "OR" | "AND" | "NOT"));
+        if has_quoted_phrase || has_balanced_parens || has_negation || has_operator {
             Self::Operator
         } else {
             Self::Plain
@@ -1211,6 +1218,18 @@ mod tests {
         assert_eq!(
             SearchQueryMode::detect("tbi OR fracture"),
             SearchQueryMode::Operator
+        );
+    }
+
+    #[test]
+    fn mixed_natural_language_punctuation_stays_plain() {
+        assert_eq!(
+            SearchQueryMode::detect("2023-10-29 - Example Meeting Note"),
+            SearchQueryMode::Plain
+        );
+        assert_eq!(
+            SearchQueryMode::detect("Ahab's \"Strike Through the Mask\" Speech"),
+            SearchQueryMode::Plain
         );
     }
 
