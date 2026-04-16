@@ -1,4 +1,5 @@
 use crate::error::{ConfigError, ConfigResult};
+use serde::Deserialize;
 use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -30,6 +31,375 @@ impl AppConfig {
             inference_mode: InferenceExecutionMode::from_env()?,
         })
     }
+
+    /// Load configuration from file and environment.
+    ///
+    /// 1. Load from ~/.open_archive/config.toml if it exists
+    /// 2. Apply environment variable overrides (existing OA_* vars)
+    /// 3. Return merged configuration
+    ///
+    /// Missing file is NOT an error — falls back to env-only behavior.
+    pub fn load() -> ConfigResult<Self> {
+        let config_path = Self::config_file_path()?;
+
+        let file_config = if config_path.exists() {
+            Self::load_from_file(&config_path)?
+        } else {
+            ConfigFile::default()
+        };
+
+        Self::merge_from_file_and_env(file_config)
+    }
+
+    fn config_file_path() -> ConfigResult<PathBuf> {
+        let home = dirs::home_dir().ok_or(ConfigError::MissingEnvWithDependency { key: "HOME" })?;
+        Ok(home.join(".open_archive").join("config.toml"))
+    }
+
+    fn load_from_file(path: &std::path::Path) -> ConfigResult<ConfigFile> {
+        let content = std::fs::read_to_string(path).map_err(|e| ConfigError::FileRead {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+
+        toml::from_str(&content).map_err(|e| ConfigError::InvalidToml {
+            path: path.to_path_buf(),
+            source: e,
+        })
+    }
+
+    fn merge_from_file_and_env(file: ConfigFile) -> ConfigResult<Self> {
+        // Check if any relational store env vars are set - if so, use from_env
+        let relational_store = if Self::has_relational_store_env_override() {
+            RelationalStoreConfig::from_env()?
+        } else {
+            Self::relational_store_from_file_or_env(file.database)?
+        };
+
+        // Check if any object store env vars are set
+        let object_store = if Self::has_object_store_env_override() {
+            ObjectStoreConfig::from_env()?
+        } else {
+            Self::object_store_from_file_or_env(file.object_store)?
+        };
+
+        // Check if any vector store env vars are set
+        let vector_store = if Self::has_vector_store_env_override() {
+            VectorStoreConfig::from_env(&relational_store)?
+        } else {
+            Self::vector_store_from_file_or_env(file.vector_store, &relational_store)?
+        };
+
+        // Check if any inference env vars are set
+        let inference = if Self::has_inference_env_override() {
+            InferenceConfig::from_env()?
+        } else {
+            Self::inference_from_file_or_env(file.enrichment)?
+        };
+
+        // Embeddings always from env for now (complex nested structure)
+        let embeddings = EmbeddingConfig::from_env()?;
+
+        // Inference mode always from env for now
+        let inference_mode = InferenceExecutionMode::from_env()?;
+
+        // Check if any HTTP env vars are set
+        let http = if Self::has_http_env_override() {
+            HttpConfig::from_env()?
+        } else {
+            Self::http_from_file_or_env(file.http)?
+        };
+
+        Ok(Self {
+            http,
+            relational_store,
+            vector_store,
+            object_store,
+            inference,
+            embeddings,
+            inference_mode,
+        })
+    }
+
+    fn has_relational_store_env_override() -> bool {
+        env::var("OA_RELATIONAL_STORE").is_ok()
+            || env::var("OA_SQLITE_PATH").is_ok()
+            || env::var("OA_POSTGRES_URL").is_ok()
+            || env::var("OA_ORACLE_CONNECT_STRING").is_ok()
+    }
+
+    fn has_object_store_env_override() -> bool {
+        env::var("OA_OBJECT_STORE").is_ok() || env::var("OA_OBJECT_STORE_ROOT").is_ok()
+    }
+
+    fn has_vector_store_env_override() -> bool {
+        env::var("OA_VECTOR_STORE").is_ok()
+            || env::var("OA_QDRANT_URL").is_ok()
+            || env::var("OA_QDRANT_COLLECTION").is_ok()
+    }
+
+    fn has_inference_env_override() -> bool {
+        env::var("OA_MODEL_PROVIDER").is_ok()
+            || env::var("OA_GEMINI_API_KEY").is_ok()
+            || env::var("OA_OPENAI_API_KEY").is_ok()
+            || env::var("OA_ANTHROPIC_API_KEY").is_ok()
+            || env::var("OA_GROK_API_KEY").is_ok()
+            || env::var("OA_OCI_REGION").is_ok()
+    }
+
+    fn has_http_env_override() -> bool {
+        env::var("OA_HTTP_BIND").is_ok()
+            || env::var("OA_HTTP_REQUEST_WORKERS").is_ok()
+            || env::var("OA_ENRICHMENT_WORKERS").is_ok()
+    }
+
+    fn relational_store_from_file_or_env(
+        file: Option<DatabaseSection>,
+    ) -> ConfigResult<RelationalStoreConfig> {
+        if let Some(db) = file {
+            match db.store.as_deref() {
+                Some("sqlite") => {
+                    let path = match db.path {
+                        Some(p) => expand_home_path(&p)?,
+                        None => default_local_archive_root()?.join("open_archive.db"),
+                    };
+                    Ok(RelationalStoreConfig::Sqlite(SqliteConfig {
+                        path,
+                        busy_timeout: Duration::from_secs(30),
+                    }))
+                }
+                Some("postgres") => Err(ConfigError::MissingEnv {
+                    key: "OA_POSTGRES_URL",
+                }),
+                Some("oracle") => Err(ConfigError::MissingEnv {
+                    key: "OA_ORACLE_CONNECT_STRING",
+                }),
+                Some(other) => Err(ConfigError::InvalidEnumEnv {
+                    key: "database.store",
+                    value: other.to_string(),
+                    expected: "sqlite, postgres, oracle",
+                }),
+                None => Ok(RelationalStoreConfig::Sqlite(SqliteConfig {
+                    path: default_local_archive_root()?.join("open_archive.db"),
+                    busy_timeout: Duration::from_secs(30),
+                })),
+            }
+        } else {
+            // No file config, use env defaults
+            Ok(RelationalStoreConfig::Sqlite(SqliteConfig {
+                path: default_local_archive_root()?.join("open_archive.db"),
+                busy_timeout: Duration::from_secs(30),
+            }))
+        }
+    }
+
+    fn object_store_from_file_or_env(
+        file: Option<ObjectStoreSection>,
+    ) -> ConfigResult<ObjectStoreConfig> {
+        if let Some(os) = file {
+            match os.store.as_deref() {
+                Some("local_fs") => {
+                    let root = match os.path {
+                        Some(p) => expand_home_path(&p)?,
+                        None => default_local_archive_root()?.join("objects"),
+                    };
+                    Ok(ObjectStoreConfig::LocalFs(LocalFsObjectStoreConfig {
+                        root,
+                    }))
+                }
+                Some("s3") => Err(ConfigError::MissingEnv {
+                    key: "OA_S3_ENDPOINT",
+                }),
+                Some(other) => Err(ConfigError::InvalidEnumEnv {
+                    key: "object_store.store",
+                    value: other.to_string(),
+                    expected: "local_fs, s3",
+                }),
+                None => Ok(ObjectStoreConfig::LocalFs(LocalFsObjectStoreConfig {
+                    root: default_local_archive_root()?.join("objects"),
+                })),
+            }
+        } else {
+            Ok(ObjectStoreConfig::LocalFs(LocalFsObjectStoreConfig {
+                root: default_local_archive_root()?.join("objects"),
+            }))
+        }
+    }
+
+    fn vector_store_from_file_or_env(
+        file: Option<VectorStoreSection>,
+        relational_store: &RelationalStoreConfig,
+    ) -> ConfigResult<VectorStoreConfig> {
+        if let Some(vs) = file {
+            match vs.store.as_deref() {
+                Some("disabled") => Ok(VectorStoreConfig::Disabled),
+                Some("qdrant") => {
+                    let url = vs
+                        .url
+                        .unwrap_or_else(|| "http://127.0.0.1:6333".to_string());
+                    let collection_name =
+                        vs.collection.unwrap_or_else(|| "open_archive".to_string());
+                    let install_root = default_local_archive_root()?.join("qdrant");
+                    Ok(VectorStoreConfig::Qdrant(Box::new(QdrantConfig {
+                        url,
+                        collection_name,
+                        request_timeout: Duration::from_secs(30),
+                        exact: true,
+                        managed: ManagedQdrantConfig {
+                            enabled: true,
+                            version: "1.17.1".to_string(),
+                            install_root: install_root.clone(),
+                            storage_path: install_root.join("storage"),
+                            log_path: install_root.join("qdrant.log"),
+                            startup_timeout: Duration::from_secs(30),
+                            binary_path: None,
+                        },
+                    })))
+                }
+                Some(other) => Err(ConfigError::InvalidEnumEnv {
+                    key: "vector_store.store",
+                    value: other.to_string(),
+                    expected: "disabled, qdrant",
+                }),
+                None => {
+                    // Default based on relational store
+                    match relational_store {
+                        RelationalStoreConfig::Postgres(_) => {
+                            Ok(VectorStoreConfig::PostgresPgVector)
+                        }
+                        _ => Self::default_qdrant_config(),
+                    }
+                }
+            }
+        } else {
+            // Default based on relational store
+            match relational_store {
+                RelationalStoreConfig::Postgres(_) => Ok(VectorStoreConfig::PostgresPgVector),
+                _ => Self::default_qdrant_config(),
+            }
+        }
+    }
+
+    fn inference_from_file_or_env(
+        file: Option<EnrichmentSection>,
+    ) -> ConfigResult<InferenceConfig> {
+        if let Some(enr) = file {
+            match enr.provider.as_deref() {
+                Some("disabled") | Some("stub") => Ok(InferenceConfig::Stub),
+                Some("gemini") => {
+                    // TODO task 2: read API key from keyring, _model used for provider setup
+                    let _model = enr.model.unwrap_or_else(|| "gemini-2.0-flash".to_string());
+                    Err(ConfigError::MissingEnv {
+                        key: "OA_GEMINI_API_KEY",
+                    })
+                }
+                Some("openai") => {
+                    // TODO task 2: read API key from keyring, _model used for provider setup
+                    let _model = enr.model.unwrap_or_else(|| "gpt-4".to_string());
+                    Err(ConfigError::MissingEnv {
+                        key: "OA_OPENAI_API_KEY",
+                    })
+                }
+                Some("anthropic") => {
+                    // TODO task 2: read API key from keyring, _model used for provider setup
+                    let _model = enr.model.unwrap_or_else(|| "claude-sonnet-4".to_string());
+                    Err(ConfigError::MissingEnv {
+                        key: "OA_ANTHROPIC_API_KEY",
+                    })
+                }
+                Some(other) => Err(ConfigError::InvalidEnumEnv {
+                    key: "enrichment.provider",
+                    value: other.to_string(),
+                    expected: "disabled, gemini, openai, anthropic",
+                }),
+                None => Ok(InferenceConfig::Stub),
+            }
+        } else {
+            Ok(InferenceConfig::Stub)
+        }
+    }
+
+    fn http_from_file_or_env(file: Option<HttpSection>) -> ConfigResult<HttpConfig> {
+        if let Some(http) = file {
+            Ok(HttpConfig {
+                bind_addr: http
+                    .bind_addr
+                    .unwrap_or_else(|| "127.0.0.1:8080".to_string()),
+                request_worker_count: http.request_workers.unwrap_or(4),
+                enrichment_worker_count: http.enrichment_workers.unwrap_or(2),
+                enrichment_poll_interval_ms: 500,
+            })
+        } else {
+            Ok(HttpConfig {
+                bind_addr: "127.0.0.1:8080".to_string(),
+                request_worker_count: 4,
+                enrichment_worker_count: 2,
+                enrichment_poll_interval_ms: 500,
+            })
+        }
+    }
+
+    fn default_qdrant_config() -> ConfigResult<VectorStoreConfig> {
+        let install_root = default_local_archive_root()?.join("qdrant");
+        Ok(VectorStoreConfig::Qdrant(Box::new(QdrantConfig {
+            url: "http://127.0.0.1:6333".to_string(),
+            collection_name: "open_archive".to_string(),
+            request_timeout: Duration::from_secs(30),
+            exact: true,
+            managed: ManagedQdrantConfig {
+                enabled: true,
+                version: "1.17.1".to_string(),
+                install_root: install_root.clone(),
+                storage_path: install_root.join("storage"),
+                log_path: install_root.join("qdrant.log"),
+                startup_timeout: Duration::from_secs(30),
+                binary_path: None,
+            },
+        })))
+    }
+}
+
+// TOML file schema structs
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigFile {
+    database: Option<DatabaseSection>,
+    object_store: Option<ObjectStoreSection>,
+    vector_store: Option<VectorStoreSection>,
+    enrichment: Option<EnrichmentSection>,
+    http: Option<HttpSection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DatabaseSection {
+    store: Option<String>,
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ObjectStoreSection {
+    store: Option<String>,
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VectorStoreSection {
+    store: Option<String>,
+    url: Option<String>,
+    collection: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EnrichmentSection {
+    provider: Option<String>,
+    model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HttpSection {
+    bind_addr: Option<String>,
+    request_workers: Option<usize>,
+    enrichment_workers: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,9 +737,8 @@ fn home_dir_string_if_needed(value: &str) -> ConfigResult<Option<String>> {
         || value.starts_with("$HOME/")
         || value.starts_with("${HOME}/")
     {
-        Ok(Some(env::var("HOME").map_err(|_| {
-            ConfigError::MissingEnvWithDependency { key: "HOME" }
-        })?))
+        let home = dirs::home_dir().ok_or(ConfigError::MissingEnvWithDependency { key: "HOME" })?;
+        Ok(Some(home.to_string_lossy().to_string()))
     } else {
         Ok(None)
     }

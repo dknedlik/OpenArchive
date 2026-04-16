@@ -160,6 +160,20 @@ pub enum ConfigError {
 
     #[error("invalid vector store configuration: {message}")]
     InvalidVectorStoreConfig { message: String },
+
+    #[error("failed to read config file {path}")]
+    FileRead {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("invalid TOML in config file {path}")]
+    InvalidToml {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
 }
 
 #[derive(Debug, Error)]

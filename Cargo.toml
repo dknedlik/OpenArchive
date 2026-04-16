@@ -24,8 +24,10 @@ sha2 = "0.10"
 thiserror = "2.0"
 tiny_http = "0.12"
 ctrlc = "3.4"
+dirs = "5.0"
 flate2 = "1.1"
 tar = "0.4"
+toml = "0.8"
 url = "2.5"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 [dev-dependencies]

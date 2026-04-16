@@ -209,13 +209,11 @@ fn main() -> Result<(), anyhow::Error> {
         Command::Review(args) => review_command(args),
         Command::OracleCheck => oracle_check(),
         Command::Migrate => {
-            let config =
-                AppConfig::from_env().context("failed to load application configuration")?;
+            let config = AppConfig::load().context("failed to load application configuration")?;
             migrations::migrate(&config).context("failed to apply database migrations")
         }
         Command::MigrateCheck => {
-            let config =
-                AppConfig::from_env().context("failed to load application configuration")?;
+            let config = AppConfig::load().context("failed to load application configuration")?;
             migrations::check(&config).context("database migration check failed")
         }
         Command::Status => status_command(),
@@ -225,7 +223,7 @@ fn main() -> Result<(), anyhow::Error> {
 }
 
 fn oracle_check() -> Result<(), anyhow::Error> {
-    let config = AppConfig::from_env().context("failed to load application configuration")?;
+    let config = AppConfig::load().context("failed to load application configuration")?;
     let config = require_oracle_db_config(&config)
         .context("failed to resolve Oracle database configuration")?;
     let conn = db::connect(config).context("failed to connect to Oracle")?;
@@ -244,7 +242,7 @@ fn oracle_check() -> Result<(), anyhow::Error> {
 }
 
 fn install_qdrant() -> Result<(), anyhow::Error> {
-    let config = AppConfig::from_env().context("failed to load application configuration")?;
+    let config = AppConfig::load().context("failed to load application configuration")?;
     let path = open_archive::qdrant_sidecar::install_managed_qdrant(&config)
         .context("failed to install managed Qdrant")?;
     println!("qdrant_binary={}", path.display());
@@ -917,7 +915,7 @@ fn status_command() -> Result<(), anyhow::Error> {
 }
 
 fn doctor_command() -> Result<(), anyhow::Error> {
-    let config = AppConfig::from_env().context("failed to load application configuration")?;
+    let config = AppConfig::load().context("failed to load application configuration")?;
     let mut failures = 0usize;
     print_doctor_result("config", Ok("loaded".to_string()), &mut failures);
 
@@ -999,7 +997,7 @@ fn print_doctor_result(name: &str, result: Result<String, anyhow::Error>, failur
 }
 
 fn load_local_runtime(apply_migrations: bool) -> Result<LocalRuntime, anyhow::Error> {
-    let mut config = AppConfig::from_env().context("failed to load application configuration")?;
+    let mut config = AppConfig::load().context("failed to load application configuration")?;
     let managed_qdrant = open_archive::qdrant_sidecar::ensure_managed_qdrant(&mut config)
         .context("failed to prepare managed Qdrant")?;
     if apply_migrations {
@@ -1386,8 +1384,7 @@ fn format_job_counts(counts: &[open_archive::storage::EnrichmentJobCount]) -> St
 fn serve() -> Result<(), anyhow::Error> {
     env_logger::init();
 
-    let mut app_config =
-        AppConfig::from_env().context("failed to load application configuration")?;
+    let mut app_config = AppConfig::load().context("failed to load application configuration")?;
     let _managed_qdrant = open_archive::qdrant_sidecar::ensure_managed_qdrant(&mut app_config)
         .context("failed to prepare managed Qdrant")?;
     migrations::migrate(&app_config).context("failed to apply database migrations before serve")?;
