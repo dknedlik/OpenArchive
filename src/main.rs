@@ -33,6 +33,7 @@ struct Cli {
 enum Command {
     InstallQdrant,
     Import(ImportArgs),
+    Artifacts(ArtifactsArgs),
     OracleCheck,
     Migrate,
     MigrateCheck,
@@ -45,6 +46,25 @@ enum Command {
 struct ImportArgs {
     #[command(subcommand)]
     source: ImportSourceCommand,
+}
+
+#[derive(Args)]
+struct ArtifactsArgs {
+    /// Filter by source type (chatgpt_export, claude_export, grok_export, gemini_takeout, text_file, markdown_file, obsidian_vault)
+    #[arg(long, value_name = "TYPE")]
+    source: Option<String>,
+
+    /// Filter by enrichment status (pending, running, completed, partial, failed)
+    #[arg(long, value_name = "STATUS")]
+    status: Option<String>,
+
+    /// Maximum number of results (default: 20, max: 100)
+    #[arg(long, value_name = "N")]
+    limit: Option<usize>,
+
+    /// Pagination offset (default: 0)
+    #[arg(long, value_name = "N")]
+    offset: Option<usize>,
 }
 
 #[derive(Subcommand)]
@@ -65,6 +85,7 @@ fn main() -> Result<(), anyhow::Error> {
     match cli.command {
         Command::InstallQdrant => install_qdrant(),
         Command::Import(args) => import_command(args),
+        Command::Artifacts(args) => artifacts_command(args),
         Command::OracleCheck => oracle_check(),
         Command::Migrate => {
             let config =
@@ -267,6 +288,82 @@ fn import_command(args: ImportArgs) -> Result<(), anyhow::Error> {
 
     if let Some(err) = error {
         return Err(err);
+    }
+
+    Ok(())
+}
+
+fn artifacts_command(args: ArtifactsArgs) -> Result<(), anyhow::Error> {
+    let runtime = load_local_runtime(true)?;
+
+    let source_type = match args.source {
+        Some(value) => Some(
+            open_archive::storage::SourceType::parse(&value)
+                .ok_or_else(|| anyhow::anyhow!("invalid source_type: '{value}'"))?,
+        ),
+        None => None,
+    };
+    let enrichment_status = match args.status {
+        Some(value) => Some(
+            open_archive::storage::EnrichmentStatus::parse(&value)
+                .ok_or_else(|| anyhow::anyhow!("invalid enrichment_status: '{value}'"))?,
+        ),
+        None => None,
+    };
+
+    let filters = open_archive::storage::ArtifactListFilters {
+        source_type,
+        enrichment_status,
+        ..Default::default()
+    };
+
+    let limit = args.limit.unwrap_or(20).clamp(1, 100);
+    let offset = args.offset.unwrap_or(0);
+
+    let artifacts = match runtime
+        .services
+        .app
+        .artifacts
+        .list_artifacts_filtered(&filters, limit, offset)
+    {
+        Ok(items) => items,
+        Err(open_archive::StorageError::UnsupportedOperation { .. }) => {
+            if source_type.is_some() || enrichment_status.is_some() {
+                return Err(anyhow::anyhow!(
+                    "filtered listing is not supported by the current storage provider"
+                ));
+            }
+            runtime
+                .services
+                .app
+                .artifacts
+                .list_artifacts()
+                .context("failed to list artifacts")?
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .collect::<Vec<_>>()
+        }
+        Err(err) => return Err(anyhow::Error::new(err).context("failed to list artifacts")),
+    };
+
+    if artifacts.is_empty() {
+        println!("no artifacts found");
+        return Ok(());
+    }
+
+    for artifact in artifacts {
+        let display_title = artifact
+            .title
+            .or(artifact.note_path)
+            .unwrap_or_else(|| "(untitled)".to_string());
+        println!(
+            "{} {} {} {}",
+            artifact.artifact_id,
+            artifact.source_type,
+            artifact.enrichment_status.as_str(),
+            display_title
+        );
     }
 
     Ok(())
