@@ -188,9 +188,10 @@ end;
             })?;
 
         for row_result in rows {
-            let row = row_result.map_err(|source| MigrationsError::ReadMigrationHistoryRow {
-                source: Box::new(source),
-            })?;
+            let row: ::oracle::Row =
+                row_result.map_err(|source| MigrationsError::ReadMigrationHistoryRow {
+                    source: Box::new(source),
+                })?;
             let version: String =
                 row.get(0)
                     .map_err(|source| MigrationsError::ReadMigrationVersion {
@@ -308,7 +309,7 @@ pub mod postgres {
             }))?;
 
         for row in rows {
-            let table_name: String = row.get(0);
+            let table_name: String = row.get::<usize, String>(0);
             client
                 .batch_execute(&format!("DROP TABLE IF EXISTS \"{}\" CASCADE", table_name))
                 .map_err(|source| {
@@ -359,8 +360,8 @@ pub mod postgres {
             })?;
 
         for row in rows {
-            let version: String = row.get(0);
-            let checksum: String = row.get(1);
+            let version: String = row.get::<usize, String>(0);
+            let checksum: String = row.get::<usize, String>(1);
             map.insert(version, checksum);
         }
 
@@ -391,7 +392,7 @@ pub mod postgres {
 
 pub mod sqlite {
     use super::*;
-    use ::rusqlite::{params, Connection};
+    use rusqlite::{params, Connection};
 
     pub const MIGRATIONS_DIR: &str = "sql/sqlite/migrations";
 

@@ -13,6 +13,7 @@ use open_archive::error::StorageError;
 use open_archive::import_service::ImportResponse;
 use open_archive::qdrant_sidecar::ManagedQdrantHandle;
 use open_archive::shutdown::ShutdownToken;
+use open_archive::SecretStore;
 use open_archive::{db, http, migrations, parser};
 
 use std::fs;
@@ -915,9 +916,16 @@ fn status_command() -> Result<(), anyhow::Error> {
 }
 
 fn doctor_command() -> Result<(), anyhow::Error> {
+    let secret_store = SecretStore::new();
     let config = AppConfig::load().context("failed to load application configuration")?;
     let mut failures = 0usize;
     print_doctor_result("config", Ok("loaded".to_string()), &mut failures);
+
+    let secrets_backend = match secret_store.backend() {
+        open_archive::SecretBackend::Keyring => "keyring",
+        open_archive::SecretBackend::PlainFile => "plain_file",
+    };
+    print_doctor_result("secrets", Ok(secrets_backend.to_string()), &mut failures);
 
     let db_status = match &config.relational_store {
         RelationalStoreConfig::Sqlite(sqlite) => open_archive::sqlite_db::connect(sqlite)

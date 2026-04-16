@@ -1,4 +1,5 @@
 use crate::error::{ConfigError, ConfigResult};
+use crate::secrets::SecretStore;
 use serde::Deserialize;
 use std::env;
 use std::path::PathBuf;
@@ -32,14 +33,24 @@ impl AppConfig {
         })
     }
 
-    /// Load configuration from file and environment.
+    /// Load configuration from file, secrets store, and environment.
     ///
     /// 1. Load from ~/.open_archive/config.toml if it exists
-    /// 2. Apply environment variable overrides (existing OA_* vars)
-    /// 3. Return merged configuration
+    /// 2. Resolve secrets (API keys) from keyring/plain-file/env
+    /// 3. Apply environment variable overrides (existing OA_* vars)
+    /// 4. Return merged configuration
     ///
     /// Missing file is NOT an error — falls back to env-only behavior.
     pub fn load() -> ConfigResult<Self> {
+        let secret_store = SecretStore::new();
+        Self::load_with_secret_store(&secret_store)
+    }
+
+    /// Load configuration with a provided secret store.
+    ///
+    /// This is pub(crate) for testability while keeping `load()` as the
+    /// public API so callers don't need to construct SecretStore themselves.
+    pub(crate) fn load_with_secret_store(secret_store: &SecretStore) -> ConfigResult<Self> {
         let config_path = Self::config_file_path()?;
 
         let file_config = if config_path.exists() {
@@ -48,7 +59,7 @@ impl AppConfig {
             ConfigFile::default()
         };
 
-        Self::merge_from_file_and_env(file_config)
+        Self::merge_from_file_and_env(file_config, secret_store)
     }
 
     fn config_file_path() -> ConfigResult<PathBuf> {
@@ -68,7 +79,7 @@ impl AppConfig {
         })
     }
 
-    fn merge_from_file_and_env(file: ConfigFile) -> ConfigResult<Self> {
+    fn merge_from_file_and_env(file: ConfigFile, secret_store: &SecretStore) -> ConfigResult<Self> {
         // Check if any relational store env vars are set - if so, use from_env
         let relational_store = if Self::has_relational_store_env_override() {
             RelationalStoreConfig::from_env()?
@@ -94,11 +105,15 @@ impl AppConfig {
         let inference = if Self::has_inference_env_override() {
             InferenceConfig::from_env()?
         } else {
-            Self::inference_from_file_or_env(file.enrichment)?
+            Self::inference_from_file_or_env(file.enrichment, secret_store)?
         };
 
-        // Embeddings always from env for now (complex nested structure)
-        let embeddings = EmbeddingConfig::from_env()?;
+        // Embeddings from env or secrets store
+        let embeddings = if Self::has_embedding_env_override() {
+            EmbeddingConfig::from_env()?
+        } else {
+            Self::embeddings_from_file_or_env(secret_store)?
+        };
 
         // Inference mode always from env for now
         let inference_mode = InferenceExecutionMode::from_env()?;
@@ -145,6 +160,12 @@ impl AppConfig {
             || env::var("OA_ANTHROPIC_API_KEY").is_ok()
             || env::var("OA_GROK_API_KEY").is_ok()
             || env::var("OA_OCI_REGION").is_ok()
+    }
+
+    fn has_embedding_env_override() -> bool {
+        env::var("OA_EMBEDDING_PROVIDER").is_ok()
+            || env::var("OA_GEMINI_API_KEY").is_ok()
+            || env::var("OA_OPENAI_API_KEY").is_ok()
     }
 
     fn has_http_env_override() -> bool {
@@ -282,30 +303,43 @@ impl AppConfig {
 
     fn inference_from_file_or_env(
         file: Option<EnrichmentSection>,
+        secret_store: &SecretStore,
     ) -> ConfigResult<InferenceConfig> {
         if let Some(enr) = file {
             match enr.provider.as_deref() {
                 Some("disabled") | Some("stub") => Ok(InferenceConfig::Stub),
                 Some("gemini") => {
-                    // TODO task 2: read API key from keyring, _model used for provider setup
-                    let _model = enr.model.unwrap_or_else(|| "gemini-2.0-flash".to_string());
-                    Err(ConfigError::MissingEnv {
-                        key: "OA_GEMINI_API_KEY",
-                    })
+                    let model = enr.model.unwrap_or_else(|| "gemini-2.0-flash".to_string());
+                    let api_key = secret_store.get("OA_GEMINI_API_KEY").ok_or(
+                        ConfigError::MissingSecret {
+                            key: "OA_GEMINI_API_KEY",
+                        },
+                    )?;
+                    Ok(InferenceConfig::Gemini(
+                        GeminiConfig::from_api_key_and_model(api_key, model)?,
+                    ))
                 }
                 Some("openai") => {
-                    // TODO task 2: read API key from keyring, _model used for provider setup
-                    let _model = enr.model.unwrap_or_else(|| "gpt-4".to_string());
-                    Err(ConfigError::MissingEnv {
-                        key: "OA_OPENAI_API_KEY",
-                    })
+                    let model = enr.model.unwrap_or_else(|| "gpt-4".to_string());
+                    let api_key = secret_store.get("OA_OPENAI_API_KEY").ok_or(
+                        ConfigError::MissingSecret {
+                            key: "OA_OPENAI_API_KEY",
+                        },
+                    )?;
+                    Ok(InferenceConfig::OpenAi(
+                        OpenAiConfig::from_api_key_and_models(api_key, model.clone(), model)?,
+                    ))
                 }
                 Some("anthropic") => {
-                    // TODO task 2: read API key from keyring, _model used for provider setup
-                    let _model = enr.model.unwrap_or_else(|| "claude-sonnet-4".to_string());
-                    Err(ConfigError::MissingEnv {
-                        key: "OA_ANTHROPIC_API_KEY",
-                    })
+                    let model = enr.model.unwrap_or_else(|| "claude-sonnet-4".to_string());
+                    let api_key = secret_store.get("OA_ANTHROPIC_API_KEY").ok_or(
+                        ConfigError::MissingSecret {
+                            key: "OA_ANTHROPIC_API_KEY",
+                        },
+                    )?;
+                    Ok(InferenceConfig::Anthropic(
+                        AnthropicConfig::from_api_key_and_models(api_key, model.clone(), model)?,
+                    ))
                 }
                 Some(other) => Err(ConfigError::InvalidEnumEnv {
                     key: "enrichment.provider",
@@ -337,6 +371,11 @@ impl AppConfig {
                 enrichment_poll_interval_ms: 500,
             })
         }
+    }
+
+    fn embeddings_from_file_or_env(_secret_store: &SecretStore) -> ConfigResult<EmbeddingConfig> {
+        // Default to disabled when loading from file without explicit provider
+        Ok(EmbeddingConfig::Disabled)
     }
 
     fn default_qdrant_config() -> ConfigResult<VectorStoreConfig> {
@@ -841,8 +880,18 @@ impl GeminiConfig {
     pub fn from_env() -> ConfigResult<Self> {
         let heavy_model = required_env("OA_HEAVY_MODEL")?;
         let fast_model = required_env("OA_FAST_MODEL")?;
+        let api_key = required_env("OA_GEMINI_API_KEY")?;
+        Self::from_api_key_and_models(api_key, heavy_model, fast_model)
+    }
+
+    /// Create config from API key and model names (used when loading from secrets).
+    pub fn from_api_key_and_models(
+        api_key: String,
+        heavy_model: String,
+        fast_model: String,
+    ) -> ConfigResult<Self> {
         Ok(Self {
-            api_key: required_env("OA_GEMINI_API_KEY")?,
+            api_key,
             base_url: env::var("OA_GEMINI_BASE_URL")
                 .unwrap_or_else(|_| "https://generativelanguage.googleapis.com/v1beta".to_string()),
             max_output_tokens: env::var("OA_GEMINI_MAX_OUTPUT_TOKENS")
@@ -865,6 +914,11 @@ impl GeminiConfig {
                 .unwrap_or(Duration::from_secs(5)),
         })
     }
+
+    /// Create config from API key and single model (used when loading from file config).
+    pub fn from_api_key_and_model(api_key: String, model: String) -> ConfigResult<Self> {
+        Self::from_api_key_and_models(api_key, model.clone(), model)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -882,8 +936,18 @@ impl OpenAiConfig {
     pub fn from_env() -> ConfigResult<Self> {
         let heavy_model = required_env("OA_HEAVY_MODEL")?;
         let fast_model = required_env("OA_FAST_MODEL")?;
+        let api_key = required_env("OA_OPENAI_API_KEY")?;
+        Self::from_api_key_and_models(api_key, heavy_model, fast_model)
+    }
+
+    /// Create config from API key and model names (used when loading from secrets).
+    pub fn from_api_key_and_models(
+        api_key: String,
+        heavy_model: String,
+        fast_model: String,
+    ) -> ConfigResult<Self> {
         Ok(Self {
-            api_key: required_env("OA_OPENAI_API_KEY")?,
+            api_key,
             base_url: env::var("OA_OPENAI_BASE_URL")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
             max_output_tokens: env::var("OA_OPENAI_MAX_OUTPUT_TOKENS")
@@ -954,8 +1018,18 @@ impl AnthropicConfig {
     pub fn from_env() -> ConfigResult<Self> {
         let heavy_model = required_env("OA_HEAVY_MODEL")?;
         let fast_model = required_env("OA_FAST_MODEL")?;
+        let api_key = required_env("OA_ANTHROPIC_API_KEY")?;
+        Self::from_api_key_and_models(api_key, heavy_model, fast_model)
+    }
+
+    /// Create config from API key and model names (used when loading from secrets).
+    pub fn from_api_key_and_models(
+        api_key: String,
+        heavy_model: String,
+        fast_model: String,
+    ) -> ConfigResult<Self> {
         Ok(Self {
-            api_key: required_env("OA_ANTHROPIC_API_KEY")?,
+            api_key,
             base_url: env::var("OA_ANTHROPIC_BASE_URL")
                 .unwrap_or_else(|_| "https://api.anthropic.com/v1".to_string()),
             max_output_tokens: env::var("OA_ANTHROPIC_MAX_OUTPUT_TOKENS")

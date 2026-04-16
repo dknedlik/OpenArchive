@@ -132,9 +132,27 @@ pub enum ObjectStoreError {
 }
 
 #[derive(Debug, Error)]
+pub enum SecretStoreError {
+    #[error("keyring unavailable: {0}")]
+    KeyringUnavailable(String),
+
+    #[error("key not found")]
+    KeyNotFound,
+
+    #[error("io error")]
+    Io {
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("{key} is required")]
     MissingEnv { key: &'static str },
+
+    #[error("missing secret {key}; run 'open_archive init' to configure")]
+    MissingSecret { key: &'static str },
 
     #[error("{key} is required")]
     MissingEnvWithDependency { key: &'static str },

@@ -18,6 +18,7 @@ pub mod parser;
 pub mod postgres_db;
 pub mod processor;
 pub mod qdrant_sidecar;
+pub mod secrets;
 pub mod shutdown;
 pub mod sqlite_db;
 pub mod storage;
@@ -26,6 +27,7 @@ pub mod vector;
 pub use domain::{ParticipantRole, SourceTimestamp, VisibilityStatus};
 pub use error::{
     ConfigError, DbError, EmbeddingError, MigrationsError, ObjectStoreError, OpenArchiveError,
-    ParserError, Result, StorageError, WorkerError, WorkerResult,
+    ParserError, Result, SecretStoreError, StorageError, WorkerError, WorkerResult,
 };
 pub use import_service::looks_like_chatgpt_zip;
+pub use secrets::{SecretBackend, SecretStore};
