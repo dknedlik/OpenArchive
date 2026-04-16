@@ -38,6 +38,8 @@ enum Command {
     Artifact(ArtifactArgs),
     /// Search the archive
     Search(SearchArgs),
+    /// View artifacts ordered chronologically
+    Timeline(TimelineArgs),
     OracleCheck,
     Migrate,
     MigrateCheck,
@@ -107,6 +109,33 @@ struct SearchArgs {
     object_type: Option<String>,
 }
 
+#[derive(Args)]
+struct TimelineArgs {
+    /// Filter by keyword in title
+    #[arg(long, value_name = "TEXT")]
+    keyword: Option<String>,
+
+    /// Filter by source type (chatgpt_export, claude_export, grok_export, gemini_takeout, text_file, markdown_file, obsidian_vault)
+    #[arg(long, value_name = "TYPE")]
+    source: Option<String>,
+
+    /// Filter by imported note tag (exact normalized match)
+    #[arg(long, value_name = "TAG")]
+    tag: Option<String>,
+
+    /// Filter by imported note path prefix
+    #[arg(long, value_name = "PREFIX")]
+    path_prefix: Option<String>,
+
+    /// Maximum number of results (default: 50, max: 100)
+    #[arg(long, value_name = "N")]
+    limit: Option<usize>,
+
+    /// Pagination offset (default: 0)
+    #[arg(long, value_name = "N")]
+    offset: Option<usize>,
+}
+
 #[derive(Subcommand)]
 enum ImportSourceCommand {
     Auto { path: PathBuf },
@@ -128,6 +157,7 @@ fn main() -> Result<(), anyhow::Error> {
         Command::Artifacts(args) => artifacts_command(args),
         Command::Artifact(args) => artifact_command(args),
         Command::Search(args) => search_command(args),
+        Command::Timeline(args) => timeline_command(args),
         Command::OracleCheck => oracle_check(),
         Command::Migrate => {
             let config =
@@ -494,15 +524,83 @@ fn format_match_kind(kind: &open_archive::app::search::SearchMatchKind) -> Strin
     }
 }
 
+fn timeline_command(args: TimelineArgs) -> Result<(), anyhow::Error> {
+    let runtime = load_local_runtime(true)?;
+
+    let source_type = match args.source {
+        Some(value) => Some(
+            open_archive::storage::SourceType::parse(&value)
+                .ok_or_else(|| anyhow::anyhow!("invalid source_type: '{value}'"))?,
+        ),
+        None => None,
+    };
+
+    let limit = args.limit.unwrap_or(50).clamp(1, 100);
+    let offset = args.offset.unwrap_or(0);
+
+    let filters = open_archive::storage::TimelineFilters {
+        keyword: args.keyword,
+        source_type,
+        tag: args.tag.map(|t| t.to_lowercase()),
+        path_prefix: args.path_prefix.map(|p| p.to_lowercase()),
+    };
+
+    let entries = runtime
+        .services
+        .app
+        .artifacts
+        .get_timeline(&filters, limit, offset)
+        .map_err(|err| anyhow::Error::new(err).context("failed to load timeline"))?;
+
+    if entries.is_empty() {
+        println!("no entries");
+        return Ok(());
+    }
+
+    const SUMMARY_TRUNCATE_LEN: usize = 120;
+    for entry in entries {
+        // Format captured_at as date-only (extract YYYY-MM-DD from ISO 8601)
+        let captured_at_date = entry
+            .captured_at
+            .split('T')
+            .next()
+            .unwrap_or(&entry.captured_at);
+        let display_title = entry
+            .title
+            .or(entry.note_path)
+            .unwrap_or_else(|| "(untitled)".to_string());
+        println!(
+            "{} {} {} {}",
+            captured_at_date, entry.source_type, entry.artifact_id, display_title
+        );
+
+        // Summary snippet on second line only when present
+        if let Some(summary) = entry.summary_snippet {
+            let truncated = if summary.chars().count() > SUMMARY_TRUNCATE_LEN {
+                let cutoff = summary
+                    .char_indices()
+                    .nth(SUMMARY_TRUNCATE_LEN)
+                    .map(|(idx, _)| idx)
+                    .unwrap_or_else(|| summary.len());
+                format!("{}…", &summary[..cutoff])
+            } else {
+                summary
+            };
+            println!("  {}", truncated);
+        }
+    }
+
+    Ok(())
+}
+
 fn artifact_command(args: ArtifactArgs) -> Result<(), anyhow::Error> {
     let runtime = load_local_runtime(true)?;
 
     let service = runtime
         .services
         .app
-        .artifact_detail
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("artifact detail is unavailable for the configured provider; the artifact_detail store is not configured"))?;
+        .require_artifact_detail()
+        .map_err(|err| anyhow::Error::new(err).context("artifact detail is unavailable"))?;
 
     // Warn if offset/limit provided without --segments
     if (args.segment_offset.is_some() || args.segment_limit.is_some()) && !args.segments {
