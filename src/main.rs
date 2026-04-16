@@ -34,6 +34,8 @@ enum Command {
     InstallQdrant,
     Import(ImportArgs),
     Artifacts(ArtifactsArgs),
+    /// Load full detail for one artifact
+    Artifact(ArtifactArgs),
     OracleCheck,
     Migrate,
     MigrateCheck,
@@ -67,6 +69,24 @@ struct ArtifactsArgs {
     offset: Option<usize>,
 }
 
+#[derive(Args)]
+struct ArtifactArgs {
+    /// Artifact ID to load
+    id: String,
+
+    /// Include segment content in output
+    #[arg(long)]
+    segments: bool,
+
+    /// Segment pagination offset (requires --segments)
+    #[arg(long, value_name = "N")]
+    segment_offset: Option<usize>,
+
+    /// Maximum segments to return (requires --segments, default: 50, max: 50)
+    #[arg(long, value_name = "N")]
+    segment_limit: Option<usize>,
+}
+
 #[derive(Subcommand)]
 enum ImportSourceCommand {
     Auto { path: PathBuf },
@@ -86,6 +106,7 @@ fn main() -> Result<(), anyhow::Error> {
         Command::InstallQdrant => install_qdrant(),
         Command::Import(args) => import_command(args),
         Command::Artifacts(args) => artifacts_command(args),
+        Command::Artifact(args) => artifact_command(args),
         Command::OracleCheck => oracle_check(),
         Command::Migrate => {
             let config =
@@ -364,6 +385,98 @@ fn artifacts_command(args: ArtifactsArgs) -> Result<(), anyhow::Error> {
             artifact.enrichment_status.as_str(),
             display_title
         );
+    }
+
+    Ok(())
+}
+
+fn artifact_command(args: ArtifactArgs) -> Result<(), anyhow::Error> {
+    let runtime = load_local_runtime(true)?;
+
+    let service = runtime
+        .services
+        .app
+        .artifact_detail
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("artifact detail is unavailable for the configured provider; the artifact_detail store is not configured"))?;
+
+    // Warn if offset/limit provided without --segments
+    if (args.segment_offset.is_some() || args.segment_limit.is_some()) && !args.segments {
+        eprintln!(
+            "warning: --segment-offset and --segment-limit have no effect without --segments"
+        );
+    }
+
+    let include_segments = args.segments;
+    let segment_offset = args.segment_offset.unwrap_or(0);
+    let segment_limit = args
+        .segment_limit
+        .unwrap_or(open_archive::app::artifact_detail::DEFAULT_SEGMENT_LIMIT)
+        .clamp(1, open_archive::app::artifact_detail::DEFAULT_SEGMENT_LIMIT);
+
+    let artifact_id = args.id;
+    let response = service
+        .get(open_archive::app::artifact_detail::ArtifactDetailRequest {
+            artifact_id: artifact_id.clone(),
+            include_segments,
+            segment_offset,
+            segment_limit,
+        })
+        .map_err(|err| anyhow::Error::new(err).context("failed to load artifact detail"))?;
+
+    let Some(detail) = response else {
+        return Err(anyhow::anyhow!("artifact not found: {}", artifact_id));
+    };
+
+    // Header line: id source status title
+    let display_title = detail
+        .title
+        .or_else(|| detail.note_path.clone())
+        .unwrap_or_else(|| "(untitled)".to_string());
+    println!(
+        "{} {} {} {}",
+        detail.artifact_id,
+        detail.source_type.as_str(),
+        detail.enrichment_status.as_str(),
+        display_title
+    );
+
+    // Derived objects: one line each — object_id type title
+    for obj in &detail.derived_objects {
+        let obj_title = obj
+            .title
+            .clone()
+            .unwrap_or_else(|| "(untitled)".to_string());
+        println!(
+            "{} {} {}",
+            obj.derived_object_id,
+            obj.derived_object_type.as_str(),
+            obj_title
+        );
+    }
+
+    // Segments (if --segments): one line each — [seq] role: text_content (truncated)
+    if include_segments {
+        const SEGMENT_TRUNCATE_LEN: usize = 120;
+        for seg in &detail.segments {
+            let role_str = seg
+                .participant_role
+                .as_ref()
+                .map(|r| r.as_str())
+                .unwrap_or("unknown");
+            let content = &seg.text_content;
+            let truncated = if content.chars().count() > SEGMENT_TRUNCATE_LEN {
+                let cutoff = content
+                    .char_indices()
+                    .nth(SEGMENT_TRUNCATE_LEN)
+                    .map(|(idx, _)| idx)
+                    .unwrap_or_else(|| content.len());
+                format!("{}…", &content[..cutoff])
+            } else {
+                content.clone()
+            };
+            println!("[{}] {}: {}", seg.sequence_no, role_str, truncated);
+        }
     }
 
     Ok(())
