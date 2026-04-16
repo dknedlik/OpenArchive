@@ -526,18 +526,20 @@ fn plan_auto_imports(path: &Path) -> Result<Vec<PlannedImport>, anyhow::Error> {
 
         let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         if is_extension(path, &["zip"]) {
-            if parser::obsidian::parse_vault_zip(&bytes).is_ok() {
-                return Ok(vec![PlannedImport::with_bytes(
-                    path.to_path_buf(),
-                    ImportMode::Obsidian,
-                    bytes,
-                )]);
-            }
-            // Check if zip contains conversations.json (ChatGPT export)
+            // Check for ChatGPT export first (specific: requires conversations.json)
+            // before Obsidian (generic: any zip with markdown files), so that
+            // ChatGPT exports containing README.md/notes are routed correctly.
             if open_archive::looks_like_chatgpt_zip(&bytes) {
                 return Ok(vec![PlannedImport::with_bytes(
                     path.to_path_buf(),
                     ImportMode::Chatgpt,
+                    bytes,
+                )]);
+            }
+            if parser::obsidian::parse_vault_zip(&bytes).is_ok() {
+                return Ok(vec![PlannedImport::with_bytes(
+                    path.to_path_buf(),
+                    ImportMode::Obsidian,
                     bytes,
                 )]);
             }

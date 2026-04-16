@@ -410,7 +410,10 @@ where
 
     // Store each file individually and build manifest entries
     let mut manifest_files = BTreeMap::new();
-    let mut stored_blobs: Vec<crate::object_store::StoredObject> = Vec::new();
+    // Track blobs created by this import for potential cleanup on failure.
+    // Only delete blobs where was_created=true to avoid breaking shared content
+    // that may be referenced by other manifests.
+    let mut created_blobs: Vec<crate::object_store::StoredObject> = Vec::new();
 
     for VaultDirectoryFile {
         relative_path,
@@ -446,7 +449,9 @@ where
                 stored_sha256: stored.sha256.clone(),
             },
         );
-        stored_blobs.push(stored);
+        if blob_result.was_created {
+            created_blobs.push(stored);
+        }
     }
 
     // Create the manifest
@@ -483,8 +488,9 @@ where
     ) {
         Ok(result) => result,
         Err(err) => {
-            // Clean up all stored file blobs before returning error
-            for stored_object in &stored_blobs {
+            // Clean up only blobs created by this import to avoid breaking
+            // shared content that may be referenced by other manifests.
+            for stored_object in &created_blobs {
                 let _ = object_store.delete_object(stored_object);
             }
             return Err(err);
@@ -555,12 +561,11 @@ where
     let result = match store.write_import(write_set) {
         Ok(result) => result,
         Err(err) => {
-            // Clean up the payload object
+            // Clean up only the payload object if the error occurred before the
+            // import header was committed. Once the initial transaction commits,
+            // the payload reference is persisted; deleting blobs would leave broken
+            // references for any partial import state that remains in the database.
             cleanup_unreferenced_payload_object(object_store, &payload_put, &err);
-            // Clean up all stored file blobs
-            for stored_object in stored_blobs {
-                let _ = object_store.delete_object(&stored_object);
-            }
             return Err(err.into());
         }
     };
@@ -1876,9 +1881,10 @@ mod tests {
     }
 
     #[test]
-    fn import_obsidian_vault_directory_cleans_up_on_write_failure() {
+    fn import_obsidian_vault_directory_cleans_up_payload_on_precommit_failure() {
         let vault_dir = create_test_vault_dir();
-        // Use FailingImportStore to simulate write failure
+        // Use FailingImportStore to simulate a pre-commit write failure
+        // (returns InsertImport error, which happens before the import header is committed)
         let store = FailingImportStore;
         let object_store = MockObjectStore::new();
 
@@ -1887,11 +1893,13 @@ mod tests {
 
         // Verify cleanup occurred
         let deletes = object_store.deletes.lock().unwrap();
-        // Should delete: 3 file blobs + 1 manifest = 4 objects
+        // Only the manifest payload is cleaned up for pre-commit failures.
+        // File blobs are NOT deleted because they may be shared across imports
+        // and the storage contract commits the manifest reference before artifacts.
         assert_eq!(
             deletes.len(),
-            4,
-            "should clean up all stored objects on failure"
+            1,
+            "should clean up only the payload for pre-commit failures"
         );
     }
 

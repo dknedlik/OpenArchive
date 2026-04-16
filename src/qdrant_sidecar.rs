@@ -1,12 +1,15 @@
 use crate::config::{AppConfig, ManagedQdrantConfig, QdrantConfig, VectorStoreConfig};
 use crate::error::{ConfigError, ConfigResult};
 use flate2::read::GzDecoder;
+use log::info;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Cursor, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::Command as ProcCommand;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -522,6 +525,20 @@ impl StartupLock {
                     });
                 }
                 Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                    // Check if the lock is stale (holder process no longer running)
+                    if let Some(pid) = read_lock_pid(path) {
+                        if !is_process_running(pid) {
+                            // Stale lock detected - remove it and try again immediately
+                            info!(
+                                "Detected stale Qdrant startup lock (PID {} not running), removing {}",
+                                pid,
+                                path.display()
+                            );
+                            let _ = fs::remove_file(path);
+                            continue;
+                        }
+                    }
+
                     if Instant::now() >= deadline {
                         return Err(invalid_vector_store(&format!(
                             "timed out waiting for Qdrant startup lock {}",
@@ -545,6 +562,39 @@ impl Drop for StartupLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
+}
+
+/// Check if a process with the given PID is still running.
+/// On Unix: uses `kill -0` to check if process exists.
+/// On Windows: uses tasklist to check if process exists.
+fn is_process_running(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        ProcCommand::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        // Windows: use tasklist and check for the PID
+        ProcCommand::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
+            .unwrap_or(false)
+    }
+}
+
+/// Read the PID from a lock file. Returns None if the file doesn't exist
+/// or doesn't contain a valid PID.
+fn read_lock_pid(path: &Path) -> Option<u32> {
+    fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .strip_prefix("pid=")
+        .and_then(|s| s.parse::<u32>().ok())
 }
 
 fn platform_asset_name_for(os: &str, arch: &str) -> ConfigResult<&'static str> {
