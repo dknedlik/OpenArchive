@@ -14,14 +14,9 @@ pub(in crate::mcp::tools) fn handle_search_archive(
     app: &ArchiveApplication,
     arguments: &Value,
 ) -> Value {
-    let service = match app.search.as_ref() {
-        Some(s) => s,
-        None => {
-            return tool_error(
-                "service_unavailable",
-                "search_archive is unavailable for the configured provider",
-            )
-        }
+    let service = match app.require_search() {
+        Ok(s) => s,
+        Err(err) => return tool_storage_error(&err),
     };
     let query = match arguments.get("query").and_then(Value::as_str) {
         Some(q) => q,
@@ -76,14 +71,9 @@ pub(in crate::mcp::tools) fn handle_get_artifact(
     app: &ArchiveApplication,
     arguments: &Value,
 ) -> Value {
-    let service = match app.artifact_detail.as_ref() {
-        Some(s) => s,
-        None => {
-            return tool_error(
-                "service_unavailable",
-                "get_artifact is unavailable for the configured provider",
-            )
-        }
+    let service = match app.require_artifact_detail() {
+        Ok(s) => s,
+        Err(err) => return tool_storage_error(&err),
     };
     let artifact_id = match arguments.get("artifact_id").and_then(Value::as_str) {
         Some(id) => id,
@@ -131,14 +121,9 @@ pub(in crate::mcp::tools) fn handle_get_context_pack(
     app: &ArchiveApplication,
     arguments: &Value,
 ) -> Value {
-    let service = match app.context_pack.as_ref() {
-        Some(s) => s,
-        None => {
-            return tool_error(
-                "service_unavailable",
-                "get_context_pack is unavailable for the configured provider",
-            )
-        }
+    let service = match app.require_context_pack() {
+        Ok(s) => s,
+        Err(err) => return tool_storage_error(&err),
     };
     let artifact_id = match arguments.get("artifact_id").and_then(Value::as_str) {
         Some(id) => id,
@@ -157,14 +142,9 @@ pub(in crate::mcp::tools) fn handle_get_note_metadata(
     app: &ArchiveApplication,
     arguments: &Value,
 ) -> Value {
-    let service = match app.artifact_detail.as_ref() {
-        Some(s) => s,
-        None => {
-            return tool_error(
-                "service_unavailable",
-                "get_note_metadata is unavailable for the configured provider",
-            )
-        }
+    let service = match app.require_artifact_detail() {
+        Ok(s) => s,
+        Err(err) => return tool_storage_error(&err),
     };
     let artifact_id = match arguments.get("artifact_id").and_then(Value::as_str) {
         Some(id) => id,
@@ -198,14 +178,9 @@ pub(in crate::mcp::tools) fn handle_search_objects(
     app: &ArchiveApplication,
     arguments: &Value,
 ) -> Value {
-    let service = match app.object_search.as_ref() {
-        Some(s) => s,
-        None => {
-            return tool_error(
-                "service_unavailable",
-                "search_objects is unavailable for the configured provider",
-            )
-        }
+    let service = match app.require_object_search() {
+        Ok(s) => s,
+        Err(err) => return tool_storage_error(&err),
     };
     let query = arguments
         .get("query")
@@ -325,14 +300,9 @@ pub(in crate::mcp::tools) fn handle_get_related(
     app: &ArchiveApplication,
     arguments: &Value,
 ) -> Value {
-    let service = match app.object_search.as_ref() {
-        Some(s) => s,
-        None => {
-            return tool_error(
-                "service_unavailable",
-                "get_related is unavailable for the configured provider",
-            )
-        }
+    let service = match app.require_object_search() {
+        Ok(s) => s,
+        Err(err) => return tool_storage_error(&err),
     };
     let derived_object_id = match arguments.get("derived_object_id").and_then(Value::as_str) {
         Some(v) => v,

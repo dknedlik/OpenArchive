@@ -4,21 +4,16 @@ use crate::app::{review, ArchiveApplication};
 use crate::storage::{ReviewDecisionStatus, ReviewItemKind, ReviewQueueFilters};
 
 use super::super::parse::{parse_enum_array, parse_required_enum};
-use super::super::result::{tool_app_error, tool_error, tool_success};
+use super::super::result::{tool_app_error, tool_error, tool_storage_error, tool_success};
 use super::super::REVIEW_LIMIT_CAP;
 
 pub(in crate::mcp::tools) fn handle_list_review_items(
     app: &ArchiveApplication,
     arguments: &Value,
 ) -> Value {
-    let service = match app.review.as_ref() {
-        Some(s) => s,
-        None => {
-            return tool_error(
-                "service_unavailable",
-                "list_review_items is unavailable for the configured provider",
-            )
-        }
+    let service = match app.require_review() {
+        Ok(s) => s,
+        Err(err) => return tool_storage_error(&err),
     };
     let kinds = match parse_enum_array(arguments, "kinds", ReviewItemKind::parse) {
         Ok(v) => v,
@@ -45,14 +40,9 @@ pub(in crate::mcp::tools) fn handle_record_review_decision(
     app: &ArchiveApplication,
     arguments: &Value,
 ) -> Value {
-    let service = match app.review.as_ref() {
-        Some(s) => s,
-        None => {
-            return tool_error(
-                "service_unavailable",
-                "record_review_decision is unavailable for the configured provider",
-            )
-        }
+    let service = match app.require_review() {
+        Ok(s) => s,
+        Err(err) => return tool_storage_error(&err),
     };
     let kind = match parse_required_enum(arguments, "kind", ReviewItemKind::parse) {
         Ok(v) => v,
@@ -104,14 +94,9 @@ pub(in crate::mcp::tools) fn handle_retry_artifact_enrichment(
     app: &ArchiveApplication,
     arguments: &Value,
 ) -> Value {
-    let service = match app.review.as_ref() {
-        Some(s) => s,
-        None => {
-            return tool_error(
-                "service_unavailable",
-                "retry_artifact_enrichment is unavailable for the configured provider",
-            )
-        }
+    let service = match app.require_review() {
+        Ok(s) => s,
+        Err(err) => return tool_storage_error(&err),
     };
     let artifact_id = match arguments.get("artifact_id").and_then(Value::as_str) {
         Some(v) => v.to_string(),

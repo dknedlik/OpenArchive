@@ -69,7 +69,8 @@ fn should_include_payload_text(value: &Value) -> bool {
 
 pub(in crate::mcp::tools) fn tool_storage_error(err: &crate::error::StorageError) -> Value {
     match err {
-        crate::error::StorageError::UnsupportedOperation { .. } => {
+        crate::error::StorageError::UnsupportedOperation { .. }
+        | crate::error::StorageError::ServiceUnavailable { .. } => {
             tool_error("service_unavailable", &err.to_string())
         }
         _ => tool_error("internal_error", &err.to_string()),

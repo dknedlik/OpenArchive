@@ -7,20 +7,15 @@ use crate::storage::writeback_store::{
 use crate::storage::ObjectStatus;
 
 use super::super::parse::new_id;
-use super::super::result::{tool_error, tool_success};
+use super::super::result::{tool_error, tool_storage_error, tool_success};
 
 pub(in crate::mcp::tools) fn handle_store_memory(
     app: &ArchiveApplication,
     arguments: &Value,
 ) -> Value {
-    let service = match app.writeback.as_ref() {
-        Some(s) => s,
-        None => {
-            return tool_error(
-                "service_unavailable",
-                "store_memory is unavailable for the configured provider",
-            )
-        }
+    let service = match app.require_writeback() {
+        Ok(s) => s,
+        Err(err) => return tool_storage_error(&err),
     };
     let title = match arguments.get("title").and_then(Value::as_str) {
         Some(v) => v,
@@ -67,14 +62,9 @@ pub(in crate::mcp::tools) fn handle_link_objects(
     app: &ArchiveApplication,
     arguments: &Value,
 ) -> Value {
-    let service = match app.writeback.as_ref() {
-        Some(s) => s,
-        None => {
-            return tool_error(
-                "service_unavailable",
-                "link_objects is unavailable for the configured provider",
-            )
-        }
+    let service = match app.require_writeback() {
+        Ok(s) => s,
+        Err(err) => return tool_storage_error(&err),
     };
     let source_object_id = match arguments.get("source_object_id").and_then(Value::as_str) {
         Some(v) => v,
@@ -122,14 +112,9 @@ pub(in crate::mcp::tools) fn handle_update_object(
     app: &ArchiveApplication,
     arguments: &Value,
 ) -> Value {
-    let service = match app.writeback.as_ref() {
-        Some(s) => s,
-        None => {
-            return tool_error(
-                "service_unavailable",
-                "update_object is unavailable for the configured provider",
-            )
-        }
+    let service = match app.require_writeback() {
+        Ok(s) => s,
+        Err(err) => return tool_storage_error(&err),
     };
     let derived_object_id = match arguments.get("derived_object_id").and_then(Value::as_str) {
         Some(v) => v.to_string(),
@@ -166,14 +151,9 @@ pub(in crate::mcp::tools) fn handle_store_entity(
     app: &ArchiveApplication,
     arguments: &Value,
 ) -> Value {
-    let service = match app.writeback.as_ref() {
-        Some(s) => s,
-        None => {
-            return tool_error(
-                "service_unavailable",
-                "store_entity is unavailable for the configured provider",
-            )
-        }
+    let service = match app.require_writeback() {
+        Ok(s) => s,
+        Err(err) => return tool_storage_error(&err),
     };
     let title = match arguments.get("title").and_then(Value::as_str) {
         Some(v) => v,

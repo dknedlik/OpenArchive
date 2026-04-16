@@ -36,6 +36,8 @@ enum Command {
     Artifacts(ArtifactsArgs),
     /// Load full detail for one artifact
     Artifact(ArtifactArgs),
+    /// Search the archive
+    Search(SearchArgs),
     OracleCheck,
     Migrate,
     MigrateCheck,
@@ -87,6 +89,24 @@ struct ArtifactArgs {
     segment_limit: Option<usize>,
 }
 
+#[derive(Args)]
+struct SearchArgs {
+    /// Search query text
+    query: String,
+
+    /// Maximum number of results (default: 20)
+    #[arg(long, value_name = "N")]
+    limit: Option<usize>,
+
+    /// Filter by source type (chatgpt_export, claude_export, grok_export, gemini_takeout, text_file, markdown_file, obsidian_vault)
+    #[arg(long, value_name = "TYPE")]
+    source: Option<String>,
+
+    /// Filter by object type (summary, memory, entity, relationship, classification)
+    #[arg(long, value_name = "TYPE")]
+    object_type: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum ImportSourceCommand {
     Auto { path: PathBuf },
@@ -107,6 +127,7 @@ fn main() -> Result<(), anyhow::Error> {
         Command::Import(args) => import_command(args),
         Command::Artifacts(args) => artifacts_command(args),
         Command::Artifact(args) => artifact_command(args),
+        Command::Search(args) => search_command(args),
         Command::OracleCheck => oracle_check(),
         Command::Migrate => {
             let config =
@@ -388,6 +409,89 @@ fn artifacts_command(args: ArtifactsArgs) -> Result<(), anyhow::Error> {
     }
 
     Ok(())
+}
+
+fn search_command(args: SearchArgs) -> Result<(), anyhow::Error> {
+    let runtime = load_local_runtime(true)?;
+
+    let service = runtime
+        .services
+        .app
+        .require_search()
+        .map_err(|err| anyhow::Error::new(err).context("search is unavailable"))?;
+
+    let source_type = match args.source {
+        Some(value) => Some(
+            open_archive::storage::SourceType::parse(&value)
+                .ok_or_else(|| anyhow::anyhow!("invalid source_type: '{value}'"))?,
+        ),
+        None => None,
+    };
+
+    let object_type = match args.object_type {
+        Some(value) => Some(
+            open_archive::storage::DerivedObjectType::parse(&value)
+                .ok_or_else(|| anyhow::anyhow!("invalid object_type: '{value}'"))?,
+        ),
+        None => None,
+    };
+
+    let limit = args.limit.unwrap_or(20).clamp(1, 100);
+
+    let filters = open_archive::storage::SearchFilters {
+        object_type,
+        source_type,
+        tag: None,
+        alias: None,
+        path_prefix: None,
+    };
+
+    let response = service
+        .search(open_archive::app::search::ArchiveSearchRequest {
+            query_text: args.query,
+            limit,
+            filters,
+        })
+        .map_err(|err| anyhow::Error::new(err).context("search failed"))?;
+
+    if response.hits.is_empty() {
+        println!("no results");
+        return Ok(());
+    }
+
+    const SNIPPET_TRUNCATE_LEN: usize = 120;
+    for hit in response.hits {
+        let match_kind_str = format_match_kind(&hit.match_kind);
+        let snippet = if hit.snippet.chars().count() > SNIPPET_TRUNCATE_LEN {
+            let cutoff = hit
+                .snippet
+                .char_indices()
+                .nth(SNIPPET_TRUNCATE_LEN)
+                .map(|(idx, _)| idx)
+                .unwrap_or_else(|| hit.snippet.len());
+            format!("{}…", &hit.snippet[..cutoff])
+        } else {
+            hit.snippet
+        };
+        // Score formatted to 2 decimal places as per requirements
+        println!("{:.2} {} {}", hit.score, match_kind_str, hit.artifact_id);
+        println!("  {}", snippet);
+    }
+
+    Ok(())
+}
+
+fn format_match_kind(kind: &open_archive::app::search::SearchMatchKind) -> String {
+    use open_archive::app::search::SearchMatchKind;
+    match kind {
+        SearchMatchKind::ArtifactTitle => "title".to_string(),
+        SearchMatchKind::ImportedNoteTag { .. } => "tag".to_string(),
+        SearchMatchKind::ImportedNoteAlias { .. } => "alias".to_string(),
+        SearchMatchKind::ImportedNotePath => "path".to_string(),
+        SearchMatchKind::ImportedExternalLink { .. } => "link".to_string(),
+        SearchMatchKind::DerivedObject { derived_type, .. } => derived_type.as_str().to_string(),
+        SearchMatchKind::SegmentExcerpt { .. } => "segment".to_string(),
+    }
 }
 
 fn artifact_command(args: ArtifactArgs) -> Result<(), anyhow::Error> {

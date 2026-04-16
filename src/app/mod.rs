@@ -45,6 +45,60 @@ pub struct ArchiveApplicationDeps {
 }
 
 impl ArchiveApplication {
+    pub fn require_search(&self) -> crate::error::StorageResult<&search::ArchiveSearchService> {
+        self.search
+            .as_ref()
+            .ok_or(crate::error::StorageError::ServiceUnavailable {
+                service_name: "search",
+            })
+    }
+
+    pub fn require_object_search(
+        &self,
+    ) -> crate::error::StorageResult<&search::ObjectSearchService> {
+        self.object_search
+            .as_ref()
+            .ok_or(crate::error::StorageError::ServiceUnavailable {
+                service_name: "object_search",
+            })
+    }
+
+    pub fn require_artifact_detail(
+        &self,
+    ) -> crate::error::StorageResult<&artifact_detail::ArtifactDetailService> {
+        self.artifact_detail
+            .as_ref()
+            .ok_or(crate::error::StorageError::ServiceUnavailable {
+                service_name: "artifact_detail",
+            })
+    }
+
+    pub fn require_context_pack(
+        &self,
+    ) -> crate::error::StorageResult<&context_pack::ContextPackService> {
+        self.context_pack
+            .as_ref()
+            .ok_or(crate::error::StorageError::ServiceUnavailable {
+                service_name: "context_pack",
+            })
+    }
+
+    pub fn require_review(&self) -> crate::error::StorageResult<&review::ReviewService> {
+        self.review
+            .as_ref()
+            .ok_or(crate::error::StorageError::ServiceUnavailable {
+                service_name: "review",
+            })
+    }
+
+    pub fn require_writeback(&self) -> crate::error::StorageResult<&writeback::WritebackService> {
+        self.writeback
+            .as_ref()
+            .ok_or(crate::error::StorageError::ServiceUnavailable {
+                service_name: "writeback",
+            })
+    }
+
     pub fn new(deps: ArchiveApplicationDeps) -> Self {
         let ArchiveApplicationDeps {
             import_store,

@@ -601,6 +601,9 @@ pub enum StorageError {
         operation: &'static str,
     },
 
+    #[error("{service_name} is unavailable for the configured provider")]
+    ServiceUnavailable { service_name: &'static str },
+
     #[error("failed to send vector-store {operation} request")]
     VectorStoreRequest {
         operation: &'static str,
