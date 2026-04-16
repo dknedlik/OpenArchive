@@ -166,6 +166,51 @@ impl PlannedImport {
     }
 }
 
+/// Result of attempting to import a single item.
+#[derive(Debug)]
+struct ImportItemResult {
+    path: PathBuf,
+    outcome: Result<ImportResponse, anyhow::Error>,
+}
+
+/// Summarize import results and produce an error if any failed.
+fn summarize_import_results(
+    results: Vec<ImportItemResult>,
+) -> (String, usize, Option<anyhow::Error>) {
+    let success_count = results.iter().filter(|r| r.outcome.is_ok()).count();
+    let failure_count = results.len() - success_count;
+    let artifact_count: usize = results
+        .iter()
+        .filter_map(|r| r.outcome.as_ref().ok())
+        .map(|resp| resp.artifacts.len())
+        .sum();
+
+    let summary = format!(
+        "summary imports={} failed={} artifacts={}",
+        success_count, failure_count, artifact_count
+    );
+
+    let error = if failure_count > 0 {
+        let failures: Vec<_> = results
+            .iter()
+            .filter(|r| r.outcome.is_err())
+            .map(|r| {
+                let err = r.outcome.as_ref().unwrap_err();
+                format!("{}: {:#}", r.path.display(), err)
+            })
+            .collect();
+        Some(anyhow::anyhow!(
+            "{} import(s) failed:\n  {}",
+            failure_count,
+            failures.join("\n  ")
+        ))
+    } else {
+        None
+    };
+
+    (summary, artifact_count, error)
+}
+
 fn import_command(args: ImportArgs) -> Result<(), anyhow::Error> {
     let (mode, path) = match args.source {
         ImportSourceCommand::Auto { path } => (ImportMode::Auto, path),
@@ -178,26 +223,52 @@ fn import_command(args: ImportArgs) -> Result<(), anyhow::Error> {
         ImportSourceCommand::Obsidian { path } => (ImportMode::Obsidian, path),
     };
     let planned = plan_imports(mode, &path)?;
-    let runtime = load_local_runtime(true)?;
 
-    let mut import_count = 0usize;
-    let mut artifact_count = 0usize;
-    for item in planned {
-        let response = execute_import(runtime.services.app.as_ref(), &item)?;
-        import_count += 1;
-        artifact_count += response.artifacts.len();
-        println!(
-            "imported path={} mode={} import_id={} status={} artifacts={}",
-            item.import_path.display(),
-            item.mode.label(),
-            response.import_id,
-            response.import_status,
-            response.artifacts.len(),
-        );
+    // Guard against empty plan — no importable files found
+    if planned.is_empty() {
+        return Err(anyhow::anyhow!(
+            "no importable files found at {}",
+            path.display()
+        ));
     }
 
-    println!("imports={import_count}");
-    println!("artifacts={artifact_count}");
+    let runtime = load_local_runtime(true)?;
+
+    // Collect per-file results instead of failing fast on first error
+    let mut results: Vec<ImportItemResult> = Vec::with_capacity(planned.len());
+    for item in planned {
+        let outcome = execute_import(runtime.services.app.as_ref(), &item);
+        // Report each result as it completes
+        match &outcome {
+            Ok(response) => println!(
+                "imported path={} mode={} import_id={} status={} artifacts={}",
+                item.import_path.display(),
+                item.mode.label(),
+                response.import_id,
+                response.import_status,
+                response.artifacts.len(),
+            ),
+            Err(err) => eprintln!(
+                "failed path={} mode={} error={:#}",
+                item.import_path.display(),
+                item.mode.label(),
+                err
+            ),
+        }
+        results.push(ImportItemResult {
+            path: item.import_path,
+            outcome,
+        });
+    }
+
+    // Compute summary and check for failures
+    let (summary, _artifact_count, error) = summarize_import_results(results);
+    println!("{}", summary);
+
+    if let Some(err) = error {
+        return Err(err);
+    }
+
     Ok(())
 }
 
@@ -1121,5 +1192,97 @@ mod tests {
             object_store,
             writeback_store: None,
         }))
+    }
+
+    // Tests for summarize_import_results
+
+    fn make_result(path: &str, outcome: Result<ImportResponse, anyhow::Error>) -> ImportItemResult {
+        ImportItemResult {
+            path: PathBuf::from(path),
+            outcome,
+        }
+    }
+
+    fn make_success_response(artifacts: usize) -> ImportResponse {
+        ImportResponse {
+            import_id: "imp_test".to_string(),
+            import_status: "completed".to_string(),
+            artifacts: (0..artifacts)
+                .map(|i| open_archive::import_service::ImportArtifactStatus {
+                    artifact_id: format!("art_{}", i),
+                    enrichment_status: "pending".to_string(),
+                    ingest_result: "created".to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn summarize_all_success() {
+        let results = vec![
+            make_result("/a.md", Ok(make_success_response(2))),
+            make_result("/b.md", Ok(make_success_response(3))),
+        ];
+        let (summary, artifact_count, error) = summarize_import_results(results);
+        assert_eq!(summary, "summary imports=2 failed=0 artifacts=5");
+        assert_eq!(artifact_count, 5);
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn summarize_all_failure() {
+        let results = vec![
+            make_result("/a.md", Err(anyhow::anyhow!("parse error"))),
+            make_result("/b.md", Err(anyhow::anyhow!("io error"))),
+        ];
+        let (summary, artifact_count, error) = summarize_import_results(results);
+        assert_eq!(summary, "summary imports=0 failed=2 artifacts=0");
+        assert_eq!(artifact_count, 0);
+        assert!(error.is_some());
+        let err_str = format!("{:#}", error.unwrap());
+        assert!(err_str.contains("2 import(s) failed"));
+        assert!(err_str.contains("/a.md: parse error"));
+        assert!(err_str.contains("/b.md: io error"));
+    }
+
+    #[test]
+    fn summarize_mixed_success_and_failure() {
+        let results = vec![
+            make_result("/a.md", Ok(make_success_response(1))),
+            make_result("/b.md", Err(anyhow::anyhow!("invalid syntax"))),
+            make_result("/c.md", Ok(make_success_response(2))),
+        ];
+        let (summary, artifact_count, error) = summarize_import_results(results);
+        assert_eq!(summary, "summary imports=2 failed=1 artifacts=3");
+        assert_eq!(artifact_count, 3);
+        assert!(error.is_some());
+        let err_str = format!("{:#}", error.unwrap());
+        assert!(err_str.contains("1 import(s) failed"));
+        assert!(err_str.contains("/b.md: invalid syntax"));
+        // Ensure successful paths are NOT in the error
+        assert!(!err_str.contains("/a.md"));
+        assert!(!err_str.contains("/c.md"));
+    }
+
+    #[test]
+    fn summarize_empty_results() {
+        let results: Vec<ImportItemResult> = vec![];
+        let (summary, artifact_count, error) = summarize_import_results(results);
+        assert_eq!(summary, "summary imports=0 failed=0 artifacts=0");
+        assert_eq!(artifact_count, 0);
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn summarize_preserves_error_chain() {
+        let inner_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let outer_err = anyhow::Error::new(inner_err).context("while importing document");
+        let results = vec![make_result("/missing.md", Err(outer_err))];
+        let (_summary, _artifact_count, error) = summarize_import_results(results);
+        assert!(error.is_some());
+        let err_str = format!("{:#}", error.unwrap());
+        // Full chain should include both context and source
+        assert!(err_str.contains("while importing document"));
+        assert!(err_str.contains("file not found"));
     }
 }
