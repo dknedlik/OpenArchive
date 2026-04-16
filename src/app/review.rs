@@ -18,6 +18,16 @@ pub enum ReviewPriority {
     Low,
 }
 
+impl ReviewPriority {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewAction {
@@ -31,6 +41,23 @@ pub enum ReviewAction {
     NoteItem,
     DismissItem,
     ResolveItem,
+}
+
+impl ReviewAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InspectArtifact => "inspect_artifact",
+            Self::InspectContextPack => "inspect_context_pack",
+            Self::InspectRelatedObjects => "inspect_related_objects",
+            Self::RejectObject => "reject_object",
+            Self::SupersedeObject => "supersede_object",
+            Self::LinkObjects => "link_objects",
+            Self::RetryArtifact => "retry_artifact",
+            Self::NoteItem => "note_item",
+            Self::DismissItem => "dismiss_item",
+            Self::ResolveItem => "resolve_item",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -187,7 +214,9 @@ fn build_item_id(
 fn validate_decision_request(request: &ReviewDecisionRequest) -> Result<()> {
     let derived_object_required = matches!(
         request.kind,
-        ReviewItemKind::ObjectLowConfidence | ReviewItemKind::CandidateKeyCollision
+        ReviewItemKind::ObjectLowConfidence
+            | ReviewItemKind::CandidateKeyCollision
+            | ReviewItemKind::ObjectMissingEvidence
     );
     if derived_object_required && request.derived_object_id.is_none() {
         return Err(OpenArchiveError::Invariant(format!(
@@ -210,7 +239,9 @@ fn priority_for_kind(kind: ReviewItemKind) -> ReviewPriority {
             ReviewPriority::High
         }
         ReviewItemKind::CandidateKeyCollision => ReviewPriority::Medium,
-        ReviewItemKind::ObjectLowConfidence => ReviewPriority::Low,
+        ReviewItemKind::ObjectLowConfidence | ReviewItemKind::ObjectMissingEvidence => {
+            ReviewPriority::Low
+        }
     }
 }
 
@@ -240,7 +271,7 @@ fn recommended_actions(kind: ReviewItemKind) -> Vec<ReviewAction> {
             ReviewAction::DismissItem,
             ReviewAction::ResolveItem,
         ],
-        ReviewItemKind::ObjectLowConfidence => vec![
+        ReviewItemKind::ObjectLowConfidence | ReviewItemKind::ObjectMissingEvidence => vec![
             ReviewAction::InspectArtifact,
             ReviewAction::InspectContextPack,
             ReviewAction::RejectObject,
@@ -283,6 +314,9 @@ fn reason_for_candidate(candidate: &ReviewCandidate) -> String {
             Some(score) => format!("Active derived object has low confidence ({score:.2})."),
             None => "Active derived object has low confidence.".to_string(),
         },
+        ReviewItemKind::ObjectMissingEvidence => {
+            "Active derived object is missing supporting evidence.".to_string()
+        }
         ReviewItemKind::CandidateKeyCollision => match (
             candidate.candidate_key.as_deref(),
             candidate.related_artifact_count,

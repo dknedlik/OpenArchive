@@ -31,8 +31,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Install Qdrant vector store sidecar
     InstallQdrant,
+    /// Import content into the archive
     Import(ImportArgs),
+    /// List artifacts in the archive
     Artifacts(ArtifactsArgs),
     /// Load full detail for one artifact
     Artifact(ArtifactArgs),
@@ -40,11 +43,19 @@ enum Command {
     Search(SearchArgs),
     /// View artifacts ordered chronologically
     Timeline(TimelineArgs),
+    /// Review queue management
+    Review(ReviewArgs),
+    /// Check Oracle database connectivity
     OracleCheck,
+    /// Apply database migrations
     Migrate,
+    /// Check database migration status
     MigrateCheck,
+    /// Show archive status summary
     Status,
+    /// Check system health
     Doctor,
+    /// Start HTTP server
     Serve,
 }
 
@@ -86,7 +97,7 @@ struct ArtifactArgs {
     #[arg(long, value_name = "N")]
     segment_offset: Option<usize>,
 
-    /// Maximum segments to return (requires --segments, default: 50, max: 50)
+    /// Maximum segments to return (requires --segments, default: 50)
     #[arg(long, value_name = "N")]
     segment_limit: Option<usize>,
 }
@@ -96,7 +107,7 @@ struct SearchArgs {
     /// Search query text
     query: String,
 
-    /// Maximum number of results (default: 20)
+    /// Maximum number of results (default: 20, max: 100)
     #[arg(long, value_name = "N")]
     limit: Option<usize>,
 
@@ -136,6 +147,43 @@ struct TimelineArgs {
     offset: Option<usize>,
 }
 
+#[derive(Args)]
+struct ReviewArgs {
+    #[command(subcommand)]
+    command: ReviewCommand,
+}
+
+#[derive(Subcommand)]
+enum ReviewCommand {
+    /// List items in the review queue
+    List {
+        /// Maximum number of results (default: 20, max: 100)
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+    },
+    /// Record a decision on a review item
+    Decide {
+        /// Artifact ID to decide on
+        artifact_id: String,
+        /// Decision status (dismissed, noted, resolved)
+        status: String,
+        /// Review kind (artifact_needs_attention, artifact_missing_summary, object_low_confidence, candidate_key_collision, object_missing_evidence)
+        #[arg(long, value_name = "KIND")]
+        kind: String,
+        /// Derived object ID (required for object_low_confidence, candidate_key_collision, object_missing_evidence)
+        #[arg(long, value_name = "ID")]
+        object: Option<String>,
+        /// Note text (required when status is noted)
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
+    },
+    /// Retry enrichment for an artifact
+    Retry {
+        /// Artifact ID to retry
+        artifact_id: String,
+    },
+}
+
 #[derive(Subcommand)]
 enum ImportSourceCommand {
     Auto { path: PathBuf },
@@ -158,6 +206,7 @@ fn main() -> Result<(), anyhow::Error> {
         Command::Artifact(args) => artifact_command(args),
         Command::Search(args) => search_command(args),
         Command::Timeline(args) => timeline_command(args),
+        Command::Review(args) => review_command(args),
         Command::OracleCheck => oracle_check(),
         Command::Migrate => {
             let config =
@@ -589,6 +638,128 @@ fn timeline_command(args: TimelineArgs) -> Result<(), anyhow::Error> {
             println!("  {}", truncated);
         }
     }
+
+    Ok(())
+}
+
+fn review_command(args: ReviewArgs) -> Result<(), anyhow::Error> {
+    let runtime = load_local_runtime(true)?;
+
+    let service = runtime
+        .services
+        .app
+        .require_review()
+        .map_err(|err| anyhow::Error::new(err).context("review service is unavailable"))?;
+
+    match args.command {
+        ReviewCommand::List { limit } => review_list_command(service, limit),
+        ReviewCommand::Decide {
+            artifact_id,
+            status,
+            kind,
+            object,
+            note,
+        } => review_decide_command(service, artifact_id, status, kind, object, note),
+        ReviewCommand::Retry { artifact_id } => review_retry_command(service, artifact_id),
+    }
+}
+
+fn review_list_command(
+    service: &open_archive::app::review::ReviewService,
+    limit: Option<usize>,
+) -> Result<(), anyhow::Error> {
+    use open_archive::app::review::ReviewQueueRequest;
+    use open_archive::storage::ReviewQueueFilters;
+
+    let limit = limit.unwrap_or(20).clamp(1, 100);
+
+    let response = service
+        .list(ReviewQueueRequest {
+            filters: ReviewQueueFilters::default(),
+            limit,
+        })
+        .map_err(|err| anyhow::Error::new(err).context("failed to list review items"))?;
+
+    if response.items.is_empty() {
+        println!("no review items");
+        return Ok(());
+    }
+
+    for item in response.items {
+        let title = item.title.unwrap_or_else(|| "(untitled)".to_string());
+        let priority_str = format!("[{}]", item.priority.as_str());
+        let actions_str = item
+            .recommended_actions
+            .iter()
+            .map(|a| a.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        println!(
+            "{} {} {} {}",
+            priority_str,
+            item.kind.as_str(),
+            item.artifact_id,
+            title
+        );
+        println!("  {}", item.reason);
+        println!("  actions: {}", actions_str);
+    }
+
+    Ok(())
+}
+
+fn review_decide_command(
+    service: &open_archive::app::review::ReviewService,
+    artifact_id: String,
+    status: String,
+    kind: String,
+    object: Option<String>,
+    note: Option<String>,
+) -> Result<(), anyhow::Error> {
+    use open_archive::app::review::ReviewDecisionRequest;
+    use open_archive::storage::{ReviewDecisionStatus, ReviewItemKind};
+
+    let kind = ReviewItemKind::parse(&kind)
+        .ok_or_else(|| anyhow::anyhow!("invalid review kind: '{kind}'"))?;
+
+    let decision_status = ReviewDecisionStatus::parse(&status)
+        .ok_or_else(|| anyhow::anyhow!("invalid decision status: '{status}'"))?;
+
+    // Validate that note is provided when status is noted
+    if decision_status == ReviewDecisionStatus::Noted && note.is_none() {
+        return Err(anyhow::anyhow!(
+            "--note is required when decision status is 'noted'"
+        ));
+    }
+
+    let decision_id = service
+        .record_decision(ReviewDecisionRequest {
+            kind,
+            artifact_id,
+            derived_object_id: object,
+            decision_status,
+            note_text: note,
+            decided_by: None,
+        })
+        .map_err(|err| anyhow::Error::new(err).context("failed to record decision"))?;
+
+    println!("recorded decision_id={}", decision_id);
+
+    Ok(())
+}
+
+fn review_retry_command(
+    service: &open_archive::app::review::ReviewService,
+    artifact_id: String,
+) -> Result<(), anyhow::Error> {
+    use open_archive::app::review::RetryArtifactRequest;
+
+    let job_id = service
+        .retry_artifact(RetryArtifactRequest { artifact_id })
+        .map_err(|err| anyhow::Error::new(err).context("failed to queue retry"))?;
+
+    println!("job_id={}", job_id);
 
     Ok(())
 }
