@@ -49,14 +49,12 @@ impl OperatorStore for OracleOperatorStore {
             })?;
             artifacts_by_source.push(ArtifactSourceCount {
                 source_type: SourceType::parse(&source_type).ok_or_else(|| {
-                    StorageError::InvalidDerivationWrite {
+                    StorageError::InvalidStatusRead {
                         detail: format!("invalid source_type in status snapshot: {source_type}"),
                     }
                 })?,
-                count: usize::try_from(count).map_err(|_| {
-                    StorageError::InvalidDerivationWrite {
-                        detail: format!("invalid artifact count in status snapshot: {count}"),
-                    }
+                count: usize::try_from(count).map_err(|_| StorageError::InvalidStatusRead {
+                    detail: format!("invalid artifact count in status snapshot: {count}"),
                 })?,
             });
         }
@@ -86,16 +84,14 @@ impl OperatorStore for OracleOperatorStore {
             })?;
             artifacts_by_enrichment_status.push(ArtifactEnrichmentCount {
                 enrichment_status: EnrichmentStatus::parse(&enrichment_status).ok_or_else(
-                    || StorageError::InvalidDerivationWrite {
+                    || StorageError::InvalidStatusRead {
                         detail: format!(
                             "invalid enrichment_status in status snapshot: {enrichment_status}"
                         ),
                     },
                 )?,
-                count: usize::try_from(count).map_err(|_| {
-                    StorageError::InvalidDerivationWrite {
-                        detail: format!("invalid enrichment count in status snapshot: {count}"),
-                    }
+                count: usize::try_from(count).map_err(|_| StorageError::InvalidStatusRead {
+                    detail: format!("invalid enrichment count in status snapshot: {count}"),
                 })?,
             });
         }
@@ -124,21 +120,19 @@ impl OperatorStore for OracleOperatorStore {
             })?;
             jobs_by_status.push(EnrichmentJobCount {
                 job_status: JobStatus::parse(&job_status).ok_or_else(|| {
-                    StorageError::InvalidDerivationWrite {
+                    StorageError::InvalidStatusRead {
                         detail: format!("invalid job_status in status snapshot: {job_status}"),
                     }
                 })?,
-                count: usize::try_from(count).map_err(|_| {
-                    StorageError::InvalidDerivationWrite {
-                        detail: format!("invalid job count in status snapshot: {count}"),
-                    }
+                count: usize::try_from(count).map_err(|_| StorageError::InvalidStatusRead {
+                    detail: format!("invalid job count in status snapshot: {count}"),
                 })?,
             });
         }
 
         Ok(ArchiveStatusSnapshot {
             artifact_count: usize::try_from(artifact_count).map_err(|_| {
-                StorageError::InvalidDerivationWrite {
+                StorageError::InvalidStatusRead {
                     detail: format!(
                         "invalid total artifact count in status snapshot: {artifact_count}"
                     ),

@@ -487,6 +487,9 @@ pub enum StorageError {
     #[error("invalid derivation write: {detail}")]
     InvalidDerivationWrite { detail: String },
 
+    #[error("invalid status read: {detail}")]
+    InvalidStatusRead { detail: String },
+
     #[error("failed to validate artifact ownership for {artifact_id}")]
     ValidateArtifactOwnership {
         artifact_id: String,

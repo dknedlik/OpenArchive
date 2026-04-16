@@ -23,7 +23,7 @@ impl OperatorStore for PostgresOperatorStore {
         self.client.with_client(|client| {
             let artifact_count: i64 = client
                 .query_one("SELECT COUNT(*) FROM oa_artifact", &[])
-                .map_err(|source| StorageError::InvalidDerivationWrite {
+                .map_err(|source| StorageError::InvalidStatusRead {
                     detail: format!("failed to query total artifact count: {source}"),
                 })?
                 .get(0);
@@ -36,7 +36,7 @@ impl OperatorStore for PostgresOperatorStore {
                      ORDER BY source_type",
                     &[],
                 )
-                .map_err(|source| StorageError::InvalidDerivationWrite {
+                .map_err(|source| StorageError::InvalidStatusRead {
                     detail: format!("failed to query artifact source counts: {source}"),
                 })?
                 .into_iter()
@@ -45,14 +45,14 @@ impl OperatorStore for PostgresOperatorStore {
                     let count: i64 = row.get(1);
                     Ok(ArtifactSourceCount {
                         source_type: SourceType::parse(&source_type).ok_or_else(|| {
-                            StorageError::InvalidDerivationWrite {
+                            StorageError::InvalidStatusRead {
                                 detail: format!(
                                     "invalid source_type in status snapshot: {source_type}"
                                 ),
                             }
                         })?,
                         count: usize::try_from(count).map_err(|_| {
-                            StorageError::InvalidDerivationWrite {
+                            StorageError::InvalidStatusRead {
                                 detail: format!(
                                     "invalid artifact source count in status snapshot: {count}"
                                 ),
@@ -70,7 +70,7 @@ impl OperatorStore for PostgresOperatorStore {
                      ORDER BY enrichment_status",
                     &[],
                 )
-                .map_err(|source| StorageError::InvalidDerivationWrite {
+                .map_err(|source| StorageError::InvalidStatusRead {
                     detail: format!("failed to query artifact enrichment counts: {source}"),
                 })?
                 .into_iter()
@@ -79,14 +79,14 @@ impl OperatorStore for PostgresOperatorStore {
                     let count: i64 = row.get(1);
                     Ok(ArtifactEnrichmentCount {
                         enrichment_status: EnrichmentStatus::parse(&enrichment_status).ok_or_else(
-                            || StorageError::InvalidDerivationWrite {
+                            || StorageError::InvalidStatusRead {
                                 detail: format!(
                                     "invalid enrichment_status in status snapshot: {enrichment_status}"
                                 ),
                             },
                         )?,
                         count: usize::try_from(count).map_err(|_| {
-                            StorageError::InvalidDerivationWrite {
+                            StorageError::InvalidStatusRead {
                                 detail: format!(
                                     "invalid enrichment count in status snapshot: {count}"
                                 ),
@@ -104,7 +104,7 @@ impl OperatorStore for PostgresOperatorStore {
                      ORDER BY job_status",
                     &[],
                 )
-                .map_err(|source| StorageError::InvalidDerivationWrite {
+                .map_err(|source| StorageError::InvalidStatusRead {
                     detail: format!("failed to query job status counts: {source}"),
                 })?
                 .into_iter()
@@ -113,14 +113,14 @@ impl OperatorStore for PostgresOperatorStore {
                     let count: i64 = row.get(1);
                     Ok(EnrichmentJobCount {
                         job_status: JobStatus::parse(&job_status).ok_or_else(|| {
-                            StorageError::InvalidDerivationWrite {
+                            StorageError::InvalidStatusRead {
                                 detail: format!(
                                     "invalid job_status in status snapshot: {job_status}"
                                 ),
                             }
                         })?,
                         count: usize::try_from(count).map_err(|_| {
-                            StorageError::InvalidDerivationWrite {
+                            StorageError::InvalidStatusRead {
                                 detail: format!(
                                     "invalid job count in status snapshot: {count}"
                                 ),
@@ -132,7 +132,7 @@ impl OperatorStore for PostgresOperatorStore {
 
             Ok(ArchiveStatusSnapshot {
                 artifact_count: usize::try_from(artifact_count).map_err(|_| {
-                    StorageError::InvalidDerivationWrite {
+                    StorageError::InvalidStatusRead {
                         detail: format!(
                             "invalid total artifact count in status snapshot: {artifact_count}"
                         ),
