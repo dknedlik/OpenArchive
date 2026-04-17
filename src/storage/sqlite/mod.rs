@@ -3,7 +3,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::types::Type;
-use rusqlite::{Connection};
+use rusqlite::Connection;
 use serde::de::DeserializeOwned;
 
 use crate::config::SqliteConfig;

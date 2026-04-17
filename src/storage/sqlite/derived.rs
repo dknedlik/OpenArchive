@@ -1,11 +1,11 @@
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
+use crate::domain::SourceTimestamp;
 use crate::error::StorageError;
 use crate::storage::derivation_store::{
     DerivationWriteResult, DerivedMetadataWriteStore, WriteDerivationAttempt,
 };
 use crate::storage::enrichment_state_store::EnrichmentStateStore;
-use crate::domain::SourceTimestamp;
 use crate::storage::types::{ArtifactExtractionResult, ReconciliationDecision};
 
 use super::job::recompute_artifact_enrichment_status_sqlite;

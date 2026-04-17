@@ -6,9 +6,9 @@ use crate::storage::types::{
     LoadedArtifactRecord, LoadedParticipant, LoadedSegment, TimelineEntry, TimelineFilters,
 };
 use crate::storage::{
-    ArtifactEnrichmentCount as ArtifactEnrichmentCountType,
-    ArtifactReadStore, ArtifactSourceCount as ArtifactSourceCountType,
-    EnrichmentJobCount as EnrichmentJobCountType, OperatorStore,
+    ArtifactEnrichmentCount as ArtifactEnrichmentCountType, ArtifactReadStore,
+    ArtifactSourceCount as ArtifactSourceCountType, EnrichmentJobCount as EnrichmentJobCountType,
+    OperatorStore,
 };
 
 use super::links::load_imported_note_metadata;

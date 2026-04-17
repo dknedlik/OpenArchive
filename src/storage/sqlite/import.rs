@@ -1,7 +1,7 @@
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
-use crate::error::StorageError;
 use crate::domain::SourceTimestamp;
+use crate::error::StorageError;
 use crate::storage::types::ArtifactIngestResult;
 use crate::storage::{ImportWriteResult, ImportWriteStore, ImportedArtifact, WriteImportSet};
 
