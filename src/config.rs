@@ -1,6 +1,6 @@
 use crate::error::{ConfigError, ConfigResult};
 use crate::secrets::SecretStore;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -396,10 +396,148 @@ impl AppConfig {
             },
         })))
     }
+
+    /// Write configuration to a TOML file.
+    ///
+    /// Serializes the current configuration to the specified path.
+    /// Creates parent directories if needed.
+    pub fn write_to_file(&self, path: &std::path::Path) -> ConfigResult<()> {
+        let config_file = self.to_config_file();
+        let toml_string = toml::to_string_pretty(&config_file)
+            .map_err(|e| ConfigError::SerializeToml { source: e })?;
+
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent).map_err(|e| ConfigError::FileRead {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+        }
+
+        std::fs::write(path, toml_string).map_err(|e| ConfigError::FileRead {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+
+        Ok(())
+    }
+
+    /// Convert AppConfig to ConfigFile for serialization.
+    fn to_config_file(&self) -> ConfigFile {
+        ConfigFile {
+            database: Some(DatabaseSection {
+                store: Some(
+                    match &self.relational_store {
+                        RelationalStoreConfig::Sqlite(_) => "sqlite",
+                        RelationalStoreConfig::Postgres(_) => "postgres",
+                        RelationalStoreConfig::Oracle(_) => "oracle",
+                    }
+                    .to_string(),
+                ),
+                path: match &self.relational_store {
+                    RelationalStoreConfig::Sqlite(s) => Some(s.path.display().to_string()),
+                    _ => None,
+                },
+            }),
+            object_store: Some(ObjectStoreSection {
+                store: Some(
+                    match &self.object_store {
+                        ObjectStoreConfig::LocalFs(_) => "local_fs",
+                        ObjectStoreConfig::S3Compatible(_) => "s3",
+                    }
+                    .to_string(),
+                ),
+                path: match &self.object_store {
+                    ObjectStoreConfig::LocalFs(l) => Some(l.root.display().to_string()),
+                    _ => None,
+                },
+            }),
+            vector_store: Some(VectorStoreSection {
+                store: Some(
+                    match &self.vector_store {
+                        VectorStoreConfig::Disabled => "disabled",
+                        VectorStoreConfig::PostgresPgVector => "postgres",
+                        VectorStoreConfig::Qdrant(_) => "qdrant",
+                    }
+                    .to_string(),
+                ),
+                url: match &self.vector_store {
+                    VectorStoreConfig::Qdrant(q) => Some(q.url.clone()),
+                    _ => None,
+                },
+                collection: match &self.vector_store {
+                    VectorStoreConfig::Qdrant(q) => Some(q.collection_name.clone()),
+                    _ => None,
+                },
+            }),
+            enrichment: Some(EnrichmentSection {
+                provider: Some(
+                    match &self.inference {
+                        InferenceConfig::Stub => "disabled",
+                        InferenceConfig::OpenAi(_) => "openai",
+                        InferenceConfig::Gemini(_) => "gemini",
+                        InferenceConfig::Anthropic(_) => "anthropic",
+                        InferenceConfig::Grok(_) => "grok",
+                        InferenceConfig::Oci(_) => "oci",
+                    }
+                    .to_string(),
+                ),
+                model: match &self.inference {
+                    InferenceConfig::Gemini(g) => Some(g.heavy_model.clone()),
+                    InferenceConfig::OpenAi(o) => Some(o.heavy_model.clone()),
+                    InferenceConfig::Anthropic(a) => Some(a.heavy_model.clone()),
+                    InferenceConfig::Grok(g) => Some(g.heavy_model.clone()),
+                    InferenceConfig::Oci(o) => Some(o.heavy_model.clone()),
+                    InferenceConfig::Stub => None,
+                },
+            }),
+            http: Some(HttpSection {
+                bind_addr: Some(self.http.bind_addr.clone()),
+                request_workers: Some(self.http.request_worker_count),
+                enrichment_workers: Some(self.http.enrichment_worker_count),
+            }),
+            embeddings: Some(EmbeddingsSection {
+                provider: Some(
+                    match &self.embeddings {
+                        EmbeddingConfig::Disabled => "disabled",
+                        EmbeddingConfig::Stub(_) => "stub",
+                        EmbeddingConfig::Gemini(_) => "gemini",
+                        EmbeddingConfig::OpenAi(_) => "openai",
+                        EmbeddingConfig::OpenAiCompatible(_) => "openai-compatible",
+                    }
+                    .to_string(),
+                ),
+                base_url: match &self.embeddings {
+                    EmbeddingConfig::OpenAiCompatible(o) => Some(o.base_url.clone()),
+                    _ => None,
+                },
+                api_key: match &self.embeddings {
+                    EmbeddingConfig::OpenAiCompatible(o) => o.api_key.clone(),
+                    _ => None,
+                },
+                model: match &self.embeddings {
+                    EmbeddingConfig::Gemini(g) => Some(g.embedding_model.clone()),
+                    EmbeddingConfig::OpenAi(o) => Some(o.embedding_model.clone()),
+                    EmbeddingConfig::OpenAiCompatible(o) => Some(o.embedding_model.clone()),
+                    EmbeddingConfig::Stub(s) => Some(s.model.clone()),
+                    EmbeddingConfig::Disabled => None,
+                },
+                dimensions: match &self.embeddings {
+                    EmbeddingConfig::Gemini(g) => Some(g.embedding_dimensions),
+                    EmbeddingConfig::OpenAi(o) => Some(o.embedding_dimensions),
+                    EmbeddingConfig::OpenAiCompatible(o) => Some(o.embedding_dimensions),
+                    EmbeddingConfig::Stub(s) => Some(s.dimensions),
+                    EmbeddingConfig::Disabled => None,
+                },
+            }),
+        }
+    }
 }
 
 // TOML file schema structs
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
     database: Option<DatabaseSection>,
@@ -407,34 +545,44 @@ struct ConfigFile {
     vector_store: Option<VectorStoreSection>,
     enrichment: Option<EnrichmentSection>,
     http: Option<HttpSection>,
+    embeddings: Option<EmbeddingsSection>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct DatabaseSection {
     store: Option<String>,
     path: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ObjectStoreSection {
     store: Option<String>,
     path: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct VectorStoreSection {
     store: Option<String>,
     url: Option<String>,
     collection: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct EnrichmentSection {
     provider: Option<String>,
     model: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
+struct EmbeddingsSection {
+    provider: Option<String>,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+    dimensions: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct HttpSection {
     bind_addr: Option<String>,
     request_workers: Option<usize>,
@@ -468,6 +616,7 @@ pub enum EmbeddingConfig {
     Stub(StubEmbeddingConfig),
     Gemini(GeminiEmbeddingConfig),
     OpenAi(OpenAiEmbeddingConfig),
+    OpenAiCompatible(OpenAiCompatibleEmbeddingConfig),
 }
 
 impl EmbeddingConfig {
@@ -478,10 +627,13 @@ impl EmbeddingConfig {
             "stub" => Ok(Self::Stub(StubEmbeddingConfig::from_env()?)),
             "gemini" => Ok(Self::Gemini(GeminiEmbeddingConfig::from_env()?)),
             "openai" => Ok(Self::OpenAi(OpenAiEmbeddingConfig::from_env()?)),
+            "openai-compatible" => Ok(Self::OpenAiCompatible(
+                OpenAiCompatibleEmbeddingConfig::from_env()?,
+            )),
             _ => Err(ConfigError::InvalidEnumEnv {
                 key: "OA_EMBEDDING_PROVIDER",
                 value: provider,
-                expected: "disabled, stub, gemini, openai",
+                expected: "disabled, stub, gemini, openai, openai-compatible",
             }),
         }
     }
@@ -541,6 +693,25 @@ impl OpenAiEmbeddingConfig {
             embedding_model: env::var("OA_EMBEDDING_MODEL")
                 .unwrap_or_else(|_| "text-embedding-3-small".to_string()),
             embedding_dimensions: positive_usize_env("OA_EMBEDDING_DIMENSIONS")?.unwrap_or(1536),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAiCompatibleEmbeddingConfig {
+    pub api_key: Option<String>,
+    pub base_url: String,
+    pub embedding_model: String,
+    pub embedding_dimensions: usize,
+}
+
+impl OpenAiCompatibleEmbeddingConfig {
+    pub fn from_env() -> ConfigResult<Self> {
+        Ok(Self {
+            api_key: optional_trimmed_env("OA_OPENAI_COMPATIBLE_API_KEY"),
+            base_url: required_env("OA_OPENAI_COMPATIBLE_BASE_URL")?,
+            embedding_model: required_env("OA_EMBEDDING_MODEL")?,
+            embedding_dimensions: positive_usize_env("OA_EMBEDDING_DIMENSIONS")?.unwrap_or(768),
         })
     }
 }
@@ -744,7 +915,7 @@ fn optional_path_env(key: &'static str) -> ConfigResult<Option<PathBuf>> {
         .transpose()
 }
 
-fn expand_home_path(value: &str) -> ConfigResult<PathBuf> {
+pub fn expand_home_path(value: &str) -> ConfigResult<PathBuf> {
     let Some(expanded) = expand_with_home(value)? else {
         return Ok(PathBuf::from(value));
     };

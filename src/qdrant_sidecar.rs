@@ -59,6 +59,24 @@ pub fn install_managed_qdrant(config: &AppConfig) -> ConfigResult<PathBuf> {
     resolve_binary(managed)
 }
 
+/// Check if the Qdrant binary exists at the expected path without triggering installation.
+/// Returns true if a bundled or managed binary exists.
+pub fn qdrant_binary_exists(config: &AppConfig) -> ConfigResult<bool> {
+    let managed = managed_config(config)?;
+
+    // Check bundled path first
+    if let Some(bundled) = bundled_binary_path()? {
+        if bundled.exists() {
+            return Ok(true);
+        }
+    }
+
+    // Check managed install path
+    let version_dir = version_install_dir(managed);
+    let binary_path = version_dir.join(QDRANT_BINARY_NAME);
+    Ok(binary_path.exists())
+}
+
 pub fn ensure_managed_qdrant(config: &mut AppConfig) -> ConfigResult<Option<ManagedQdrantHandle>> {
     let VectorStoreConfig::Qdrant(qdrant) = &mut config.vector_store else {
         return Ok(None);

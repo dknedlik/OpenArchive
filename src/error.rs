@@ -192,6 +192,12 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
+
+    #[error("failed to serialize config to TOML")]
+    SerializeToml {
+        #[source]
+        source: toml::ser::Error,
+    },
 }
 
 #[derive(Debug, Error)]

@@ -26,6 +26,16 @@ pub enum SecretBackend {
     PlainFile,
 }
 
+impl SecretBackend {
+    /// Returns the backend name as a lowercase string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Keyring => "keyring",
+            Self::PlainFile => "plain_file",
+        }
+    }
+}
+
 /// Unified secret storage that tries keyring first, falls back to plain file.
 pub struct SecretStore {
     backend: SecretBackend,
