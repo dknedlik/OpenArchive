@@ -66,6 +66,8 @@ enum Command {
     Doctor,
     /// Start HTTP server
     Serve,
+    /// Drain job queue and exit when empty
+    Enrich(EnrichArgs),
 }
 
 #[derive(Args)]
@@ -169,6 +171,17 @@ struct ReviewArgs {
     command: ReviewCommand,
 }
 
+#[derive(Args)]
+struct EnrichArgs {
+    /// Parallel enrichment workers, default 1
+    #[arg(long, value_name = "N")]
+    workers: Option<usize>,
+
+    /// Max jobs to process then exit, default unlimited
+    #[arg(long, value_name = "N")]
+    limit: Option<usize>,
+}
+
 #[derive(Subcommand)]
 enum ReviewCommand {
     /// List items in the review queue
@@ -236,6 +249,7 @@ fn main() -> Result<(), anyhow::Error> {
         Command::Status => status_command(),
         Command::Doctor => doctor_command(),
         Command::Serve => serve(),
+        Command::Enrich(args) => enrich_command(args),
     }
 }
 
@@ -1565,7 +1579,28 @@ fn status_command() -> Result<(), anyhow::Error> {
         "artifact_enrichment={}",
         format_enrichment_counts(&snapshot.artifacts_by_enrichment_status)
     );
-    println!("jobs={}", format_job_counts(&snapshot.jobs_by_status));
+    {
+        use open_archive::storage::JobStatus;
+        let active_jobs: usize = snapshot
+            .jobs_by_status
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.job_status,
+                    JobStatus::Pending | JobStatus::Running | JobStatus::Retryable
+                )
+            })
+            .map(|c| c.count)
+            .sum();
+        if active_jobs > 0 {
+            println!(
+                "jobs={}  (run 'open_archive enrich' to process)",
+                format_job_counts(&snapshot.jobs_by_status)
+            );
+        } else {
+            println!("jobs={}", format_job_counts(&snapshot.jobs_by_status));
+        }
+    }
     if recent_artifacts.is_empty() {
         println!("recent_artifacts=none");
     } else {
@@ -2064,6 +2099,9 @@ fn serve() -> Result<(), anyhow::Error> {
     env_logger::init();
 
     let mut app_config = AppConfig::load().context("failed to load application configuration")?;
+    app_config
+        .validate_enrichment_ready()
+        .context("enrichment not configured")?;
     let _managed_qdrant = open_archive::qdrant_sidecar::ensure_managed_qdrant(&mut app_config)
         .context("failed to prepare managed Qdrant")?;
     migrations::migrate(&app_config).context("failed to apply database migrations before serve")?;
@@ -2176,6 +2214,215 @@ fn serve() -> Result<(), anyhow::Error> {
     }
 
     log::info!("Shutdown complete");
+    Ok(())
+}
+
+fn enrich_command(args: EnrichArgs) -> Result<(), anyhow::Error> {
+    use open_archive::storage::JobStatus;
+
+    env_logger::init();
+
+    let mut app_config = AppConfig::load().context("failed to load application configuration")?;
+    app_config
+        .validate_enrichment_ready()
+        .context("enrichment not configured")?;
+    let _managed_qdrant = open_archive::qdrant_sidecar::ensure_managed_qdrant(&mut app_config)
+        .context("failed to prepare managed Qdrant")?;
+    migrations::migrate(&app_config)
+        .context("failed to apply database migrations before enrich")?;
+
+    // Load services
+    let services = build_service_bundle(&app_config)
+        .context("failed to construct configured service providers")?;
+
+    // Get initial status to count jobs
+    let initial_status = services
+        .operator_store
+        .load_archive_status()
+        .context("failed to load archive status")?;
+
+    // Calculate initial counts by status
+    let count_by_status = |status: JobStatus| -> usize {
+        initial_status
+            .jobs_by_status
+            .iter()
+            .find(|count| count.job_status == status)
+            .map(|count| count.count)
+            .unwrap_or(0)
+    };
+
+    let initial_pending = count_by_status(JobStatus::Pending);
+    let initial_running = count_by_status(JobStatus::Running);
+    let initial_retryable = count_by_status(JobStatus::Retryable);
+    let initial_completed = count_by_status(JobStatus::Completed);
+    let initial_failed = count_by_status(JobStatus::Failed);
+    let initial_partial = count_by_status(JobStatus::Partial);
+
+    // Total work to process: pending + running + retryable
+    let total_jobs = initial_pending + initial_running + initial_retryable;
+
+    if total_jobs == 0 {
+        println!("no pending jobs");
+        return Ok(());
+    }
+
+    let workers = args.workers.unwrap_or(1).max(1);
+    let limit = args.limit;
+
+    println!("enrichment_workers={}", workers);
+    println!("pending_jobs={}", total_jobs);
+
+    // Build pipeline config with --workers flag overriding env
+    let mut pipeline_config = EnrichmentPipelineConfig::from_env()
+        .context("failed to load enrichment pipeline configuration")?;
+
+    // Override worker counts with --workers flag
+    pipeline_config.direct.extract_workers = workers;
+    pipeline_config.direct.reconcile_workers = workers;
+    pipeline_config.direct.embedding_workers = workers;
+    pipeline_config.batch.extract_workers = workers;
+    pipeline_config.batch.reconcile_workers = workers;
+    pipeline_config.batch.embedding_workers = workers;
+
+    let shutdown = ShutdownToken::new();
+    let inference_mode = app_config.inference_mode;
+
+    // Set up Ctrl+C handler
+    {
+        let shutdown = shutdown.clone();
+        ctrlc::set_handler(move || {
+            log::info!("Received interrupt signal, signaling shutdown...");
+            shutdown.signal();
+        })?;
+    }
+
+    // Start enrichment pipeline
+    let enrichment_workers = start_enrichment_pipeline(
+        &pipeline_config,
+        inference_mode,
+        open_archive::enrichment_worker::EnrichmentPipelineResources {
+            job_store: Arc::clone(&services.enrichment_store),
+            read_store: Arc::clone(&services.read_store),
+            state_store: Arc::clone(&services.state_store),
+            derived_store: Arc::clone(&services.derived_store),
+            cross_artifact_store: services.cross_artifact_store.clone(),
+            embedding_store: services.embedding_store.clone(),
+            embedding_provider: services.embedding_provider.clone(),
+        },
+        shutdown.clone(),
+        Arc::clone(&services.processor_factory),
+    )
+    .context("failed to start enrichment pipeline")?;
+
+    // Monitor loop: poll for progress and detect queue drain
+    let mut processed_count = 0usize;
+    let mut last_total_active = total_jobs;
+    let poll_interval = Duration::from_millis(500);
+
+    loop {
+        if shutdown.is_shutdown() {
+            break;
+        }
+
+        thread::sleep(poll_interval);
+
+        // Check current status
+        let status = match services.operator_store.load_archive_status() {
+            Ok(s) => s,
+            Err(err) => {
+                log::warn!("Failed to load archive status: {}", err);
+                continue;
+            }
+        };
+
+        // Calculate current active jobs (pending + running + retryable)
+        let count_by_status = |job_status: JobStatus| -> usize {
+            status
+                .jobs_by_status
+                .iter()
+                .find(|count| count.job_status == job_status)
+                .map(|count| count.count)
+                .unwrap_or(0)
+        };
+
+        let current_pending = count_by_status(JobStatus::Pending);
+        let current_running = count_by_status(JobStatus::Running);
+        let current_retryable = count_by_status(JobStatus::Retryable);
+        let current_total_active = current_pending + current_running + current_retryable;
+
+        // Detect progress (jobs moved out of active states)
+        if current_total_active < last_total_active {
+            let completed_this_cycle = last_total_active - current_total_active;
+            for _ in 0..completed_this_cycle {
+                processed_count += 1;
+                if processed_count <= total_jobs {
+                    println!("completed job {} of {}", processed_count, total_jobs);
+                }
+            }
+        }
+
+        last_total_active = current_total_active;
+
+        // Check if limit reached
+        if let Some(limit_val) = limit {
+            if processed_count >= limit_val {
+                println!("limit reached: processed {} jobs", processed_count);
+                shutdown.signal();
+                break;
+            }
+        }
+
+        // Check if queue drained
+        if current_total_active == 0 {
+            shutdown.signal();
+            break;
+        }
+    }
+
+    // Wait for all workers to complete
+    for worker in enrichment_workers {
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("Enrichment worker thread panicked"))?;
+    }
+
+    // Get final status to calculate accurate summary
+    let final_status = services
+        .operator_store
+        .load_archive_status()
+        .context("failed to load final archive status")?;
+
+    let count_by_status = |job_status: JobStatus| -> usize {
+        final_status
+            .jobs_by_status
+            .iter()
+            .find(|count| count.job_status == job_status)
+            .map(|count| count.count)
+            .unwrap_or(0)
+    };
+
+    let final_completed = count_by_status(JobStatus::Completed);
+    let final_failed = count_by_status(JobStatus::Failed);
+    let final_partial = count_by_status(JobStatus::Partial);
+
+    // Calculate jobs that finished during this session
+    // Completed = new completed + new partial
+    // Failed = new failed
+    let newly_completed = final_completed.saturating_sub(initial_completed);
+    let newly_failed = final_failed.saturating_sub(initial_failed);
+    let newly_partial = final_partial.saturating_sub(initial_partial);
+
+    let enriched_count = newly_completed + newly_partial;
+    let failed_count = newly_failed;
+
+    // Print final summary
+    println!("enriched={} failed={}", enriched_count, failed_count);
+
+    // Exit with appropriate code
+    if failed_count > 0 {
+        return Err(anyhow::anyhow!("{} job(s) failed", failed_count));
+    }
+
     Ok(())
 }
 

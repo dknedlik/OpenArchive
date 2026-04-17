@@ -46,6 +46,21 @@ impl AppConfig {
         Self::load_with_secret_store(&secret_store)
     }
 
+    /// Validate that enrichment (inference + embeddings) is configured.
+    ///
+    /// Returns an error with an actionable message when the inference or
+    /// embedding provider is unconfigured (stub/disabled). Call this before
+    /// starting any command that requires the enrichment pipeline.
+    pub fn validate_enrichment_ready(&self) -> ConfigResult<()> {
+        if self.inference == InferenceConfig::Stub {
+            return Err(ConfigError::EnrichmentNotConfigured);
+        }
+        if matches!(self.embeddings, EmbeddingConfig::Disabled) {
+            return Err(ConfigError::EmbeddingNotConfigured);
+        }
+        Ok(())
+    }
+
     /// Load configuration with a provided secret store.
     ///
     /// This is pub(crate) for testability while keeping `load()` as the

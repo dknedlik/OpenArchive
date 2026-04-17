@@ -28,18 +28,18 @@ no curl. Mac ARM, Mac Intel, Linux x86, Windows x86.
 
 ## Phase 2 — Enrichment UX
 
-- [ ] **4. `enrich` command**
+- [x] **4. `enrich` command**
   `open_archive enrich [--workers N] [--limit N]`
   Starts enrichment pipeline, drains the job queue, exits when empty.
   Prints progress (`processing job 3 of 47`), summary on completion (`enriched=45 failed=2`).
   No HTTP server. This is the missing link between `import` and `search`.
 
-- [ ] **5. Startup validation**
+- [x] **5. Startup validation**
   Before any command that needs enrichment config, validate API key is present and provider
   is configured. Clear, actionable error: `"enrichment provider not configured — run
   open_archive init"` rather than a cryptic panic downstream.
 
-- [ ] **6. `status` improvements**
+- [x] **6. `status` improvements**
   If pending jobs > 0, make it actionable:
   `pending_jobs=47  (run 'open_archive enrich' to process)`
   Currently just shows a number with no guidance.

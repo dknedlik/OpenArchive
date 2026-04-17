@@ -198,6 +198,12 @@ pub enum ConfigError {
         #[source]
         source: toml::ser::Error,
     },
+
+    #[error("enrichment provider not configured — run 'open_archive init'")]
+    EnrichmentNotConfigured,
+
+    #[error("embedding provider not configured — run 'open_archive init'")]
+    EmbeddingNotConfigured,
 }
 
 #[derive(Debug, Error)]
