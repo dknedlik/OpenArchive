@@ -84,7 +84,7 @@ pub(super) fn process_embedding_job(
     let embeddings = payload
         .objects
         .iter()
-        .zip(vectors.into_iter())
+        .zip(vectors)
         .map(|(object, embedding)| {
             let derived_object_type = crate::storage::DerivedObjectType::parse(
                 &object.derived_object_type,

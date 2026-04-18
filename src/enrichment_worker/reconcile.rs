@@ -207,7 +207,7 @@ pub(super) fn process_reconcile_job_batch(
             .collect();
         let results = batch_processor.process_batch(&inputs);
         for ((claimed_job, loaded, extraction_result, deterministic_outputs, _), result) in
-            batchable.into_iter().zip(results.into_iter())
+            batchable.into_iter().zip(results)
         {
             match result {
                 Ok(outputs) => {
@@ -927,7 +927,7 @@ pub fn inspect_reconciliation_work(
 
     let mut ambiguous_candidates = Vec::new();
 
-    for (candidate, vector) in unresolved.into_iter().zip(vectors.into_iter()) {
+    for (candidate, vector) in unresolved.into_iter().zip(vectors) {
         let matches = cross_artifact_store
             .find_related_by_embedding(
                 &input.artifact_id,

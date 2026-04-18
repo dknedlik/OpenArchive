@@ -103,9 +103,7 @@ pub(super) fn process_extract_job_batch(
             .map(|(_, _, input)| input.clone())
             .collect();
         let results = batch_processor.process_batch(&inputs);
-        for ((claimed_job, payload, input), result) in
-            batchable.into_iter().zip(results.into_iter())
-        {
+        for ((claimed_job, payload, input), result) in batchable.into_iter().zip(results) {
             match result {
                 Ok(output) => {
                     let extraction_result = build_extraction_result(
