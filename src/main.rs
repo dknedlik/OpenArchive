@@ -120,7 +120,8 @@ fn install_qdrant() -> Result<(), anyhow::Error> {
     let config = AppConfig::load().context("failed to load application configuration")?;
     let path = open_archive::qdrant_sidecar::install_managed_qdrant(&config)
         .context("failed to install managed Qdrant")?;
-    println!("qdrant_binary={}", path.display());
+    println!("Installed Qdrant binary at {}", path.display());
+    println!("qdrant=installed");
     Ok(())
 }
 

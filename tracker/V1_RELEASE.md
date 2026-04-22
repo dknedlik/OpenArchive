@@ -48,15 +48,16 @@ no curl. Mac ARM, Mac Intel, Linux x86, Windows x86.
 
 ## Phase 3 — Doctor & Qdrant Hardening
 
-- [ ] **7. `doctor` improvements**
+- [x] **7. `doctor` improvements**
   Add checks for: keyring availability, API key present in keyring, Qdrant binary installed
   (with fix hint: `run install-qdrant`), config file exists and has correct permissions.
   Currently doctor checks DB and stores but not the secrets layer.
 
 - [ ] **8. Bundle Qdrant binary in installer**
-  Ship Qdrant as part of the installer rather than downloading at runtime. Version-locked
-  to the app. `init` verifies the bundled binary is present rather than downloading it.
-  `install-qdrant` command kept for developer use but removed from user-facing docs.
+  CI downloads the version-pinned Qdrant binary for each target platform at build time and
+  packages it alongside `open_archive` in the installer artifact. No runtime download step.
+  User installs open_archive, Qdrant is already there. Pure CI/packaging work — no app code
+  changes required.
 
 ---
 
@@ -80,6 +81,50 @@ no curl. Mac ARM, Mac Intel, Linux x86, Windows x86.
 
 - [ ] **12. Windows installer**
   MSI or winget package. Winget is lower effort and increasingly the standard.
+
+---
+
+---
+
+## Pre-Release Test Plan
+
+> App code is feature-complete. Test before packaging. No HTTP server required —
+> the local product runs entirely via CLI + stdio MCP.
+
+### Phase 1 — Fresh Start
+1. Delete `~/.open_archive` entirely — clean slate
+2. `open_archive doctor` — expect failures on db, migrations, object_store
+3. `open_archive init` — walk through prompts
+4. `open_archive doctor` — all green
+5. `open_archive status` — zero artifacts, zero jobs
+
+### Phase 2 — Import
+6. Import a ChatGPT export ZIP
+7. Import a Claude JSON export
+8. Import a plain text file
+9. Import a markdown file
+10. Import an Obsidian vault ZIP
+11. Re-import the ChatGPT ZIP — verify idempotency (`already_exists`, no duplicates)
+
+### Phase 3 — Enrichment
+12. `open_archive enrich` — watch jobs process
+13. `open_archive status` — queue drains, artifacts move to enriched
+14. `open_archive enrich` on empty queue — exits cleanly
+
+### Phase 4 — Query
+15. Query something that matches imported content — verify hits
+16. Query something that won't match — empty results, no crash
+17. Query a paraphrase (not exact wording) — tests semantic path
+
+### Phase 5 — Edge Cases
+18. Import a malformed/corrupt file — clean error, no partial state
+19. Kill `enrich` mid-run, restart — verify jobs resume correctly
+20. Wrong API key in keyring — `doctor` fail message is actionable
+
+### Phase 6 — MCP
+21. Point Claude Desktop at `open_archive mcp` (stdio)
+22. Ask Claude to search the archive — verify it calls `search_archive`
+23. Ask Claude to retrieve an artifact — verify `get_artifact` response
 
 ---
 
