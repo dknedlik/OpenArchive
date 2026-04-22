@@ -1,10 +1,12 @@
 use anyhow::Context;
 use clap::{Args, Subcommand};
+use indicatif::{ProgressBar, ProgressStyle};
 use open_archive::app::ArchiveApplication;
 use open_archive::import_service::ImportResponse;
 use open_archive::parser;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Args)]
 pub struct ImportArgs {
@@ -93,10 +95,17 @@ pub(crate) fn summarize_import_results(
         .filter_map(|r| r.outcome.as_ref().ok())
         .map(|resp| resp.artifacts.len())
         .sum();
+    let new_count: usize = results
+        .iter()
+        .filter_map(|r| r.outcome.as_ref().ok())
+        .flat_map(|resp| &resp.artifacts)
+        .filter(|a| a.ingest_result == "created")
+        .count();
+    let skipped_count = artifact_count - new_count;
 
     let summary = format!(
-        "summary imports={} failed={} artifacts={}",
-        success_count, failure_count, artifact_count
+        "summary imports={} failed={} artifacts={} new={} skipped={}",
+        success_count, failure_count, artifact_count, new_count, skipped_count
     );
 
     let error = if failure_count > 0 {
@@ -146,17 +155,49 @@ pub(crate) fn import_command(args: ImportArgs) -> anyhow::Result<()> {
     // Collect per-file results instead of failing fast on first error
     let mut results: Vec<ImportItemResult> = Vec::with_capacity(planned.len());
     for item in planned {
+        // Extract filename for spinner message
+        let filename = item
+            .import_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| item.import_path.display().to_string());
+
+        // Create and start spinner
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner} {msg}")
+                .expect("valid spinner template"),
+        );
+        spinner.set_message(format!("importing {}...", filename));
+        spinner.enable_steady_tick(Duration::from_millis(100));
+
+        // Execute import
         let outcome = execute_import(runtime.services.app.as_ref(), &item);
+
+        // Stop spinner before printing result
+        spinner.finish_and_clear();
+
         // Report each result as it completes
         match &outcome {
-            Ok(response) => println!(
-                "imported path={} mode={} import_id={} status={} artifacts={}",
-                item.import_path.display(),
-                item.mode.label(),
-                response.import_id,
-                response.import_status,
-                response.artifacts.len(),
-            ),
+            Ok(response) => {
+                let new = response
+                    .artifacts
+                    .iter()
+                    .filter(|a| a.ingest_result == "created")
+                    .count();
+                let skipped = response.artifacts.len() - new;
+                println!(
+                    "imported path={} mode={} import_id={} status={} artifacts={} new={} skipped={}",
+                    item.import_path.display(),
+                    item.mode.label(),
+                    response.import_id,
+                    response.import_status,
+                    response.artifacts.len(),
+                    new,
+                    skipped,
+                );
+            }
             Err(err) => eprintln!(
                 "failed path={} mode={} error={:#}",
                 item.import_path.display(),
@@ -324,12 +365,12 @@ fn plan_conversation_import(
 ) -> Result<Vec<PlannedImport>, anyhow::Error> {
     if path.is_dir() {
         let default_name = match mode {
-            ImportMode::Chatgpt => "conversations.json",
+            ImportMode::Chatgpt | ImportMode::Claude => "conversations.json",
             _ => {
                 return Err(anyhow::anyhow!(
-                    "{} import requires a file path",
-                    mode.label()
-                ))
+                "{} import requires a file path, not a directory — specify the JSON file directly",
+                mode.label()
+            ))
             }
         };
         let nested = path.join(default_name);
@@ -337,8 +378,10 @@ fn plan_conversation_import(
             return plan_conversation_import(mode, &nested);
         }
         return Err(anyhow::anyhow!(
-            "{} import requires a file path",
-            mode.label()
+            "{} import: no {} found in {}",
+            mode.label(),
+            default_name,
+            path.display()
         ));
     }
 
@@ -526,7 +569,10 @@ mod tests {
             make_result("/b.md", Ok(make_success_response(3))),
         ];
         let (summary, artifact_count, error) = summarize_import_results(results);
-        assert_eq!(summary, "summary imports=2 failed=0 artifacts=5");
+        assert_eq!(
+            summary,
+            "summary imports=2 failed=0 artifacts=5 new=5 skipped=0"
+        );
         assert_eq!(artifact_count, 5);
         assert!(error.is_none());
     }
@@ -538,7 +584,10 @@ mod tests {
             make_result("/b.md", Err(anyhow::anyhow!("io error"))),
         ];
         let (summary, artifact_count, error) = summarize_import_results(results);
-        assert_eq!(summary, "summary imports=0 failed=2 artifacts=0");
+        assert_eq!(
+            summary,
+            "summary imports=0 failed=2 artifacts=0 new=0 skipped=0"
+        );
         assert_eq!(artifact_count, 0);
         assert!(error.is_some());
         let err_str = format!("{:#}", error.unwrap());
@@ -555,7 +604,10 @@ mod tests {
             make_result("/c.md", Ok(make_success_response(2))),
         ];
         let (summary, artifact_count, error) = summarize_import_results(results);
-        assert_eq!(summary, "summary imports=2 failed=1 artifacts=3");
+        assert_eq!(
+            summary,
+            "summary imports=2 failed=1 artifacts=3 new=3 skipped=0"
+        );
         assert_eq!(artifact_count, 3);
         assert!(error.is_some());
         let err_str = format!("{:#}", error.unwrap());
@@ -567,10 +619,36 @@ mod tests {
     }
 
     #[test]
+    fn summarize_already_exists_shows_skipped() {
+        let already_exists_response = ImportResponse {
+            import_id: "imp_test".to_string(),
+            import_status: "completed".to_string(),
+            artifacts: (0..3)
+                .map(|i| open_archive::import_service::ImportArtifactStatus {
+                    artifact_id: format!("art_{}", i),
+                    enrichment_status: "pending".to_string(),
+                    ingest_result: "already_exists".to_string(),
+                })
+                .collect(),
+        };
+        let results = vec![make_result("/chat.json", Ok(already_exists_response))];
+        let (summary, artifact_count, error) = summarize_import_results(results);
+        assert_eq!(
+            summary,
+            "summary imports=1 failed=0 artifacts=3 new=0 skipped=3"
+        );
+        assert_eq!(artifact_count, 3);
+        assert!(error.is_none());
+    }
+
+    #[test]
     fn summarize_empty_results() {
         let results: Vec<ImportItemResult> = vec![];
         let (summary, artifact_count, error) = summarize_import_results(results);
-        assert_eq!(summary, "summary imports=0 failed=0 artifacts=0");
+        assert_eq!(
+            summary,
+            "summary imports=0 failed=0 artifacts=0 new=0 skipped=0"
+        );
         assert_eq!(artifact_count, 0);
         assert!(error.is_none());
     }
