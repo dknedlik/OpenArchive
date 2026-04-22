@@ -32,6 +32,8 @@ pub struct ArchiveSearchCandidate {
     pub match_kind: SearchCandidateKind,
     pub snippet: String,
     pub score_hint: i32,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
 }
 
 pub trait ArchiveSearchReadStore: Send + Sync {
@@ -50,6 +52,8 @@ pub struct ArtifactDetailRecord {
     pub source_type: SourceType,
     pub enrichment_status: EnrichmentStatus,
     pub note_path: Option<String>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +63,7 @@ pub struct ArtifactDetailSegment {
     pub participant_role: Option<ParticipantRole>,
     pub sequence_no: i32,
     pub text_content: String,
+    pub created_at_source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

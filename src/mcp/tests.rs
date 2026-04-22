@@ -391,6 +391,8 @@ impl crate::storage::ArchiveSearchReadStore for MockSearchReadStore {
             match_kind: crate::storage::SearchCandidateKind::ArtifactTitle,
             snippet: "title".to_string(),
             score_hint: 300,
+            started_at: None,
+            ended_at: None,
         }])
     }
 }
@@ -425,6 +427,8 @@ impl crate::storage::ArtifactDetailReadStore for MockArtifactDetailStore {
                 source_type: crate::storage::SourceType::ObsidianVault,
                 enrichment_status: crate::storage::EnrichmentStatus::Completed,
                 note_path: Some("Inbox.md".to_string()),
+                started_at: None,
+                ended_at: None,
             },
             segments: vec![crate::storage::ArtifactDetailSegment {
                 segment_id: "seg-1".to_string(),
@@ -432,6 +436,7 @@ impl crate::storage::ArtifactDetailReadStore for MockArtifactDetailStore {
                 participant_role: None,
                 sequence_no: 1,
                 text_content: "hello".to_string(),
+                created_at_source: None,
             }],
             derived_objects: vec![
                 crate::storage::ArtifactDetailDerivedObject {
@@ -539,6 +544,8 @@ impl crate::storage::ArtifactContextPackReadStore for MockContextPackStore {
                 source_type: crate::storage::SourceType::ObsidianVault,
                 enrichment_status: crate::storage::EnrichmentStatus::Completed,
                 note_path: Some("Inbox.md".to_string()),
+                started_at: None,
+                ended_at: None,
             },
             segments: vec![],
             imported_note_metadata: crate::storage::ImportedNoteMetadata {

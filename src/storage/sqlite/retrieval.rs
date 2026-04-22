@@ -150,7 +150,8 @@ pub(super) fn load_artifact_record(
 
     connection
         .query_row(
-            "SELECT artifact_id, title, source_type, enrichment_status, source_conversation_key
+            "SELECT artifact_id, title, source_type, enrichment_status, source_conversation_key,
+                    started_at, ended_at
              FROM oa_artifact
              WHERE artifact_id = ?1",
             [artifact_id],
@@ -161,6 +162,8 @@ pub(super) fn load_artifact_record(
                     source_type: parse_source_type(row.get(2)?)?,
                     enrichment_status: parse_enrichment_status(row.get(3)?)?,
                     note_path: row.get(4)?,
+                    started_at: row.get(5)?,
+                    ended_at: row.get(6)?,
                 })
             },
         )
@@ -178,7 +181,8 @@ pub(super) fn load_artifact_segments(
 
     let mut stmt = connection
         .prepare(
-            "SELECT s.segment_id, s.participant_id, p.participant_role, s.sequence_no, s.text_content
+            "SELECT s.segment_id, s.participant_id, p.participant_role, s.sequence_no, s.text_content,
+                    s.created_at_source
              FROM oa_segment s
              LEFT JOIN oa_conversation_participant p ON p.participant_id = s.participant_id
              WHERE s.artifact_id = ?1
@@ -199,6 +203,7 @@ pub(super) fn load_artifact_segments(
                     .transpose()?,
                 sequence_no: row.get(3)?,
                 text_content: row.get(4)?,
+                created_at_source: row.get(5)?,
             })
         })
         .map_err(|source| StorageError::InvalidDerivationWrite {
@@ -381,7 +386,8 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
             let filter_sql = artifact_filter_conditions(filters, "a", &mut values);
             values.push(limit.to_string());
             let sql = format!(
-                "SELECT a.artifact_id, a.title, bm25(oa_artifact_fts) AS rank_score
+                "SELECT a.artifact_id, a.title, bm25(oa_artifact_fts) AS rank_score,
+                        a.started_at, a.ended_at
                  FROM oa_artifact_fts
                  JOIN oa_artifact a ON a.rowid = oa_artifact_fts.rowid
                  WHERE oa_artifact_fts MATCH ?1 AND {filter_sql}
@@ -400,6 +406,8 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
                         match_kind: SearchCandidateKind::ArtifactTitle,
                         snippet: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
                         score_hint: 240 + fts5_bm25_score_bonus(bm25),
+                        started_at: row.get(3)?,
+                        ended_at: row.get(4)?,
                     })
                 })
                 .map_err(|source| db_err(&self.config, source))?;
@@ -414,7 +422,8 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
             let filter_sql = artifact_filter_conditions(filters, "a", &mut values);
             values.push(limit.to_string());
             let sql = format!(
-                "SELECT a.artifact_id, t.artifact_note_tag_id, t.raw_tag
+                "SELECT a.artifact_id, t.artifact_note_tag_id, t.raw_tag,
+                        a.started_at, a.ended_at
                  FROM oa_artifact_note_tag t
                  JOIN oa_artifact a ON a.artifact_id = t.artifact_id
                  WHERE lower(t.raw_tag) LIKE ? AND {filter_sql}
@@ -432,6 +441,8 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
                         match_kind: SearchCandidateKind::ImportedNoteTag,
                         snippet: row.get(2)?,
                         score_hint: 380,
+                        started_at: row.get(3)?,
+                        ended_at: row.get(4)?,
                     })
                 })
                 .map_err(|source| db_err(&self.config, source))?;
@@ -446,7 +457,8 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
             let filter_sql = artifact_filter_conditions(filters, "a", &mut values);
             values.push(limit.to_string());
             let sql = format!(
-                "SELECT a.artifact_id, na.artifact_note_alias_id, na.alias_text
+                "SELECT a.artifact_id, na.artifact_note_alias_id, na.alias_text,
+                        a.started_at, a.ended_at
                  FROM oa_artifact_note_alias na
                  JOIN oa_artifact a ON a.artifact_id = na.artifact_id
                  WHERE lower(na.alias_text) LIKE ? AND {filter_sql}
@@ -464,6 +476,8 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
                         match_kind: SearchCandidateKind::ImportedNoteAlias,
                         snippet: row.get(2)?,
                         score_hint: 340,
+                        started_at: row.get(3)?,
+                        ended_at: row.get(4)?,
                     })
                 })
                 .map_err(|source| db_err(&self.config, source))?;
@@ -478,7 +492,8 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
             let filter_sql = artifact_filter_conditions(filters, "a", &mut values);
             values.push(limit.to_string());
             let sql = format!(
-                "SELECT a.artifact_id, a.artifact_id, a.source_conversation_key
+                "SELECT a.artifact_id, a.artifact_id, a.source_conversation_key,
+                        a.started_at, a.ended_at
                  FROM oa_artifact a
                  WHERE lower(coalesce(a.source_conversation_key, '')) LIKE ? AND {filter_sql}
                  ORDER BY a.captured_at DESC, a.artifact_id ASC
@@ -495,6 +510,8 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
                         match_kind: SearchCandidateKind::ImportedNotePath,
                         snippet: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                         score_hint: 300,
+                        started_at: row.get(3)?,
+                        ended_at: row.get(4)?,
                     })
                 })
                 .map_err(|source| db_err(&self.config, source))?;
@@ -519,7 +536,8 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
             let sql = format!(
                 "SELECT d.artifact_id, d.derived_object_id, d.derived_object_type,
                         COALESCE(d.title, d.body_text, ''),
-                        bm25(oa_derived_object_fts) AS rank_score
+                        bm25(oa_derived_object_fts) AS rank_score,
+                        a.started_at, a.ended_at
                  FROM oa_derived_object_fts
                  JOIN oa_derived_object d ON d.rowid = oa_derived_object_fts.rowid
                  JOIN oa_artifact a ON a.artifact_id = d.artifact_id
@@ -544,6 +562,8 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
                         },
                         snippet: row.get::<_, String>(3)?,
                         score_hint: 260 + fts5_bm25_score_bonus(bm25),
+                        started_at: row.get(5)?,
+                        ended_at: row.get(6)?,
                     })
                 })
                 .map_err(|source| db_err(&self.config, source))?;
@@ -561,7 +581,8 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
                 let sql = format!(
                     "SELECT s.artifact_id, s.segment_id,
                             substr(s.text_content, 1, 240),
-                            bm25(oa_segment_fts) AS rank_score
+                            bm25(oa_segment_fts) AS rank_score,
+                            a.started_at, a.ended_at
                      FROM oa_segment_fts
                      JOIN oa_segment s ON s.rowid = oa_segment_fts.rowid
                      JOIN oa_artifact a ON a.artifact_id = s.artifact_id
@@ -581,6 +602,8 @@ impl ArchiveSearchReadStore for SqliteRetrievalReadStore {
                             match_kind: SearchCandidateKind::SegmentExcerpt,
                             snippet: row.get(2)?,
                             score_hint: 200 + fts5_bm25_score_bonus(bm25),
+                            started_at: row.get(4)?,
+                            ended_at: row.get(5)?,
                         })
                     })
                     .map_err(|source| db_err(&self.config, source))?;

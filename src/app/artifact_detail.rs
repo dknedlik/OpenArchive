@@ -23,6 +23,8 @@ pub struct ArtifactDetailSegmentView {
     pub participant_role: Option<ParticipantRole>,
     pub sequence_no: i32,
     pub text_content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at_source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -41,6 +43,10 @@ pub struct ArtifactDetailResponse {
     pub note_path: Option<String>,
     pub source_type: SourceType,
     pub enrichment_status: EnrichmentStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
     pub imported_note_metadata: ImportedNoteMetadata,
     pub inbound_note_links: Vec<ImportedNoteLinkRecord>,
     pub artifact_links: Vec<ArtifactLinkRecord>,
@@ -93,6 +99,8 @@ impl ArtifactDetailService {
             note_path: detail.artifact.note_path,
             source_type: detail.artifact.source_type,
             enrichment_status: detail.artifact.enrichment_status,
+            started_at: detail.artifact.started_at,
+            ended_at: detail.artifact.ended_at,
             imported_note_metadata: detail.imported_note_metadata,
             inbound_note_links: detail.inbound_note_links,
             artifact_links: detail.artifact_links,
@@ -108,6 +116,7 @@ impl ArtifactDetailService {
                     participant_role: segment.participant_role,
                     sequence_no: segment.sequence_no,
                     text_content: segment.text_content,
+                    created_at_source: segment.created_at_source,
                 })
                 .collect(),
             derived_objects: detail
@@ -175,6 +184,8 @@ mod tests {
                 source_type: SourceType::ChatGptExport,
                 enrichment_status: EnrichmentStatus::Completed,
                 note_path: None,
+                started_at: Some("2025-03-14T10:22:00Z".to_string()),
+                ended_at: Some("2025-03-14T10:45:00Z".to_string()),
             },
             segments: vec![
                 ArtifactDetailSegment {
@@ -183,6 +194,7 @@ mod tests {
                     participant_role: Some(ParticipantRole::User),
                     sequence_no: 1,
                     text_content: "hello".to_string(),
+                    created_at_source: Some("2025-03-14T10:22:00Z".to_string()),
                 },
                 ArtifactDetailSegment {
                     segment_id: "seg-2".to_string(),
@@ -190,6 +202,7 @@ mod tests {
                     participant_role: Some(ParticipantRole::Assistant),
                     sequence_no: 2,
                     text_content: "world".to_string(),
+                    created_at_source: Some("2025-03-14T10:23:00Z".to_string()),
                 },
             ],
             derived_objects: vec![crate::storage::ArtifactDetailDerivedObject {
@@ -206,6 +219,11 @@ mod tests {
 
         let response = service.get(request()).unwrap().unwrap();
         assert_eq!(response.artifact_id, "artifact-1");
+        assert_eq!(
+            response.started_at,
+            Some("2025-03-14T10:22:00Z".to_string())
+        );
+        assert_eq!(response.ended_at, Some("2025-03-14T10:45:00Z".to_string()));
         assert!(response.segments.is_empty());
         assert_eq!(response.segment_count, 2);
         assert_eq!(response.returned_segment_count, 0);
@@ -225,6 +243,8 @@ mod tests {
                 source_type: SourceType::ChatGptExport,
                 enrichment_status: EnrichmentStatus::Pending,
                 note_path: None,
+                started_at: None,
+                ended_at: None,
             },
             segments: vec![ArtifactDetailSegment {
                 segment_id: "seg-1".to_string(),
@@ -232,6 +252,7 @@ mod tests {
                 participant_role: None,
                 sequence_no: 1,
                 text_content: "raw text".to_string(),
+                created_at_source: None,
             }],
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
             inbound_note_links: Vec::new(),
@@ -255,6 +276,8 @@ mod tests {
                 source_type: SourceType::ChatGptExport,
                 enrichment_status: EnrichmentStatus::Completed,
                 note_path: None,
+                started_at: None,
+                ended_at: None,
             },
             segments: vec![
                 ArtifactDetailSegment {
@@ -263,6 +286,7 @@ mod tests {
                     participant_role: None,
                     sequence_no: 1,
                     text_content: "one".to_string(),
+                    created_at_source: None,
                 },
                 ArtifactDetailSegment {
                     segment_id: "seg-2".to_string(),
@@ -270,6 +294,7 @@ mod tests {
                     participant_role: None,
                     sequence_no: 2,
                     text_content: "two".to_string(),
+                    created_at_source: None,
                 },
                 ArtifactDetailSegment {
                     segment_id: "seg-3".to_string(),
@@ -277,6 +302,7 @@ mod tests {
                     participant_role: None,
                     sequence_no: 3,
                     text_content: "three".to_string(),
+                    created_at_source: None,
                 },
             ],
             imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
@@ -300,5 +326,80 @@ mod tests {
         assert_eq!(response.segment_limit, 1);
         assert_eq!(response.returned_segment_count, 1);
         assert_eq!(response.segments[0].segment_id, "seg-2");
+    }
+
+    #[test]
+    fn artifact_detail_includes_timestamps_from_conversation_fixture() {
+        // Verifies that started_at and ended_at from ChatGPT export fixtures
+        // flow through to the artifact detail response
+        let service = service_with(Some(ArtifactDetailView {
+            artifact: ArtifactDetailRecord {
+                artifact_id: "artifact-chat-1".to_string(),
+                title: Some("Project planning Q1".to_string()),
+                source_type: SourceType::ChatGptExport,
+                enrichment_status: EnrichmentStatus::Completed,
+                note_path: None,
+                // Timestamps from ChatGPT fixture (RFC3339 format)
+                started_at: Some("2025-03-14T10:22:00Z".to_string()),
+                ended_at: Some("2025-03-14T10:45:00Z".to_string()),
+            },
+            segments: vec![
+                ArtifactDetailSegment {
+                    segment_id: "seg-1".to_string(),
+                    participant_id: Some("user-1".to_string()),
+                    participant_role: Some(ParticipantRole::User),
+                    sequence_no: 1,
+                    text_content: "Let's plan the Q1 project.".to_string(),
+                    created_at_source: Some("2025-03-14T10:22:00Z".to_string()),
+                },
+                ArtifactDetailSegment {
+                    segment_id: "seg-2".to_string(),
+                    participant_id: Some("assistant-1".to_string()),
+                    participant_role: Some(ParticipantRole::Assistant),
+                    sequence_no: 2,
+                    text_content: "I'll help you plan Q1.".to_string(),
+                    created_at_source: Some("2025-03-14T10:23:30Z".to_string()),
+                },
+            ],
+            imported_note_metadata: crate::storage::ImportedNoteMetadata::default(),
+            inbound_note_links: Vec::new(),
+            artifact_links: Vec::new(),
+            derived_objects: vec![],
+        }));
+
+        let response = service
+            .get(ArtifactDetailRequest {
+                artifact_id: "artifact-chat-1".to_string(),
+                include_segments: true,
+                segment_offset: 0,
+                segment_limit: 10,
+            })
+            .unwrap()
+            .unwrap();
+
+        // Verify artifact-level timestamps are populated from fixture
+        assert!(
+            response.started_at.is_some(),
+            "started_at should be non-None for ChatGPT export fixture"
+        );
+        assert!(
+            response.ended_at.is_some(),
+            "ended_at should be non-None for ChatGPT export fixture"
+        );
+        assert_eq!(
+            response.started_at,
+            Some("2025-03-14T10:22:00Z".to_string())
+        );
+        assert_eq!(response.ended_at, Some("2025-03-14T10:45:00Z".to_string()));
+
+        // Verify segment-level timestamps are populated from fixture
+        assert!(
+            response.segments[0].created_at_source.is_some(),
+            "segment created_at_source should be non-None"
+        );
+        assert_eq!(
+            response.segments[0].created_at_source,
+            Some("2025-03-14T10:22:00Z".to_string())
+        );
     }
 }

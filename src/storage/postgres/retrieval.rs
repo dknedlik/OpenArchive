@@ -209,7 +209,9 @@ pub fn search_candidates(
                     'artifact_title' AS match_kind,
                     NULL::text AS derived_object_type,
                     COALESCE(a.title, '') AS snippet,
-                    240 + GREATEST(0, FLOOR(ts_rank_cd(a.title_tsv, {tsquery}) * 100)::int) AS score_hint
+                    240 + GREATEST(0, FLOOR(ts_rank_cd(a.title_tsv, {tsquery}) * 100)::int) AS score_hint,
+                    to_char(a.started_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS started_at,
+                    to_char(a.ended_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS ended_at
                FROM oa_artifact a
               WHERE a.title_tsv @@ {tsquery}{artifact_filter}"
         ));
@@ -219,7 +221,9 @@ pub fn search_candidates(
                     'imported_note_tag' AS match_kind,
                     NULL::text AS derived_object_type,
                     t.raw_tag AS snippet,
-                    380 AS score_hint
+                    380 AS score_hint,
+                    to_char(a.started_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS started_at,
+                    to_char(a.ended_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS ended_at
                FROM oa_artifact_note_tag t
                JOIN oa_artifact a ON a.artifact_id = t.artifact_id
               WHERE t.normalized_tag = lower($1){artifact_filter}"
@@ -230,7 +234,9 @@ pub fn search_candidates(
                     'imported_note_alias' AS match_kind,
                     NULL::text AS derived_object_type,
                     na.alias_text AS snippet,
-                    370 AS score_hint
+                    370 AS score_hint,
+                    to_char(a.started_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS started_at,
+                    to_char(a.ended_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS ended_at
                FROM oa_artifact_note_alias na
                JOIN oa_artifact a ON a.artifact_id = na.artifact_id
               WHERE na.normalized_alias = lower($1){artifact_filter}"
@@ -241,7 +247,9 @@ pub fn search_candidates(
                     'imported_note_path' AS match_kind,
                     NULL::text AS derived_object_type,
                     COALESCE(a.source_conversation_key, '') AS snippet,
-                    220 AS score_hint
+                    220 AS score_hint,
+                    to_char(a.started_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS started_at,
+                    to_char(a.ended_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS ended_at
                FROM oa_artifact a
               WHERE lower(coalesce(a.source_conversation_key, '')) LIKE ('%' || lower($1) || '%'){artifact_filter}"
         ));
@@ -256,7 +264,9 @@ pub fn search_candidates(
                         WHEN lower(coalesce(nl.external_url, '')) LIKE ('%' || lower($1) || '%') THEN 390
                         WHEN lower(coalesce(nl.display_text, '')) LIKE ('%' || lower($1) || '%') THEN 250
                         ELSE 230
-                    END AS score_hint
+                    END AS score_hint,
+                    to_char(a.started_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS started_at,
+                    to_char(a.ended_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS ended_at
                FROM oa_artifact_note_link nl
                JOIN oa_artifact a ON a.artifact_id = nl.artifact_id
               WHERE nl.resolution_status = 'external'
@@ -275,23 +285,21 @@ pub fn search_candidates(
             derived_extra.push_str(&format!(" AND d.derived_object_type = ${idx}"));
         }
         if let Some(idx) = source_type_param {
-            derived_extra.push_str(&format!(
-                " AND d.artifact_id IN (SELECT a2.artifact_id FROM oa_artifact a2 WHERE a2.source_type = ${idx})"
-            ));
+            derived_extra.push_str(&format!(" AND a.source_type = ${idx}"));
         }
         if let Some(idx) = tag_param {
             derived_extra.push_str(&format!(
-                " AND d.artifact_id IN (SELECT a2.artifact_id FROM oa_artifact_note_tag a2 WHERE a2.normalized_tag = ${idx})"
+                " AND EXISTS (SELECT 1 FROM oa_artifact_note_tag a2 WHERE a2.artifact_id = a.artifact_id AND a2.normalized_tag = ${idx})"
             ));
         }
         if let Some(idx) = alias_param {
             derived_extra.push_str(&format!(
-                " AND d.artifact_id IN (SELECT a3.artifact_id FROM oa_artifact_note_alias a3 WHERE a3.normalized_alias = ${idx})"
+                " AND EXISTS (SELECT 1 FROM oa_artifact_note_alias a3 WHERE a3.artifact_id = a.artifact_id AND a3.normalized_alias = ${idx})"
             ));
         }
         if let Some(idx) = path_prefix_param {
             derived_extra.push_str(&format!(
-                " AND d.artifact_id IN (SELECT a4.artifact_id FROM oa_artifact a4 WHERE lower(coalesce(a4.source_conversation_key, '')) LIKE (${} || '%'))",
+                " AND lower(coalesce(a.source_conversation_key, '')) LIKE (${} || '%')",
                 idx
             ));
         }
@@ -301,8 +309,11 @@ pub fn search_candidates(
                     'derived_object' AS match_kind,
                     d.derived_object_type AS derived_object_type,
                     COALESCE(d.title, d.body_text, '') AS snippet,
-                    360 + GREATEST(0, FLOOR(ts_rank_cd(d.search_tsv, {tsquery}) * 100)::int) AS score_hint
+                    360 + GREATEST(0, FLOOR(ts_rank_cd(d.search_tsv, {tsquery}) * 100)::int) AS score_hint,
+                    to_char(a.started_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS started_at,
+                    to_char(a.ended_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS ended_at
                FROM oa_derived_object d
+               JOIN oa_artifact a ON a.artifact_id = d.artifact_id
               WHERE d.object_status = 'active'
                 AND d.search_tsv @@ {tsquery}{derived_extra}"
         ));
@@ -312,23 +323,21 @@ pub fn search_candidates(
         // Segment excerpt branch
         let mut source_join = String::new();
         if let Some(idx) = source_type_param {
-            source_join.push_str(&format!(
-                " AND s.artifact_id IN (SELECT a3.artifact_id FROM oa_artifact a3 WHERE a3.source_type = ${idx})"
-            ));
+            source_join.push_str(&format!(" AND a.source_type = ${idx}"));
         }
         if let Some(idx) = tag_param {
             source_join.push_str(&format!(
-                " AND s.artifact_id IN (SELECT a4.artifact_id FROM oa_artifact_note_tag a4 WHERE a4.normalized_tag = ${idx})"
+                " AND EXISTS (SELECT 1 FROM oa_artifact_note_tag a2 WHERE a2.artifact_id = a.artifact_id AND a2.normalized_tag = ${idx})"
             ));
         }
         if let Some(idx) = alias_param {
             source_join.push_str(&format!(
-                " AND s.artifact_id IN (SELECT a5.artifact_id FROM oa_artifact_note_alias a5 WHERE a5.normalized_alias = ${idx})"
+                " AND EXISTS (SELECT 1 FROM oa_artifact_note_alias a3 WHERE a3.artifact_id = a.artifact_id AND a3.normalized_alias = ${idx})"
             ));
         }
         if let Some(idx) = path_prefix_param {
             source_join.push_str(&format!(
-                " AND s.artifact_id IN (SELECT a6.artifact_id FROM oa_artifact a6 WHERE lower(coalesce(a6.source_conversation_key, '')) LIKE (${} || '%'))",
+                " AND lower(coalesce(a.source_conversation_key, '')) LIKE (${} || '%')",
                 idx
             ));
         }
@@ -338,8 +347,11 @@ pub fn search_candidates(
                     'segment_excerpt' AS match_kind,
                     NULL::text AS derived_object_type,
                     COALESCE(s.text_content, '') AS snippet,
-                    300 + GREATEST(0, FLOOR(ts_rank_cd(s.text_content_tsv, {tsquery}) * 100)::int) AS score_hint
+                    300 + GREATEST(0, FLOOR(ts_rank_cd(s.text_content_tsv, {tsquery}) * 100)::int) AS score_hint,
+                    to_char(a.started_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS started_at,
+                    to_char(a.ended_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS ended_at
                FROM oa_segment s
+               JOIN oa_artifact a ON a.artifact_id = s.artifact_id
               WHERE s.text_content_tsv @@ {tsquery}{source_join}"
         ));
     }
@@ -360,6 +372,8 @@ pub fn search_candidates(
         let match_kind_value: String = row.get(2);
         let snippet: String = row.get(4);
         let score_hint: i32 = row.get(5);
+        let started_at: Option<String> = row.get(6);
+        let ended_at: Option<String> = row.get(7);
 
         let match_kind = match match_kind_value.as_str() {
             "artifact_title" => SearchCandidateKind::ArtifactTitle,
@@ -392,6 +406,8 @@ pub fn search_candidates(
             match_kind,
             snippet,
             score_hint,
+            started_at,
+            ended_at,
         });
     }
 
@@ -549,7 +565,9 @@ fn load_artifact_record(
 ) -> StorageResult<Option<ArtifactDetailRecord>> {
     let row = client
         .query_opt(
-            "SELECT artifact_id, title, source_type, enrichment_status, source_conversation_key
+            "SELECT artifact_id, title, source_type, enrichment_status, source_conversation_key,
+                    to_char(started_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') as started_at,
+                    to_char(ended_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') as ended_at
              FROM oa_artifact
              WHERE artifact_id = $1",
             &[&artifact_id],
@@ -578,6 +596,8 @@ fn load_artifact_record(
             }
         })?,
         note_path: row.get(4),
+        started_at: row.get(5),
+        ended_at: row.get(6),
     }))
 }
 
@@ -592,7 +612,8 @@ fn load_artifact_segments(
                     s.participant_id,
                     p.participant_role,
                     s.sequence_no,
-                    s.text_content
+                    s.text_content,
+                    to_char(s.created_at_source, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') as created_at_source
              FROM oa_segment s
              LEFT JOIN oa_conversation_participant p ON p.participant_id = s.participant_id
              WHERE s.artifact_id = $1
@@ -622,6 +643,7 @@ fn load_artifact_segments(
             participant_role,
             sequence_no: row.get(3),
             text_content: row.get(4),
+            created_at_source: row.get(5),
         });
     }
 

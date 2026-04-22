@@ -383,6 +383,8 @@ mod tests {
             source_type: SourceType::ChatGptExport,
             enrichment_status: status,
             note_path: None,
+            started_at: None,
+            ended_at: None,
         }
     }
 
@@ -393,6 +395,7 @@ mod tests {
             participant_role: None,
             sequence_no: 1,
             text_content: text.to_string(),
+            created_at_source: None,
         }
     }
 
@@ -641,6 +644,8 @@ mod tests {
                 source_type: SourceType::ObsidianVault,
                 enrichment_status: EnrichmentStatus::Completed,
                 note_path: Some("Inbox.md".to_string()),
+                started_at: None,
+                ended_at: None,
             },
             segments: vec![make_segment("seg-1", "hello")],
             imported_note_metadata: crate::storage::ImportedNoteMetadata {

@@ -184,11 +184,19 @@ pub(crate) fn artifacts_command(args: ArtifactsArgs) -> anyhow::Result<()> {
             .title
             .or(artifact.note_path)
             .unwrap_or_else(|| "(untitled)".to_string());
+        // Extract date-only from RFC3339 (e.g., "2025-03-14T10:22:00Z" -> "2025-03-14")
+        let date_str = artifact
+            .created_at_source
+            .as_ref()
+            .map(|ts| ts.split('T').next().unwrap_or(ts))
+            .map(|s| format!(" ({})", s))
+            .unwrap_or_default();
         println!(
-            "{} {} {} {}",
+            "{} {} {}{} {}",
             artifact.artifact_id,
             artifact.source_type,
             artifact.enrichment_status.as_str(),
+            date_str,
             display_title
         );
     }
@@ -258,8 +266,18 @@ pub(crate) fn search_command(args: SearchArgs) -> anyhow::Result<()> {
         } else {
             hit.snippet
         };
+        // Extract date-only from RFC3339 for started_at
+        let date_str = hit
+            .started_at
+            .as_ref()
+            .map(|ts| ts.split('T').next().unwrap_or(ts))
+            .map(|s| format!(" [{}]", s))
+            .unwrap_or_default();
         // Score formatted to 2 decimal places as per requirements
-        println!("{:.2} {} {}", hit.score, match_kind_str, hit.artifact_id);
+        println!(
+            "{:.2} {} {}{}",
+            hit.score, match_kind_str, hit.artifact_id, date_str
+        );
         println!("  {}", snippet);
     }
 
@@ -507,16 +525,38 @@ pub(crate) fn artifact_command(args: ArtifactArgs) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("artifact not found: {}", artifact_id));
     };
 
-    // Header line: id source status title
+    // Header line: id source status [date_range] title
     let display_title = detail
         .title
         .or_else(|| detail.note_path.clone())
         .unwrap_or_else(|| "(untitled)".to_string());
+    // Format date range: 2025-03-14 → 2025-03-15, or just single date, or nothing if None
+    let date_range = match (&detail.started_at, &detail.ended_at) {
+        (Some(start), Some(end)) => {
+            let start_date = start.split('T').next().unwrap_or(start);
+            let end_date = end.split('T').next().unwrap_or(end);
+            if start_date == end_date {
+                format!(" [{}]", start_date)
+            } else {
+                format!(" [{} → {}]", start_date, end_date)
+            }
+        }
+        (Some(start), None) => {
+            let start_date = start.split('T').next().unwrap_or(start);
+            format!(" [{}]", start_date)
+        }
+        (None, Some(end)) => {
+            let end_date = end.split('T').next().unwrap_or(end);
+            format!(" [{}]", end_date)
+        }
+        (None, None) => String::new(),
+    };
     println!(
-        "{} {} {} {}",
+        "{} {} {}{} {}",
         detail.artifact_id,
         detail.source_type.as_str(),
         detail.enrichment_status.as_str(),
+        date_range,
         display_title
     );
 

@@ -46,6 +46,10 @@ pub struct ArchiveSearchHit {
     pub match_kind: SearchMatchKind,
     pub snippet: String,
     pub score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -121,6 +125,8 @@ impl ArchiveSearchService {
                 },
                 snippet: candidate.snippet,
                 score: candidate.score_hint as f32 / 100.0,
+                started_at: candidate.started_at,
+                ended_at: candidate.ended_at,
             })
             .collect::<Vec<_>>();
         let mut hits = group_archive_hits(lexical_hits);
@@ -190,6 +196,8 @@ impl ArchiveSearchService {
                     },
                     snippet,
                     score: result.score.unwrap_or_default(),
+                    started_at: None,
+                    ended_at: None,
                 }
             })
             .collect())
@@ -536,6 +544,8 @@ mod tests {
                 match_kind: SearchCandidateKind::ArtifactTitle,
                 snippet: "ignored".to_string(),
                 score_hint: 300,
+                started_at: None,
+                ended_at: None,
             }],
         }));
 
@@ -560,6 +570,8 @@ mod tests {
                     match_kind: SearchCandidateKind::SegmentExcerpt,
                     snippet: "segment hit".to_string(),
                     score_hint: 100,
+                    started_at: None,
+                    ended_at: None,
                 },
                 ArchiveSearchCandidate {
                     artifact_id: "artifact-1".to_string(),
@@ -569,6 +581,8 @@ mod tests {
                     },
                     snippet: "memory hit".to_string(),
                     score_hint: 200,
+                    started_at: None,
+                    ended_at: None,
                 },
                 ArchiveSearchCandidate {
                     artifact_id: "artifact-3".to_string(),
@@ -576,6 +590,8 @@ mod tests {
                     match_kind: SearchCandidateKind::ArtifactTitle,
                     snippet: "title hit".to_string(),
                     score_hint: 300,
+                    started_at: None,
+                    ended_at: None,
                 },
             ],
         }));
@@ -619,6 +635,8 @@ mod tests {
                     match_kind: SearchCandidateKind::ArtifactTitle,
                     snippet: "title hit".to_string(),
                     score_hint: 300,
+                    started_at: None,
+                    ended_at: None,
                 },
                 ArchiveSearchCandidate {
                     artifact_id: "artifact-2".to_string(),
@@ -628,6 +646,8 @@ mod tests {
                     },
                     snippet: "summary hit".to_string(),
                     score_hint: 200,
+                    started_at: None,
+                    ended_at: None,
                 },
             ],
         }));
@@ -654,6 +674,8 @@ mod tests {
                     match_kind: SearchCandidateKind::SegmentExcerpt,
                     snippet: "segment hit".to_string(),
                     score_hint: 200,
+                    started_at: None,
+                    ended_at: None,
                 },
                 ArchiveSearchCandidate {
                     artifact_id: "artifact-1".to_string(),
@@ -663,6 +685,8 @@ mod tests {
                     },
                     snippet: "summary hit".to_string(),
                     score_hint: 300,
+                    started_at: None,
+                    ended_at: None,
                 },
                 ArchiveSearchCandidate {
                     artifact_id: "artifact-2".to_string(),
@@ -670,6 +694,8 @@ mod tests {
                     match_kind: SearchCandidateKind::ArtifactTitle,
                     snippet: "title hit".to_string(),
                     score_hint: 250,
+                    started_at: None,
+                    ended_at: None,
                 },
             ],
         }));
@@ -702,6 +728,8 @@ mod tests {
                 match_kind: SearchCandidateKind::ImportedExternalLink,
                 snippet: "obsidian://show-plugin?id=obsidian-importer".to_string(),
                 score_hint: 390,
+                started_at: None,
+                ended_at: None,
             }],
         }));
 
